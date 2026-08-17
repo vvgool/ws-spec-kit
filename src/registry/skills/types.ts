@@ -41,6 +41,12 @@ export interface SkillLockFallback {
   digest: string;
 }
 
+export type SkillLockSelection = "primary" | "fallback";
+
+export interface SkillLockSelected extends SkillLockFallback {
+  provider: SkillProvider;
+}
+
 export interface SkillLockEntry {
   requested: string;
   resolved: string;
@@ -51,6 +57,8 @@ export interface SkillLockEntry {
   candidates: SkillCandidate[];
   required: boolean;
   fallback?: SkillLockFallback;
+  selection: SkillLockSelection;
+  selected: SkillLockSelected;
 }
 
 export interface SkillLock {

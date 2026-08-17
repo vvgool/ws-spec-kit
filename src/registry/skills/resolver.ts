@@ -258,6 +258,7 @@ export function resolveSkill(binding: WorkflowSkillBinding & { required?: true }
 export function resolveSkill(binding: WorkflowSkillBinding, context: SkillResolverContext): Promise<ResolvedSkill | undefined>;
 export async function resolveSkill(binding: WorkflowSkillBinding, context: SkillResolverContext): Promise<ResolvedSkill | undefined> {
   if (context.stepStatus !== "not_started" && context.stepStatus !== "started") error("WSSPEC_SKILL_CONTEXT_INVALID", "Skill Resolver 必须显式声明 Step 状态。");
+  if (context.stepStatus === "started" && context.lock === undefined) error("WSSPEC_SKILL_LOCK_CHANGED", "已开始的 Step 必须提供 Skill Lock。");
   const requested = parseSkillRef(binding.ref);
   if (binding.fallback !== undefined) {
     const fallbackRef = parseSkillRef(binding.fallback);
@@ -282,25 +283,30 @@ export async function resolveSkill(binding: WorkflowSkillBinding, context: Skill
 
   if (locked !== undefined) assertFallbackLock(locked, binding, fallback);
 
-  let selected = primary;
+  let selected: ResolvedReference | undefined;
   let usedFallback = false;
-  if (primary !== undefined) {
-    if (locked !== undefined) assertPrimaryLock(locked, primary);
-  } else if (fallback !== undefined) {
+  if (locked?.selection === "fallback") {
     selected = fallback;
     usedFallback = true;
-    if (context.stepStatus === "started" && (locked === undefined || locked.digest !== undefined)) {
-      error("WSSPEC_SKILL_LOCK_CHANGED", "已开始的 Step 只能继续使用已锁定的 fallback。");
-    }
+  } else if (primary !== undefined) {
+    selected = primary;
+    if (locked !== undefined) assertPrimaryLock(locked, primary);
+  } else if (fallback !== undefined && context.stepStatus === "not_started") {
+    selected = fallback;
+    usedFallback = true;
+  } else if (locked?.selection === "primary") {
+    error("WSSPEC_SKILL_LOCK_CHANGED", "已开始的 Step 无法恢复 Lock 选定的主项。");
   }
   if (selected === undefined) {
     if (!required) return undefined;
     error("WSSPEC_SKILL_NOT_FOUND", `找不到必需 Skill ${binding.ref}${binding.fallback === undefined ? "" : " 或其 fallback"}。`);
   }
 
-  const resolvedPrimary = primary === undefined
-    ? (locked === undefined ? undefined : lockedPrimaryDescriptor(locked))
-    : primaryDescriptor(primary);
+  const resolvedPrimary = locked?.selection === "fallback"
+    ? lockedPrimaryDescriptor(locked)
+    : primary === undefined
+      ? (locked === undefined ? undefined : lockedPrimaryDescriptor(locked))
+      : primaryDescriptor(primary);
 
   return {
     requestedRef: binding.ref,

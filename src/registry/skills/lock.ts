@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { ResolvedSkill, ResolvedSkillFallback, ResolvedSkillPrimary, SkillCandidate, SkillLock, SkillLockEntry, SkillProvider, SkillSource } from "./types.js";
+import type { ResolvedSkill, ResolvedSkillFallback, ResolvedSkillPrimary, SkillCandidate, SkillLock, SkillLockEntry, SkillLockSelected, SkillProvider, SkillSource } from "./types.js";
 import { SkillResolutionError } from "./types.js";
 
 const providers = ["codex", "claude", "cursor", "generic"] as const;
@@ -35,6 +35,11 @@ function provider(value: unknown, label: string): SkillProvider {
 function source(value: unknown, label: string): SkillSource {
   if (!sources.includes(value as SkillSource)) invalid(`${label} 不是受支持来源。`);
   return value as SkillSource;
+}
+
+function selection(value: unknown, label: string): SkillLockEntry["selection"] {
+  if (value !== "primary" && value !== "fallback") invalid(`${label} 不是受支持的选择状态。`);
+  return value;
 }
 
 function skillRef(value: unknown, label: string): { ref: string; source: SkillSource } {
@@ -94,9 +99,24 @@ function fallback(value: unknown, host: SkillProvider, label: string): SkillLock
   };
 }
 
+function selected(value: unknown, label: string): SkillLockSelected {
+  const item = record(value, label, ["ref", "source", "provider", "rootId", "digest"]);
+  const parsedRef = skillRef(item.ref, `${label}.ref`);
+  const itemSource = source(item.source, `${label}.source`);
+  const host = provider(item.provider, `${label}.provider`);
+  if (parsedRef.source !== itemSource) invalid(`${label} ref 与 source 不一致。`);
+  return {
+    ref: parsedRef.ref,
+    source: itemSource,
+    provider: host,
+    rootId: rootId(item.rootId, itemSource, host, `${label}.rootId`),
+    digest: digest(item.digest, `${label}.digest`),
+  };
+}
+
 function lockEntry(value: unknown, index: number): SkillLockEntry {
   const label = `Skill Lock skills[${index}]`;
-  const item = record(value, label, ["requested", "resolved", "source", "provider", "rootId", "digest", "candidates", "required", "fallback"]);
+  const item = record(value, label, ["requested", "resolved", "source", "provider", "rootId", "digest", "candidates", "required", "fallback", "selection", "selected"]);
   const requested = skillRef(item.requested, `${label}.requested`);
   const resolved = skillRef(item.resolved, `${label}.resolved`);
   const itemSource = source(item.source, `${label}.source`);
@@ -117,6 +137,19 @@ function lockEntry(value: unknown, index: number): SkillLockEntry {
   const lockedFallback = item.fallback === undefined ? undefined : fallback(item.fallback, host, `${label}.fallback`);
   if (lockedFallback !== undefined && itemSource !== "global") invalid(`${label} 只有 Global 主项可以声明 fallback。`);
   if (lockedRoot === undefined && lockedFallback === undefined) invalid(`${label} 必须锁定主项或 fallback。`);
+  const lockedSelection = selection(item.selection, `${label}.selection`);
+  const lockedSelected = selected(item.selected, `${label}.selected`);
+  const selectedBaseline = lockedSelection === "primary"
+    ? (lockedRoot === undefined ? undefined : { ref: requested.ref, source: itemSource, rootId: lockedRoot, digest: lockedDigest! })
+    : lockedFallback;
+  if (selectedBaseline === undefined
+    || lockedSelected.provider !== host
+    || lockedSelected.ref !== selectedBaseline.ref
+    || lockedSelected.source !== selectedBaseline.source
+    || lockedSelected.rootId !== selectedBaseline.rootId
+    || lockedSelected.digest !== selectedBaseline.digest) {
+    invalid(`${label}.selected 与 selection 指定的基线不一致。`);
+  }
   return {
     requested: requested.ref,
     resolved: resolved.ref,
@@ -126,6 +159,8 @@ function lockEntry(value: unknown, index: number): SkillLockEntry {
     candidates: lockedCandidates,
     required: boolean(item.required, `${label}.required`),
     ...(lockedFallback === undefined ? {} : { fallback: lockedFallback }),
+    selection: lockedSelection,
+    selected: lockedSelected,
   };
 }
 
@@ -213,6 +248,14 @@ export function createSkillLock(resolved: ResolvedSkill | readonly ResolvedSkill
       candidates: item.primary?.candidates ?? [],
       required: item.required,
       ...(item.fallback === undefined ? {} : { fallback: { ...item.fallback } }),
+      selection: item.usedFallback ? "fallback" : "primary",
+      selected: {
+        ref: item.ref,
+        source: item.source,
+        provider: item.provider,
+        rootId: item.rootId,
+        digest: item.digest,
+      },
     };
   });
   return parseSkillLock({ version: 1, skills: entries });

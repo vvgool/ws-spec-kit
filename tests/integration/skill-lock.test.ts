@@ -135,8 +135,10 @@ test("缺失 Global 只能使用 Workflow 声明且与既有锁一致的 fallbac
   );
 });
 
-test("已开始 Step 没有既有 Lock 时不得首次选择 fallback", async () => {
+test("已开始 Step 没有既有 Lock 时不得首次选择主项或 fallback", async () => {
   const root = await temporaryRoot();
+  const globalRoot = path.join(root, "global");
+  await writeSkill(globalRoot, "vendor/tdd", { "SKILL.md": "# Global\n" });
   await packageFixture(root);
   const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/fixture" });
   const binding = { ref: "global://vendor/tdd", fallback: "builtin://skills/tdd-implementation", required: true } as const;
@@ -145,9 +147,16 @@ test("已开始 Step 没有既有 Lock 时不得首次选择 fallback", async ()
     projectRoot: root,
     home: path.join(root, "home"),
     package: pkg,
+    additionalGlobalRoots: [globalRoot],
     stepStatus: "started",
   };
 
+  await assert.rejects(
+    resolveSkill(binding, resolverContext),
+    /WSSPEC_SKILL_LOCK_CHANGED/,
+  );
+
+  await rm(globalRoot, { recursive: true });
   await assert.rejects(
     resolveSkill(binding, resolverContext),
     /WSSPEC_SKILL_LOCK_CHANGED/,
@@ -245,6 +254,8 @@ test("已锁主项消失后仅允许未开始 Step 切到完全匹配的已锁 f
   };
   const primary = await resolveSkill(binding, resolverContext);
   const lock = createSkillLock(primary!);
+  assert.equal(lock.skills[0]?.selection, "primary");
+  assert.equal(lock.skills[0]?.selected?.ref, binding.ref);
   resolverContext.lock = lock;
   await rm(globalRoot, { recursive: true });
 
@@ -255,11 +266,41 @@ test("已锁主项消失后仅允许未开始 Step 切到完全匹配的已锁 f
   assert.equal(relocked.skills[0]?.resolved, binding.ref);
   assert.equal(relocked.skills[0]?.digest, lock.skills[0]?.digest);
   assert.deepEqual(relocked.skills[0]?.candidates, lock.skills[0]?.candidates);
+  assert.equal(relocked.skills[0]?.selection, "fallback");
+  assert.equal(relocked.skills[0]?.selected?.ref, binding.fallback);
 
   await assert.rejects(
     resolveSkill(binding, { ...resolverContext, stepStatus: "started" }),
     /WSSPEC_SKILL_LOCK_CHANGED/,
   );
+
+  const resumed = await resolveSkill(binding, { ...resolverContext, lock: relocked, stepStatus: "started" });
+  assert.equal(resumed?.usedFallback, true);
+  assert.equal(resumed?.ref, binding.fallback);
+});
+
+test("已锁 fallback 在主项恢复后仍按 selection 继续执行 fallback", async () => {
+  const root = await temporaryRoot();
+  const globalRoot = path.join(root, "global");
+  await packageFixture(root);
+  const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/fixture" });
+  const binding = { ref: "global://vendor/tdd", fallback: "builtin://skills/tdd-implementation", required: true } as const;
+  const resolverContext: SkillResolverContext = {
+    provider: "generic",
+    projectRoot: root,
+    home: path.join(root, "home"),
+    package: pkg,
+    additionalGlobalRoots: [globalRoot],
+    stepStatus: "not_started",
+  };
+  const fallback = await resolveSkill(binding, resolverContext);
+  const lock = createSkillLock(fallback!);
+  assert.equal(lock.skills[0]?.selection, "fallback");
+
+  await writeSkill(globalRoot, "vendor/tdd", { "SKILL.md": "# Global\n" });
+  const resumed = await resolveSkill(binding, { ...resolverContext, lock, stepStatus: "started" });
+  assert.equal(resumed?.usedFallback, true);
+  assert.equal(resumed?.ref, binding.fallback);
 });
 
 test("主项命中时仍拒绝 fallback 声明或锁定摘要漂移", async () => {
@@ -305,6 +346,8 @@ test("Skill Lock v1 parser 递归拒绝版本、未知字段和非法逻辑值",
       candidates: [{ rootId: "codex:default:0", digest }],
       required: true,
       fallback: { ref: "builtin://skills/tdd-implementation", source: "builtin", rootId: "builtin", digest },
+      selection: "primary",
+      selected: { ref: "global://vendor/tdd", source: "global", provider: "codex", rootId: "codex:default:0", digest },
     }],
   };
   const parseSkillLock = (skillLockModule as unknown as { parseSkillLock(value: unknown): SkillLock }).parseSkillLock;
@@ -316,6 +359,7 @@ test("Skill Lock v1 parser 递归拒绝版本、未知字段和非法逻辑值",
     { ...valid, skills: [{ ...valid.skills[0], unknown: true }] },
     { ...valid, skills: [{ ...valid.skills[0], candidates: [{ ...valid.skills[0]!.candidates[0], unknown: true }] }] },
     { ...valid, skills: [{ ...valid.skills[0], fallback: { ...valid.skills[0]!.fallback, unknown: true } }] },
+    { ...valid, skills: [{ ...valid.skills[0], selected: { ...valid.skills[0]!.selected, unknown: true } }] },
     { ...valid, skills: [{ ...valid.skills[0], requested: "global://../escape" }] },
     { ...valid, skills: [{ ...valid.skills[0], digest: "sha256:short" }] },
     { ...valid, skills: [{ ...valid.skills[0], provider: "unknown" }] },
@@ -339,6 +383,36 @@ test("Skill Lock v1 parser 递归拒绝版本、未知字段和非法逻辑值",
       }],
     },
     { ...valid, skills: [{ ...valid.skills[0], entrypoint: "/secret/home/SKILL.md" }] },
+  ]) {
+    assert.throws(() => parseSkillLock(invalid), /WSSPEC_SKILL_LOCK_INVALID/);
+  }
+});
+
+test("Skill Lock parser 拒绝 selection 与 selected 基线组合被篡改", () => {
+  const digest = `sha256:${"a".repeat(64)}`;
+  const valid = {
+    version: 1,
+    skills: [{
+      requested: "global://vendor/tdd",
+      resolved: "global://vendor/tdd",
+      source: "global",
+      provider: "codex",
+      rootId: "codex:default:0",
+      digest,
+      candidates: [{ rootId: "codex:default:0", digest }],
+      required: true,
+      fallback: { ref: "builtin://skills/tdd-implementation", source: "builtin", rootId: "builtin", digest },
+      selection: "primary",
+      selected: { ref: "global://vendor/tdd", source: "global", provider: "codex", rootId: "codex:default:0", digest },
+    }],
+  };
+  const parseSkillLock = (skillLockModule as unknown as { parseSkillLock(value: unknown): SkillLock }).parseSkillLock;
+
+  for (const invalid of [
+    { ...valid, skills: [{ ...valid.skills[0], selected: { ...valid.skills[0]!.selected, ref: "global://vendor/other" } }] },
+    { ...valid, skills: [{ ...valid.skills[0], selected: { ...valid.skills[0]!.selected, digest: `sha256:${"0".repeat(64)}` } }] },
+    { ...valid, skills: [{ ...valid.skills[0], selected: { ...valid.skills[0]!.selected, provider: "generic", rootId: "generic:additional:0" } }] },
+    { ...valid, skills: [{ ...valid.skills[0], selection: "fallback" }] },
   ]) {
     assert.throws(() => parseSkillLock(invalid), /WSSPEC_SKILL_LOCK_INVALID/);
   }
