@@ -87,6 +87,157 @@ test("公开协议文案 sink 覆盖 description、引号属性和变量结果�
   assert.deepEqual(build, [{ filename: "dist/application/example.js", line: 1, text: "Unexpected built description" }]);
 });
 
+test("公开文案标识符按函数和嵌套块的真实词法绑定解析", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/scoped.ts",
+      content: [
+        "function publicResult() {",
+        '  const message = "Unexpected scoped source message";',
+        "  return completed(workItemId, status, message);",
+        "}",
+        "function unrelated() {",
+        '  const message = "中文消息";',
+        "  return { message };",
+        "}",
+        "{",
+        '  const description = "Unexpected nested source description";',
+        "  consume({ description });",
+        "}",
+        "{",
+        '  const description = "中文描述";',
+        "  consume({ description });",
+        "}",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/scoped.js",
+      content: [
+        "function publicResult() {",
+        '  const description = "Unexpected scoped built description";',
+        "  return { description };",
+        "}",
+        "function unrelated() {",
+        '  const description = "中文描述";',
+        "  return { description };",
+        "}",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/scoped.ts", line: 2, text: "Unexpected scoped source message" },
+    { filename: "src/application/scoped.ts", line: 10, text: "Unexpected nested source description" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/scoped.js", line: 2, text: "Unexpected scoped built description" },
+  ]);
+});
+
+test("公开文案标识符跟踪声明后赋值和多段别名链", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/assigned.ts",
+      content: [
+        "let original;",
+        'original = "Unexpected assigned source message";',
+        "const alias = original;",
+        "const message = alias;",
+        "completed(workItemId, status, message);",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/assigned.js",
+      content: [
+        "let original;",
+        'original = "Unexpected assigned built description";',
+        "const alias = original;",
+        "const description = alias;",
+        "consume({ description });",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/assigned.ts", line: 2, text: "Unexpected assigned source message" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/assigned.js", line: 2, text: "Unexpected assigned built description" },
+  ]);
+});
+
+test("公开文案别名循环或无绑定时 fail closed，但协议标识不误报", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/unresolved.ts",
+      content: [
+        "let first = second;",
+        "let second = first;",
+        "completed(workItemId, status, second);",
+        "consume({ description: missingDescription });",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/unresolved.js",
+      content: [
+        "let first = second;",
+        "let second = first;",
+        "completed(workItemId, status, second);",
+        "consume({ description: missingDescription });",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/unresolved.ts", line: 3, text: "无法安全解析公开文案：second" },
+    { filename: "src/application/unresolved.ts", line: 4, text: "无法安全解析公开文案：missingDescription" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/unresolved.js", line: 3, text: "无法安全解析公开文案：second" },
+    { filename: "dist/application/unresolved.js", line: 4, text: "无法安全解析公开文案：missingDescription" },
+  ]);
+});
+
+test("公开文案保守合并循环中可能到达的赋值", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/loop.ts",
+      content: [
+        'let message = "中文消息";',
+        "while (more) {",
+        '  message = "Unexpected loop source message";',
+        "}",
+        "completed(workItemId, status, message);",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/loop.js",
+      content: [
+        'let description = "中文描述";',
+        "while (more) {",
+        '  description = "Unexpected loop built description";',
+        "}",
+        "consume({ description });",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/loop.ts", line: 3, text: "Unexpected loop source message" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/loop.js", line: 3, text: "Unexpected loop built description" },
+  ]);
+});
+
 test("源码用户文案中的模板插值属于运行时代码而非英文文案", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-chinese-template-"));
   await mkdir(path.join(root, "src", "cli"), { recursive: true });
