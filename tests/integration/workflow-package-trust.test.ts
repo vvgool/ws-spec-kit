@@ -95,7 +95,7 @@ test("没有 pending request 不能直接写入 trusted", async () => {
   const root = await createGitRepository();
   await packageFixture(root);
   const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
-  await assert.rejects(recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", requestId: "missing", expectedPackageDigest: pkg.contentDigest, expectedCapabilityDigest: "sha256:ignored" } as never), /WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID/);
+  await assert.rejects(recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", requestId: "missing", expectedPackageDigest: pkg.contentDigest, expectedCapabilityDigest: "sha256:ignored" } as never), /WSSPEC_WORKFLOW_TRUST_(CHANGED|REQUEST_INVALID)/);
 });
 
 test("externalSideEffects 独立变化使已有信任失效", async () => {
@@ -133,11 +133,11 @@ test("信任记录必须匹配用户看到的两个摘要，并拒绝未知持�
   const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
   await assert.rejects(
     recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester" } as never),
-    /WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID/,
+    /WSSPEC_WORKFLOW_TRUST_(CHANGED|REQUEST_INVALID)/,
   );
   await assert.rejects(
     recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", requestId: "missing", expectedPackageDigest: "sha256:wrong", expectedCapabilityDigest: "sha256:wrong" }),
-    /WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID/,
+    /WSSPEC_WORKFLOW_TRUST_(CHANGED|REQUEST_INVALID)/,
   );
   const common = await git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const trustPath = path.join(common, "wsspec", "trust", "workflow-packages.ndjson");

@@ -12,6 +12,7 @@ export class WorkflowTrustStoreError extends Error {
 }
 
 interface TrustLockOwner { version: 1; ownerToken: string; pid: number; hostname: string; createdAt: string }
+export interface PendingWorkflowTrustRequest { requestId: string; packageRef: string; packageDigest: string; capabilityDigest: string; createdAt: string; expiresAt: string; status: "pending" | "consumed" }
 
 async function readTrustLock(lockPath: string): Promise<TrustLockOwner | undefined> {
   try {
@@ -29,6 +30,8 @@ function processIsAlive(pid: number): boolean {
 export async function workflowTrustPath(root: string): Promise<string> {
   return path.join(await gitCommonDir(root), "wsspec", "trust", "workflow-packages.ndjson");
 }
+
+async function pendingTrustPath(root: string): Promise<string> { return `${await workflowTrustPath(root)}.pending.ndjson`; }
 
 async function withTrustLock<T>(target: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = `${target}.lock`;
@@ -104,6 +107,49 @@ export async function appendWorkflowTrustRecord(root: string, record: WorkflowTr
     const handle = await open(target, "a", 0o600);
     try { await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8"); await handle.sync(); }
     finally { await handle.close(); }
+    return record;
+  });
+}
+
+function parsePending(value: unknown): PendingWorkflowTrustRequest | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  if (Object.keys(item).some((key) => !["requestId", "packageRef", "packageDigest", "capabilityDigest", "createdAt", "expiresAt", "status"].includes(key))) return undefined;
+  if (typeof item.requestId !== "string" || typeof item.packageRef !== "string" || typeof item.packageDigest !== "string" || typeof item.capabilityDigest !== "string" || typeof item.createdAt !== "string" || typeof item.expiresAt !== "string" || (item.status !== "pending" && item.status !== "consumed")) return undefined;
+  return item as unknown as PendingWorkflowTrustRequest;
+}
+
+async function readPending(target: string): Promise<PendingWorkflowTrustRequest[]> {
+  try {
+    return (await readFile(target, "utf8")).split("\n").filter(Boolean).map((line) => parsePending(JSON.parse(line))).map((item) => {
+      if (item === undefined) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow 信任待决记录无效。");
+      return item;
+    });
+  } catch (caught) { if ((caught as NodeJS.ErrnoException).code === "ENOENT") return []; throw caught; }
+}
+
+export async function createWorkflowTrustRequest(root: string, request: PendingWorkflowTrustRequest): Promise<void> {
+  const target = await workflowTrustPath(root);
+  return withTrustLock(target, async () => {
+    const pending = await pendingTrustPath(root);
+    const handle = await open(pending, "a", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(request)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
+  });
+}
+
+export async function consumeWorkflowTrustRequest(root: string, requestId: string, packageRef: string, packageDigest: string, capabilityDigest: string, record: WorkflowTrustRecord): Promise<WorkflowTrustRecord> {
+  const target = await workflowTrustPath(root);
+  return withTrustLock(target, async () => {
+    const pendingPath = await pendingTrustPath(root);
+    const pending = await readPending(pendingPath);
+    const index = pending.findIndex((item) => item.requestId === requestId);
+    const request = pending[index];
+    if (request === undefined || request.status !== "pending" || request.expiresAt <= new Date().toISOString() || request.packageRef !== packageRef || request.packageDigest !== packageDigest || request.capabilityDigest !== capabilityDigest) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow Package 信任请求不存在、已消费、已过期或已变化。");
+    pending[index] = { ...request, status: "consumed" };
+    const rewrite = await open(pendingPath, "w", 0o600);
+    try { await rewrite.writeFile(`${pending.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8"); await rewrite.sync(); } finally { await rewrite.close(); }
+    const handle = await open(target, "a", 0o600);
+    try { await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
     return record;
   });
 }
