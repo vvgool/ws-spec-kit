@@ -12,7 +12,7 @@ export interface RiskRule {
 }
 
 export interface RiskEvaluationInput {
-  workflow?: "feature" | "documentation-only";
+  workflow: "feature" | "documentation-only";
   issueLabels: string[];
   requirementRisk: RiskLevel | null;
   affectedPaths: string[];
@@ -53,9 +53,15 @@ const builtinRules: RiskRule[] = [
 ];
 
 export class RiskPolicyError extends Error {
-  constructor(readonly code: "WSSPEC_RISK_RULE_INVALID", readonly path: string, message: string) {
+  constructor(readonly code: "WSSPEC_RISK_RULE_INVALID" | "WSSPEC_RISK_WORKFLOW_INVALID", readonly path: string, message: string) {
     super(`${code} ${path}: ${message}`);
     this.name = "RiskPolicyError";
+  }
+}
+
+function validateWorkflow(workflow: unknown): asserts workflow is RiskEvaluationInput["workflow"] {
+  if (workflow !== "feature" && workflow !== "documentation-only") {
+    throw new RiskPolicyError("WSSPEC_RISK_WORKFLOW_INVALID", "/workflow", "Workflow 必须是 feature 或 documentation-only。");
   }
 }
 
@@ -117,16 +123,16 @@ function documentationOnly(input: RiskEvaluationInput): boolean {
 }
 
 export function evaluateRiskRules(input: RiskEvaluationInput): RiskEvaluation {
+  validateWorkflow(input.workflow);
   for (const [index, rule] of (input.rules ?? []).entries()) validateCustomRule(rule, index);
   const rules = [...builtinRules, ...(input.rules ?? [])];
   const matched = rules.filter((rule) => matchesRule(rule, input));
-  const isDocumentation = input.workflow === "documentation-only" || documentationOnly(input);
-  if (matched.length === 0 && isDocumentation) {
+  if (matched.length === 0 && documentationOnly(input)) {
     return {
       risk: "low",
       minimum: "quick",
       matchedRules: ["documentation-only"],
-      affectedSteps: ["clarify", "plan", "review-fix", "verify-document"],
+      affectedSteps: [...(input.workflow === "documentation-only" ? documentationInvalidation.quick : featureInvalidation.quick)],
     };
   }
   if (matched.length === 0) {
@@ -139,7 +145,7 @@ export function evaluateRiskRules(input: RiskEvaluationInput): RiskEvaluation {
     return { risk: hasEvidence ? "medium" : null, minimum: "standard", matchedRules: [], affectedSteps: [] };
   }
   const minimum = matched.reduce<ProfileId>((current, rule) => strength[rule.minimum] > strength[current] ? rule.minimum : current, "quick");
-  const affectedSteps = isDocumentation ? documentationInvalidation[minimum] : featureInvalidation[minimum];
+  const affectedSteps = input.workflow === "documentation-only" ? documentationInvalidation[minimum] : featureInvalidation[minimum];
   return {
     risk: minimum === "quick" ? "low" : minimum === "standard" ? "medium" : "high",
     minimum,

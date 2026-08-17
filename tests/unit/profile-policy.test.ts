@@ -31,6 +31,7 @@ test("automatic upgrade is one-way and returns affected Steps without mutating R
 });
 
 const neutralRisk: RiskEvaluationInput = {
+  workflow: "feature",
   issueLabels: [],
   requirementRisk: null,
   affectedPaths: [],
@@ -55,7 +56,7 @@ test("risk rules read every deterministic signal and choose the strictest minimu
   }
 });
 
-test("risk remains unknown before evidence exists and documentation-only evidence is low", () => {
+test("risk remains unknown before evidence exists", () => {
   assert.deepEqual(evaluateRiskRules(neutralRisk), { risk: null, minimum: "standard", matchedRules: [], affectedSteps: [] });
   assert.deepEqual(evaluateRiskRules({ ...neutralRisk, requirementRisk: "low" }), {
     risk: "low",
@@ -63,12 +64,38 @@ test("risk remains unknown before evidence exists and documentation-only evidenc
     matchedRules: ["low-requirement"],
     affectedSteps: ["clarify", "plan", "review-fix", "verify-green"],
   });
+});
+
+test("documentation path evidence keeps the explicit feature Workflow invalidation map", () => {
   assert.deepEqual(evaluateRiskRules({
     ...neutralRisk,
     affectedPaths: ["docs/guide.md"],
     modifiedPaths: ["README.md"],
     fileTypes: ["md"],
-  }), { risk: "low", minimum: "quick", matchedRules: ["documentation-only"], affectedSteps: ["clarify", "plan", "review-fix", "verify-document"] });
+  }), { risk: "low", minimum: "quick", matchedRules: ["documentation-only"], affectedSteps: ["clarify", "plan", "review-fix", "verify-green"] });
+});
+
+test("builtin governed risk keeps the explicit feature Workflow invalidation map for documentation paths", () => {
+  const result = evaluateRiskRules({
+    ...neutralRisk,
+    requirementRisk: "high",
+    affectedPaths: ["docs/security.md"],
+    fileTypes: ["md"],
+  });
+
+  assert.deepEqual(result.affectedSteps, ["close", "commit", "design", "plan", "review-fix", "verify-green"]);
+});
+
+test("custom governed risk keeps the explicit feature Workflow invalidation map for documentation paths", () => {
+  const result = evaluateRiskRules({
+    ...neutralRisk,
+    issueLabels: ["regulated-docs"],
+    affectedPaths: ["docs/policy.md"],
+    fileTypes: ["md"],
+    rules: [{ id: "regulated-docs", labels: ["regulated-docs"], minimum: "governed" }],
+  });
+
+  assert.deepEqual(result.affectedSteps, ["close", "commit", "design", "plan", "review-fix", "verify-green"]);
 });
 
 test("custom project rules match all declared selectors and use the fixed Workflow invalidation map", () => {
@@ -117,6 +144,31 @@ test("documentation custom governed rules return only documentation Workflow Ste
 
   assert.deepEqual(result.affectedSteps, ["clarify", "close", "commit", "plan", "review-fix", "verify-document"]);
   assert.ok(!result.affectedSteps.includes("verify-green"));
+});
+
+test("documentation Workflow keeps its invalidation map when sensitive paths raise risk", () => {
+  const result = evaluateRiskRules({
+    ...neutralRisk,
+    workflow: "documentation-only",
+    affectedPaths: ["src/auth/session.ts"],
+    fileTypes: ["ts"],
+  });
+
+  assert.equal(result.minimum, "governed");
+  assert.deepEqual(result.affectedSteps, ["clarify", "close", "commit", "plan", "review-fix", "verify-document"]);
+});
+
+test("risk evaluation rejects missing and unknown Workflow kinds", () => {
+  for (const workflow of [undefined, "maintenance"]) {
+    assert.throws(() => evaluateRiskRules({
+      ...neutralRisk,
+      workflow,
+    } as unknown as RiskEvaluationInput), (error: unknown) => error instanceof Error
+      && "code" in error
+      && "path" in error
+      && error.code === "WSSPEC_RISK_WORKFLOW_INVALID"
+      && error.path === "/workflow");
+  }
 });
 
 test("custom risk rules cannot inject affected Step IDs", () => {
