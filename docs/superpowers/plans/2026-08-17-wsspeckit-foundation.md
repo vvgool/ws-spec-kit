@@ -23,7 +23,7 @@
 
 ## 计划边界
 
-本计划交付可本地验证的 `init -> start -> acquire -> submit -> decide -> inspect` 基础链路，以及 Prompt/本地文件需求采集和 Workflow 管理命令。以下能力拆分为后续独立计划：有界循环运行、真实 GitLab/飞书/Wiki Connector、完整交付动作和最终发布。后续计划只能依赖本计划冻结的四组接口：
+本计划交付可本地验证的 `init -> start -> acquire -> submit -> decide -> inspect` 基础链路，以及 Prompt/本地文件需求采集和 Workflow 管理命令。以下能力拆分为后续独立计划：有界循环运行、真实 GitHub/GitLab/飞书 Connector、完整交付动作和最终发布。后续计划只能依赖本计划冻结的四组接口：
 
 1. Task 2 的 `WSSpecApplication`、`AgentAction` 和 `WorkPackage`。
 2. Task 4-5 的 `WorkflowPackage`、`ResolvedSkill` 和 `SkillLock`。
@@ -298,7 +298,8 @@ git commit -m "feat: load and lock workflow packages"
 
 - [ ] **步骤 1：编写失败的三层解析测试**
 
-覆盖 Builtin、Project、配置的 Global 目录、显式 fallback、可选缺失、必需缺失、摘要变化、路径逃逸和符号链接逃逸。
+覆盖 Builtin、Project、四种 Provider 默认 Global 根、附加 Global 根、显式 fallback、
+可选缺失、必需缺失、相同摘要重复项、不同摘要歧义、摘要变化、路径逃逸和符号链接逃逸。
 
 ```ts
 const result = await resolveSkill(
@@ -321,8 +322,11 @@ export interface ResolvedSkill {
   requestedRef: string;
   ref: string;
   source: "builtin" | "global" | "project";
+  provider: "codex" | "claude" | "cursor" | "generic";
+  rootId: string;
   entrypoint: string;
   digest: string;
+  candidates: Array<{ rootId: string; digest: string }>;
   required: boolean;
   usedFallback: boolean;
 }
@@ -330,9 +334,15 @@ export interface ResolvedSkill {
 
 Builtin/Project Skill 可进入 Work Item 快照；Global Skill 只记录逻辑引用、Provider 和摘要。不得搜索同名替代品。
 
+实现固定默认根：Codex 为 `~/.agents/skills`，Claude 为 `~/.claude/skills`，Cursor
+为 `~/.agents/skills`、`~/.cursor/skills`、`~/.claude/skills`、`~/.codex/skills`，
+Generic 无默认根。再追加 `skills.additionalGlobalRoots`。测试使用临时 HOME，验证多个候选
+摘要不同时返回 `WSSPEC_SKILL_AMBIGUOUS`，摘要相同时按根顺序选择但保留候选诊断。
+
 - [ ] **步骤 4：实现摘要变化和 fallback 规则**
 
 必需 Global Skill 内容变化返回 `WSSPEC_SKILL_LOCK_CHANGED`；缺失时只能使用 Workflow 已声明且已锁定的 fallback。
+URI 逐段校验，真实路径必须保持在根内；Work Item、事件和 Lock 不得写入临时 HOME 绝对路径。
 
 - [ ] **步骤 5：运行 Resolver、锁和类型测试**
 
@@ -372,6 +382,9 @@ assert.equal(selectProfile({ mode: "auto", phase: "post-explore", risk: null }).
 assert.equal(evaluateProfileUpgrade({ current: "standard", minimum: "quick" }).profile, "standard");
 assert.equal(evaluateProfileUpgrade({ current: "standard", minimum: "governed" }).profile, "governed");
 ```
+
+同时断言 Quick 只跳过独立 `design`，仍启用 `plan` 并要求 `artifactLevel: "compact"`；
+`implement` 缺少 `tasks` 时编译失败。
 
 - [ ] **步骤 3：运行测试，确认旧固定 Kind 编译器失败**
 
@@ -458,7 +471,7 @@ export interface StepExecutor {
 }
 ```
 
-本阶段注册 `agent.execute`、线性本地 Fixture 所需的 control executor，以及只支持 Prompt/仓库内 Markdown/TXT 的 `connector.execute / requirement.capture`。本地来源必须生成不可变 Source Artifact；GitLab 和飞书来源在 Connector 计划实现。
+本阶段注册 `agent.execute`、线性本地 Fixture 所需的 control executor，以及只支持 Prompt/仓库内 Markdown/TXT 的 `connector.execute / requirement.capture`。本地来源必须生成不可变 Source Artifact；GitHub、GitLab 和飞书来源在 Connector 计划实现。
 
 - [ ] **步骤 4：实现 Start、快照、原子 Acquire/Submit 和 Decide**
 
@@ -520,6 +533,11 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 安装时展示精确目标，拒绝覆盖无关 Skill，并支持 `--dry-run`。
 
+安装目标必须与宿主官方目录一致：Codex 安装到 `~/.agents/skills/wsspeckit-driver`，
+Claude 安装到 `~/.claude/skills/wsspeckit-driver`，Cursor 默认安装到
+`~/.cursor/skills/wsspeckit-driver`，Generic 使用显式 `--target`。安装器不向
+`~/.cursor/rules` 写入 `.mdc`；Driver Skill 的触发描述和手动调用示例都使用中文。
+
 实现中文内容检查器：只扫描 `docs/`、`resources/skills/`、`resources/templates/` 和 CLI 用户文案；忽略 fenced code、内联代码、URL、路径和协议标识，并维护显式英文术语允许表。失败输出必须包含文件、行号和未登记文本。
 
 - [ ] **步骤 5：运行完整基础门禁**
@@ -539,6 +557,50 @@ npm pack --dry-run
 ```bash
 git add src/cli src/adapters src/resources/chinese-content.ts tests/contract/integrations.test.ts tests/contract/chinese-content.test.ts tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts
 git commit -m "feat: expose the Chinese WSSpecKit driver protocol"
+```
+
+### Task 9：删除旧协议文档并建立新文档真源
+
+**文件：**
+- 删除：`docs/specs/2026-08-16-wiesen-spec-kit-{requirements,design}.md`
+- 删除：`docs/reference/{artifacts-v1,execution-contracts-v1,project-config-v1,state-transitions-v1,work-item-v1,workflow-language-v1}.md`
+- 删除：`docs/plans/2026-08-16-{m1-control-plane-hardening-plan,m1-implementation-plan,protocol-hardening-plan}.md`
+- 创建：`docs/reference/{application-protocol,workflow-language,skill-resolution,connector-contracts}.md`
+- 创建：`tests/contract/documentation-baseline.test.ts`
+
+**接口：**
+- 输入：本计划已实现的公开 Schema、CLI 和资源。
+- 输出：与生成物一致的中文公开参考文档；仓库中不存在可被误认为有效的旧协议。
+
+- [ ] **步骤 1：编写失败的文档基线测试**
+
+测试断言旧文件清单全部不存在、四份新参考文档存在；从生成 Schema 提取命令、协议操作、
+Skill URI 和错误码，逐项断言参考文档包含对应标识。另用 `rg` 断言旧产品名、旧命令和
+旧 Schema ID 只允许出现在负例测试夹具中。
+
+- [ ] **步骤 2：运行测试，确认旧文档造成失败**
+
+运行：`node --import tsx --test tests/contract/documentation-baseline.test.ts`
+
+预期：FAIL，输出仍存在的旧文档路径和缺失的新参考文档。
+
+- [ ] **步骤 3：删除旧文档并写入中文参考文档**
+
+四份参考文档分别覆盖五个 Application 操作、Workflow Language v1、三层 Skill 解析与
+锁定、Connector/Provider/审批/回读契约。文档中的 JSON/YAML 示例必须通过契约测试解析，
+不复制已经失效的旧类型。
+
+- [ ] **步骤 4：运行文档与完整基础门禁**
+
+运行：`node --import tsx --test tests/contract/documentation-baseline.test.ts tests/contract/chinese-content.test.ts && npm test && npm run build`
+
+预期：全部通过；`docs/specs`、`docs/reference`、`docs/plans` 中不存在旧协议文件。
+
+- [ ] **步骤 5：提交**
+
+```bash
+git add -A docs/specs docs/reference docs/plans tests/contract/documentation-baseline.test.ts
+git commit -m "docs: replace legacy protocol documentation"
 ```
 
 ## 基础阶段完成门禁

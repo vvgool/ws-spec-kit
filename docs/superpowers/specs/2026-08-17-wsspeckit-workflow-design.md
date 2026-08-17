@@ -4,7 +4,7 @@
 
 WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定制、阶段级 Skill 绑定和跨会话恢复的软件开发工作流引擎。
 
-它支持从用户描述、本地文件、Git/GitLab Issue、飞书文档等来源获取需求，并将任务编排为代码探索、需求澄清、方案设计、任务计划、TDD 实现、Review-Fix 循环、可信验证、Git 提交、Issue 更新、知识库发布和关闭等阶段。
+它支持从用户描述、本地文件、GitHub/GitLab Issue、飞书文档等来源获取需求，并将任务编排为代码探索、需求澄清、方案设计、任务计划、TDD 实现、Review-Fix 循环、可信验证、Git 提交、Issue 更新、知识库发布和关闭等阶段。
 
 首版提供完整的内置 Skill Catalog、一个基础功能交付工作流，以及 `quick`、`standard`、`governed` 三种执行 Profile。用户可以在项目内组合、修改或创建 Workflow，也可以引用 WSSpecKit 内置 Skill、用户全局安装的 Skill 和项目自定义 Skill。
 
@@ -165,14 +165,36 @@ skills:
 
 ### 7.3 Global Skill Resolver
 
-Agent Adapter 负责将 `global://` 逻辑引用解析为当前客户端可读取的 Skill：
+Agent Adapter 负责将 `global://<相对路径>` 解析为当前客户端可读取的
+`<root>/<相对路径>/SKILL.md`。首版只解析 Skill，不把 Cursor Rule 当作 Skill。
 
-- Codex：Codex 与共享 Agent Skill 目录。
-- Claude：Claude Skill 目录及用户配置的共享目录。
-- Cursor：Cursor 支持的 Rules/Skill 适配目录。
-- Generic：项目配置声明的搜索目录。
+默认搜索根以宿主官方发现规则为准：
 
-Resolver 返回逻辑引用、Provider、入口文件、内容摘要和解析状态，不把实际路径写入可移植 Workflow。
+| Provider | 默认用户级搜索根 | 说明 |
+|---|---|---|
+| `codex` | `~/.agents/skills` | Codex 官方用户级 Skill 目录 |
+| `claude` | `~/.claude/skills` | Claude Code 官方 Personal Skill 目录 |
+| `cursor` | `~/.agents/skills`、`~/.cursor/skills`、`~/.claude/skills`、`~/.codex/skills` | Cursor 官方兼容目录，按表中顺序扫描 |
+| `generic` | 无 | 必须在项目配置中显式声明 |
+
+项目可以为任意 Provider 增加 `skills.additionalGlobalRoots`，但不能删除或重排
+官方默认根。附加根必须是绝对路径或基于用户目录展开的路径；配置和 Lock 只保存
+根的逻辑标识，不保存用户目录绝对路径。
+
+Resolver 扫描全部候选根，不采用“第一个文件静默胜出”。逻辑引用的每一段只能包含
+小写字母、数字和连字符，拒绝空段、`.`、`..`、绝对路径和编码后的路径分隔符。未找到时
+只允许使用 Workflow 显式声明的 fallback；找到一个候选时直接返回；找到多个且摘要一致时
+按搜索顺序选择并记录全部来源；找到多个且摘要不一致时返回 `WSSPEC_SKILL_AMBIGUOUS`。
+入口文件或其父目录经真实路径解析后逃出声明根时返回 `WSSPEC_SKILL_PATH_ESCAPE`。
+
+Resolver 返回逻辑引用、Provider、根标识、入口文件、内容摘要、候选来源和解析状态；
+可移植 Workflow 与 Work Item 事件不记录本机绝对路径。宿主是否会自动触发 Skill
+不影响绑定语义：Driver Skill 必须按 Work Package 中的绑定读取已解析 Skill，Workflow
+绑定是确定性要求，不依赖模型自行猜测触发。
+
+目录基线依据当前宿主官方规范：Codex 使用 `.agents/skills`，Claude Code 使用
+`.claude/skills`，Cursor 支持 `.agents/skills`、`.cursor/skills` 及 Claude/Codex 兼容目录。
+实现和发布验收时必须重新核对官方规范，不能只依据开发机现有目录。
 
 ### 7.4 Skill Lock
 
@@ -224,7 +246,7 @@ skills:
 |---|---|---|
 | `agent.execute` | 当前 Agent | 探索、澄清、设计、计划、实现、Review、修复 |
 | `command.execute` | WSSpecKit | Test、Lint、Typecheck、Build 和确定性脚本 |
-| `connector.execute` | Connector Adapter | 需求读取、Git、GitLab、飞书和 Wiki |
+| `connector.execute` | Connector Adapter | 需求读取、Git、GitHub/GitLab、飞书和 Wiki |
 | `control.*` | Workflow Runtime | 条件、有限循环、审批和关闭 |
 
 `uses` 决定执行方式和副作用边界，`skills` 决定 Agent 使用的工作方法，两者不能混用。
@@ -263,7 +285,7 @@ Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类�
 
 | Profile | 适用任务 | 流程强度 |
 |---|---|---|
-| `quick` | 小型、低风险、局部修改 | 简要规格，设计和计划可跳过，单轮 Review，最小可信 Gate |
+| `quick` | 小型、低风险、局部修改 | 简要规格，跳过独立设计，紧凑单任务计划，单轮 Review，最小可信 Gate |
 | `standard` | 默认功能和缺陷开发 | 完整规格、设计、计划、Review-Fix 和项目标准 Gate |
 | `governed` | 权限、支付、数据、发布及高风险任务 | 分阶段审批、独立 Review、完整 Gate、必需发布回读和完整审计 |
 
@@ -271,7 +293,7 @@ Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类�
 
 | 策略 | `quick` | `standard` | `governed` |
 |---|---|---|---|
-| 设计与计划 | 可跳过 | 必需 | 必需 |
+| 设计与计划 | 跳过独立设计；紧凑单任务计划必需 | 完整设计和计划必需 | 完整设计和计划必需 |
 | Artifact 审批 | 无默认审批 | 规格、设计 | 规格、设计、计划 |
 | Review-Fix | 最多 1 轮 | 最多 5 轮 | 最多 5 轮且 Review Actor 独立 |
 | Trusted Gate | `test` | 项目 required Gates | 项目全部 configured Gates |
@@ -295,7 +317,7 @@ steps:
   design:
     enabled: false
   plan:
-    enabled: false
+    artifactLevel: compact
   review-fix:
     maxIterations: 1
   verify:
@@ -358,6 +380,7 @@ inputs:
     accepts:
       - user.prompt
       - local.file
+      - github.issue
       - gitlab.issue
       - feishu.document
 
@@ -400,12 +423,17 @@ steps:
 
   - id: plan
     uses: agent.execute
-    needs: [design]
+    needs: [clarify, design]
     objective: 将设计拆分为可验证任务
     skills:
       - ref: builtin://skills/task-planning
         required: true
     outputs: [tasks]
+    inputs:
+      - artifact: specification
+        required: true
+      - artifact: design
+        required: false
 
   - id: implement
     uses: agent.execute
@@ -464,6 +492,10 @@ steps:
 ```
 
 `update-issue` 和 `update-wiki` 在 Binding 不存在时进入 `skipped`；内置基础工作流允许关闭。配置为必需发布目标时，确定失败或缺少回读证据必须阻止关闭。
+
+`plan` 对 `design` 的依赖是可选 Artifact 依赖：Quick 中 `design` 为 `skipped` 时，
+`plan` 必须直接根据 `specification` 生成一个包含修改范围、测试先行步骤、验收命令和
+回滚点的紧凑单任务计划。`implement` 在所有 Profile 下都只消费 `tasks`，不存在无计划实现。
 
 ## 10. Application Protocol
 
@@ -572,14 +604,42 @@ wspec workflow use project://workflows/feature-delivery
 
 首版 Connector 能力包括：
 
-- Requirement Source：用户描述、本地 Markdown/TXT、GitLab Issue、飞书文档。
+- Requirement Source：用户描述、本地 Markdown/TXT、GitHub Issue、GitLab Issue、飞书文档。
 - Git：worktree、status、diff、commit。
-- Issue：读取、更新进度、写回交付结果、关闭或状态同步。
+- Issue：GitHub/GitLab Issue 读取、更新进度、写回交付结果、关闭或状态同步。
 - Knowledge：创建或更新 Wiki/飞书文档并回读。
 
 Connector Manifest 必须声明 `external-read` 或 `external-write`、目标类型、幂等能力、回读能力和所需凭据引用。凭据由 Agent/Connector 运行环境管理，不进入 Workflow、Artifact、Work Package、事件或日志。
 
 外部写入必须具备稳定目标、内容摘要、幂等键和回读证据。Git commit、Issue 状态修改、知识库发布以及未来的 push、merge、release 都受精确授权策略控制。
+
+### 13.1 首版 Provider
+
+外部 Provider 通过 `spawn` 的固定可执行文件和 argv 调用，不经过 Shell，不接受 Workflow
+拼接命令。Provider 进程只接收规范化 JSON 输入并返回规范化 JSON；stderr 脱敏后只作为
+诊断信息。CLI 自身的认证存储由对应工具管理，WSSpecKit 不读取或持久化 Token、Cookie、
+Keychain 内容或 CLI 配置文件。
+
+| 能力 | Provider | 固定调用契约 | 认证与可用性 |
+|---|---|---|---|
+| `github.issue` | `github-cli` | 读取：`gh api --method GET <固定端点>`；写入：`gh api --method <POST|PATCH> <固定端点> --input -` | 使用 `gh auth` 或其官方环境变量；`doctor` 校验 `gh api user` |
+| `gitlab.issue` | `gitlab-cli` | 读取：`glab api --method GET <固定端点>`；写入：`glab api --method <POST|PUT> <固定端点> --input -` | 使用 `glab auth`；首版要求预装 `glab`，缺失时返回可操作诊断 |
+| `feishu.document` / `knowledge.publish` | `lark-cli` | 读取：`docs +fetch --doc <target> --format json --as <identity>`；写入：`docs +create/+update` 各自固定参数，使用默认 JSON 输出 | 使用 `lark-cli auth`；不接受浏览器 Cookie |
+| `git.commit` | `git-native` | Node `spawn("git", argv)` 的允许列表 | 使用当前仓库身份；不实现 push、merge、release |
+
+Issue 规范化模型至少包含 `provider`、`host`、`repository`、`number`、`stableId`、`url`、
+`title`、`body`、`state`、`labels`、`updatedAt` 和 `digest`。GitHub 端点限定为
+`repos/{owner}/{repo}/issues/{number}` 及其 comments；GitLab 端点限定为
+`projects/{urlEncodedPath}/issues/{iid}` 及其 notes。目标字段分别保存 GitHub `number/node_id`
+和 GitLab `iid/id`，不得混用。
+
+飞书读取使用文档 URL 或 token；创建必须指定 folder token、wiki node 或 wiki space 中之一；
+更新必须指定已解析 doc token。每次写入后再次 `+fetch --format json`，比较目标 token、标题和
+正文摘要。CLI 返回非零、JSON Schema 不匹配或回读摘要不一致都不能形成成功 Evidence。
+
+Provider Manifest 声明最低 CLI 版本、可执行文件名、允许的 argv 模板、输入/输出 Schema、
+超时、最大响应体和脱敏字段。`wspec doctor connectors` 输出 `available`、`unauthenticated`、
+`unsupported_version` 或 `missing_binary`，但不得回显凭据。
 
 ## 14. 持久化与恢复
 
@@ -683,7 +743,7 @@ src/
 5. **Profile Engine**：三种内置 Profile、overlay 编译、风险策略、单向升级和失效传播。
 6. **有限控制流**：条件、重试和有界 Review-Fix 循环。
 7. **Driver Adapter**：Codex、Claude、Cursor 和 Generic 安装与恢复流程。
-8. **Source Connector**：Prompt、文件、GitLab Issue 和飞书文档快照。
+8. **Source Connector**：Prompt、文件、GitHub/GitLab Issue 和飞书文档快照。
 9. **Delivery Connector**：Git commit、Issue 更新、Wiki 发布、幂等和回读。
 10. **发布验收**：完整文档、安装包、Driver Skill 和真实客户端验收。
 
@@ -700,16 +760,18 @@ src/
 - 项目自定义 Workflow 可以声明自己的 Profile overlay 和最低风险要求。
 - 项目 Workflow 可以绑定多个 Builtin、Global 和 Project Skill。
 - Global Skill 可以显式回退到 Builtin Skill。
+- Global Skill 按宿主官方目录和显式附加目录解析；同名不同摘要必须阻塞，不得静默覆盖。
 - 必需 Skill 缺失、摘要变化或 Workflow Package 被篡改时 fail closed。
 - Workflow 可以携带项目自己的 Skill、Schema 和模板。
-- 用户描述、本地文件、GitLab Issue 和飞书文档均能形成不可变需求来源快照。
+- 用户描述、本地文件、GitHub Issue、GitLab Issue 和飞书文档均能形成不可变需求来源快照。
+- Quick 也必须产出紧凑单任务计划，任何 Profile 都不能直接从规格跳到无计划实现。
 - Review-Fix 循环能在通过时结束，并在达到 `maxIterations` 时阻塞。
 - Agent 自主管理上下文；Work Package 不默认内嵌工件正文或对话历史。
 - 会话中断后，新 Agent 会话可以从下一可执行 Step 恢复。
 - Git commit、Issue 更新和 Wiki 发布具备审批、幂等和回读证据。
 - 仓库中不残留旧产品名、旧公开命令、旧 Schema ID、`WSK-` 或 `WSPEC_` 对外协议。
 - 单元、契约、集成、E2E、构建、Schema 漂移和 `npm pack --dry-run` 全部通过。
-- 本地 Fixture、已登录客户端测试和真实 GitLab/飞书验收必须分别报告，不能互相替代。
+- 本地 Fixture、已登录客户端测试和真实 GitHub/GitLab/飞书验收必须分别报告，不能互相替代。
 
 ## 20. 非目标
 

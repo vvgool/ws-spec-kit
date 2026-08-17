@@ -30,6 +30,13 @@
 - 输入：基础计划的 `CompiledWorkflow` 和 Runtime Artifact/Binding 视图。
 - 输出：`parseExpression(source): ExpressionAst`、`evaluateExpression(ast, scope): boolean`。
 
+```ts
+export type ExpressionAst =
+  | { kind: "literal"; value: string | boolean | number | null }
+  | { kind: "path"; root: "artifacts" | "bindings" | "steps"; segments: string[] }
+  | { kind: "binary"; op: "==" | "!=" | "&&" | "||"; left: ExpressionAst; right: ExpressionAst };
+```
+
 - [ ] 编写失败测试，覆盖布尔值、相等/不等、属性读取、缺失 Binding、未知标识、函数调用、赋值、原型属性和超长表达式。
 
 ```ts
@@ -56,6 +63,22 @@ assert.throws(() => parseExpression("process.exit()"), /WSSPEC_EXPRESSION_FORBID
 - 输入：条件引擎和 Application `acquire/submit`。
 - 输出：`LoopProjection`、`RetryProjection` 和下一可执行内部 Step。
 
+```ts
+export interface LoopProjection {
+  loopId: string;
+  iteration: number;
+  maxIterations: number;
+  status: "running" | "succeeded" | "blocked";
+}
+
+export interface RetryProjection {
+  stepInstanceId: string;
+  attemptsUsed: number;
+  maxAttempts: number;
+  status: "ready" | "running" | "exhausted";
+}
+```
+
 - [ ] 编写失败测试：失败后重试、非可重试错误、恢复后次数不重置、Review 通过退出、Fix 后进入下一轮、达到上限阻塞、旧轮次 Attempt 拒绝。
 
 ```ts
@@ -81,6 +104,15 @@ assert.deepEqual(projection.loops["review-fix"], { iteration: 2, maxIterations: 
 - 输入：基础计划的 `evaluateProfileUpgrade`。
 - 输出：`applyProfileDecision(projection, decision): RuntimeProjection`。
 
+```ts
+export interface ProfileDecision {
+  previous: "quick" | "standard" | "governed";
+  selected: "quick" | "standard" | "governed";
+  reasonRuleIds: string[];
+  invalidatedStepIds: string[];
+}
+```
+
 - [ ] 编写失败测试：provisional quick 只允许 intake/explore、low/unknown/high 分流、路径规则升级、禁止自动降级、升级补回 Step、下游结果/Claim/审批/Evidence 失效。
 - [ ] 运行：`node --import tsx --test tests/integration/profile-runtime.test.ts`；预期缺少运行时应用失败。
 - [ ] 实现 `profile.selected`、`profile.upgraded`、`projection.invalidated` 事件；升级先编译新 overlay，再一次性写入影响集合。
@@ -102,6 +134,16 @@ assert.deepEqual(projection.loops["review-fix"], { iteration: 2, maxIterations: 
 - 输入：Resolved Profile、循环结果和现有 Evidence 服务。
 - 输出：按 Profile 执行的审批、Gate、Close 判定。
 
+```ts
+export interface CloseDecision {
+  allowed: boolean;
+  missing: Array<{
+    category: "step" | "artifact" | "approval" | "evidence" | "external-receipt";
+    id: string;
+  }>;
+}
+```
+
 - [ ] 编写失败测试：Quick 无 Artifact 默认审批、Standard 规格/设计审批、Governed 规格/设计/计划审批、Gate 集合差异、独立 Review、缺失必需发布目标阻止关闭。
 - [ ] 运行聚焦测试，预期旧固定阶段规则不匹配。
 - [ ] 将审批和 Gate 判定改为读取 Compiled Step/Profile，不再识别固定阶段名。
@@ -121,10 +163,11 @@ assert.deepEqual(projection.loops["review-fix"], { iteration: 2, maxIterations: 
 - 输入：本计划全部 Runtime 能力。
 - 输出：无新接口；形成控制流完成门禁。
 
-- [ ] 编写 Quick E2E：Prompt -> explore -> compact spec -> implement -> 单轮 review -> test -> close。
+- [ ] 编写 Quick E2E：Prompt -> explore -> compact spec -> compact single-task plan -> TDD implement -> 单轮 review -> test -> close；断言 design skipped、tasks 存在且 implement 明确消费 tasks。
 - [ ] 编写 Standard E2E：完整规格/设计/计划、审批、Review-Fix 两轮、required Gates、close。
 - [ ] 编写 Governed E2E：独立 Review Actor、完整 Gate、完整审计；外部目标使用可回读本地 Fixture。
 - [ ] 编写运行中由 Quick 升级到 Governed 的 E2E，验证新增前置 Step 和失效传播。
+- [ ] 对四条 E2E 分别在 `acquire` 后、循环 submit 后和 Profile 升级事件后终止进程，再由 `inspect + acquire` 恢复，断言循环预算、Profile、Attempt 和审批不重置。
 - [ ] 运行：`npm run lint && npm run typecheck && npm test && npm run build`，预期全部通过。
 - [ ] 提交：`git commit -m "test: cover all workflow risk profiles"`。
 
