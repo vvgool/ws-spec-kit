@@ -51,7 +51,7 @@ async function prepare(): Promise<{ root: string; worktree: string; workItemId: 
   await writeFile(path.join(root, ".wsspec", "config.yaml"), config, "utf8");
   await git(root, "add", ".wsspec", ".gitignore");
   await git(root, "commit", "-m", "chore: configure recovery fixture");
-  const workItemId = "WSK-20260816-RECOVERY";
+  const workItemId = "WSS-20260816-RECOVERY";
   const item = await createWorkItem({
     root,
     workItemId,
@@ -79,7 +79,7 @@ test("replays an appended event when projection persistence fails", async () => 
       idempotencyKey: "activate-after-create",
       simulateProjectionFailure: true,
     }),
-    (error: unknown) => error instanceof ControlPlaneError && error.code === "WSPEC_PROJECTION_WRITE_FAILED",
+    (error: unknown) => error instanceof ControlPlaneError && error.code === "WSSPEC_PROJECTION_WRITE_FAILED",
   );
   assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).workItem.status, "draft");
 
@@ -127,7 +127,7 @@ test("reusing an idempotency key with different input fails closed", async () =>
 
   await assert.rejects(
     transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "verifying", idempotencyKey: "shared-key" }),
-    (error: unknown) => hasCode(error, "WSPEC_IDEMPOTENCY_CONFLICT"),
+    (error: unknown) => hasCode(error, "WSSPEC_IDEMPOTENCY_CONFLICT"),
   );
 });
 
@@ -152,7 +152,7 @@ test("recovery rejects a broken event hash chain", async () => {
 
   await assert.rejects(
     recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
-    (error: unknown) => hasCode(error, "WSPEC_EVENT_CHAIN_INVALID"),
+    (error: unknown) => hasCode(error, "WSSPEC_EVENT_CHAIN_INVALID"),
   );
 });
 
@@ -182,7 +182,7 @@ test("recovery rejects a valid event prefix truncated behind the durable project
 
   await assert.rejects(
     recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
-    (error: unknown) => hasCode(error, "WSPEC_EVENT_CHAIN_INVALID"),
+    (error: unknown) => hasCode(error, "WSSPEC_EVENT_CHAIN_INVALID"),
   );
 });
 
@@ -194,7 +194,7 @@ test("recovery rejects repository identity mismatch", async () => {
 
   await assert.rejects(
     recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
-    (error: unknown) => hasCode(error, "WSPEC_REPOSITORY_ID_MISMATCH"),
+    (error: unknown) => hasCode(error, "WSSPEC_REPOSITORY_ID_MISMATCH"),
   );
 });
 

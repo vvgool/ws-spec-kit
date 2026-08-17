@@ -19,7 +19,7 @@ async function prepare() {
   await mkdir(path.join(root, ".wsspec"), { recursive: true });
   await writeFile(path.join(root, ".wsspec/workflow.yaml"), workflow); await writeFile(path.join(root, ".wsspec/config.yaml"), config);
   await git(root, "add", "."); await git(root, "commit", "-m", "approval fixture");
-  const workItemId = "WSK-APPROVAL"; const item = await createWorkItem({ root, workItemId, title: "审批", source: { type: "prompt", content: "审批" } });
+  const workItemId = "WSS-APPROVAL"; const item = await createWorkItem({ root, workItemId, title: "审批", source: { type: "prompt", content: "审批" } });
   const worktree = path.join(root, item.execution.worktree); await initializeControlPlane({ cwd: root, workItemId, stages: ["define"] });
   for (const [scope, to, key] of [["work-item", "active", "active"], ["stage", "ready", "ready"], ["stage", "running", "run"], ["stage", "validating", "validate"]] as const) await transitionRuntime({ cwd: root, workItemId, scope, ...(scope === "stage" ? { stageId: "define" } : {}), to: to as never, idempotencyKey: key } as never);
   const body = ["# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "需求", "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", ""].join("\n");
@@ -31,13 +31,13 @@ async function prepare() {
 
 test("non-TTY input cannot approve an Artifact", async () => {
   const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
-  await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: false } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSPEC_INTERACTIVE_TTY_REQUIRED");
+  await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: false } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_INTERACTIVE_TTY_REQUIRED");
 });
 
 test("approval expires when the bound workspace changes", async () => {
   const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
   await writeFile(path.join(fixture.worktree, "changed.txt"), "changed\n");
-  await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSPEC_APPROVAL_EXPIRED");
+  await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_EXPIRED");
 });
 
 test("TTY decisions approve or reject the exact pending request", async () => {
@@ -48,13 +48,13 @@ test("TTY decisions approve or reject the exact pending request", async () => {
 });
 
 test("approval persistence excludes environment preauthorization and terminal secrets", async () => {
-  const fixture = await prepare(); const secret = `secret-${crypto.randomUUID()}`; process.env.WSPEC_APPROVAL = secret;
+  const fixture = await prepare(); const secret = `secret-${crypto.randomUUID()}`; process.env.WSSPEC_APPROVAL = secret;
   try {
     const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
     await decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } });
     const projection = await readControlPlane(fixture.root, fixture.workItemId); const persisted = `${await readFile(path.join(projection.controlPlane, "runtime.json"), "utf8")}\n${await readFile(path.join(projection.controlPlane, "events.jsonl"), "utf8")}`;
     assert.doesNotMatch(persisted, new RegExp(secret));
-  } finally { delete process.env.WSPEC_APPROVAL; }
+  } finally { delete process.env.WSSPEC_APPROVAL; }
 });
 
 test("recovery preserves completed approval history after projection corruption", async () => {

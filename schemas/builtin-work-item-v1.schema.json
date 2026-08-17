@@ -20,7 +20,7 @@
     },
     "workItemId": {
       "type": "string",
-      "pattern": "^WSK-[A-Za-z0-9-]+$"
+      "pattern": "^WSS-[A-Za-z0-9-]+$"
     },
     "repositoryId": {
       "type": "string",

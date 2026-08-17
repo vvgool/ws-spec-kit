@@ -18,7 +18,7 @@ export interface WorkItemState { status: WorkItemStatus; suspendedFrom?: "active
 export interface WorkItemEvent { type: "transition"; to: WorkItemStatus }
 
 export class StateTransitionError extends Error {
-  readonly code = "WSPEC_STATE_TRANSITION_FORBIDDEN";
+  readonly code = "WSSPEC_STATE_TRANSITION_FORBIDDEN";
 
   constructor(scope: "Stage" | "Work Item", from: string, to: string) {
     super(`${scope} 状态不允许从 ${from} 转换到 ${to}。`);

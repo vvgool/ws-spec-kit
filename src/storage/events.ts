@@ -56,7 +56,7 @@ export class EventStoreError extends Error {
 
 function eventHash(event: Omit<StoredEvent, "eventHash">): string {
   const content = canonicalize(event);
-  if (content === undefined) throw new EventStoreError("WSPEC_EVENT_INVALID", "事件无法规范化。");
+  if (content === undefined) throw new EventStoreError("WSSPEC_EVENT_INVALID", "事件无法规范化。");
   return sha256(content);
 }
 
@@ -76,11 +76,11 @@ export async function readEvents(controlPlane: string): Promise<StoredEvent[]> {
     try {
       event = JSON.parse(line) as StoredEvent;
     } catch {
-      throw new EventStoreError("WSPEC_EVENT_CHAIN_INVALID", `事件日志第 ${index + 1} 行不是合法 JSON。`);
+      throw new EventStoreError("WSSPEC_EVENT_CHAIN_INVALID", `事件日志第 ${index + 1} 行不是合法 JSON。`);
     }
     const { eventHash: actualHash, ...unsigned } = event;
     if (event.sequence !== events.length + 1 || event.previousHash !== previousHash || eventHash(unsigned) !== actualHash) {
-      throw new EventStoreError("WSPEC_EVENT_CHAIN_INVALID", `事件日志在序号 ${event.sequence} 处断链。`);
+      throw new EventStoreError("WSSPEC_EVENT_CHAIN_INVALID", `事件日志在序号 ${event.sequence} 处断链。`);
     }
     events.push(event);
     previousHash = event.eventHash;
@@ -114,7 +114,7 @@ async function appendEventUnlocked(controlPlane: string, event: DomainEvent): Pr
   const handle = await open(path.join(controlPlane, "events.jsonl"), "a", 0o600);
   try {
     const content = canonicalize(stored);
-    if (content === undefined) throw new EventStoreError("WSPEC_EVENT_INVALID", "事件无法规范化。");
+    if (content === undefined) throw new EventStoreError("WSSPEC_EVENT_INVALID", "事件无法规范化。");
     await handle.writeFile(`${content}\n`, "utf8");
     await handle.sync();
   } finally {
@@ -153,11 +153,11 @@ export async function recoverStaleControlPlaneLock(controlPlane: string): Promis
   const owner = await readLock(lockPath);
   if (owner === undefined) {
     try { const handle = await open(lockPath, "r"); await handle.close(); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; }
-    throw new EventStoreError("WSPEC_CONTROL_PLANE_LOCKED", "控制面锁缺少可验证的所有者信息，不能自动清理。");
+    throw new EventStoreError("WSSPEC_CONTROL_PLANE_LOCKED", "控制面锁缺少可验证的所有者信息，不能自动清理。");
   }
-  if (owner.hostname !== hostname() || processIsAlive(owner.pid)) throw new EventStoreError("WSPEC_CONTROL_PLANE_LOCKED", "控制面锁的所有者仍可能存活，不能抢占。");
+  if (owner.hostname !== hostname() || processIsAlive(owner.pid)) throw new EventStoreError("WSSPEC_CONTROL_PLANE_LOCKED", "控制面锁的所有者仍可能存活，不能抢占。");
   const confirmed = await readLock(lockPath);
-  if (confirmed?.ownerToken !== owner.ownerToken) throw new EventStoreError("WSPEC_CONTROL_PLANE_LOCKED", "控制面锁在恢复期间已经变化。");
+  if (confirmed?.ownerToken !== owner.ownerToken) throw new EventStoreError("WSSPEC_CONTROL_PLANE_LOCKED", "控制面锁在恢复期间已经变化。");
   await unlink(lockPath);
   return true;
 }
@@ -177,11 +177,11 @@ export async function withControlPlaneLock<T>(controlPlane: string, operation: (
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         const existing = await readLock(lockPath);
         if (existing?.hostname === hostname() && !processIsAlive(existing.pid)) {
-          throw new EventStoreError("WSPEC_CONTROL_PLANE_STALE_LOCK", "检测到异常退出遗留的控制面锁，请执行 wspec recover。");
+          throw new EventStoreError("WSSPEC_CONTROL_PLANE_STALE_LOCK", "检测到异常退出遗留的控制面锁，请执行 wspec recover。");
         }
       }
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) {
-        throw new EventStoreError("WSPEC_CONTROL_PLANE_LOCKED", "共享控制面当前被其他进程占用。");
+        throw new EventStoreError("WSSPEC_CONTROL_PLANE_LOCKED", "共享控制面当前被其他进程占用。");
       }
       await delay(10);
     }

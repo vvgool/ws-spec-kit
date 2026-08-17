@@ -56,7 +56,7 @@ test("rejects every Stage transition absent from State Transitions v1", () => {
     if (allowed.has(`${from}:${to}`)) continue;
     assert.throws(
       () => transitionStage({ status: from }, { type: "transition", to }),
-      (error: unknown) => error instanceof StateTransitionError && error.code === "WSPEC_STATE_TRANSITION_FORBIDDEN",
+      (error: unknown) => error instanceof StateTransitionError && error.code === "WSSPEC_STATE_TRANSITION_FORBIDDEN",
       `${from} -> ${to}`,
     );
   }
@@ -73,7 +73,7 @@ test("accepts every Work Item transition defined by State Transitions v1", () =>
 test("a paused Work Item can resume only to its recorded suspended state", () => {
   assert.throws(
     () => transitionWorkItem({ status: "paused", suspendedFrom: "blocked" }, { type: "transition", to: "active" }),
-    (error: unknown) => error instanceof StateTransitionError && error.code === "WSPEC_STATE_TRANSITION_FORBIDDEN",
+    (error: unknown) => error instanceof StateTransitionError && error.code === "WSSPEC_STATE_TRANSITION_FORBIDDEN",
   );
   assert.equal(transitionWorkItem({ status: "paused", suspendedFrom: "blocked" }, { type: "transition", to: "blocked" }).status, "blocked");
 });
@@ -84,7 +84,7 @@ test("rejects every Work Item transition absent from State Transitions v1", () =
     if (allowed.has(`${from}:${to}`)) continue;
     assert.throws(
       () => transitionWorkItem({ status: from }, { type: "transition", to }),
-      (error: unknown) => error instanceof StateTransitionError && error.code === "WSPEC_STATE_TRANSITION_FORBIDDEN",
+      (error: unknown) => error instanceof StateTransitionError && error.code === "WSSPEC_STATE_TRANSITION_FORBIDDEN",
       `${from} -> ${to}`,
     );
   }

@@ -56,7 +56,7 @@ async function writeArtifact(
   const metadataWithoutHash = {
     artifactType: type,
     schemaVersion: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     stageId: "define",
     attemptId: "attempt-1",
     revision: 1,
@@ -74,7 +74,7 @@ async function writeArtifact(
     expectation: {
       repositoryRoot: root,
       artifactType: type,
-      workItemId: "WSK-20260816-001",
+      workItemId: "WSS-20260816-001",
       stageId: "define",
       attemptId: "attempt-1",
     },
@@ -98,7 +98,7 @@ test("each built-in artifact rejects a missing required section", async () => {
     const { filename, expectation } = await writeArtifact(root, type, { omitted: sections[0]! });
     await assert.rejects(
       verifyArtifact(filename, expectation),
-      (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_INCOMPLETE",
+      (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_INCOMPLETE",
     );
   }
 });
@@ -110,7 +110,7 @@ test("required sections cannot be empty", async () => {
   const metadataWithoutHash = {
     artifactType: type,
     schemaVersion: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     stageId: "define",
     attemptId: "attempt-1",
     revision: 1,
@@ -123,11 +123,11 @@ test("required sections cannot be empty", async () => {
     verifyArtifact(filename, {
       repositoryRoot: root,
       artifactType: type,
-      workItemId: "WSK-20260816-001",
+      workItemId: "WSS-20260816-001",
       stageId: "define",
       attemptId: "attempt-1",
     }),
-    (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_INCOMPLETE",
+    (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_INCOMPLETE",
   );
 });
 
@@ -136,7 +136,7 @@ test("unknown front matter fields fail closed", async () => {
   const { filename, expectation } = await writeArtifact(root, "design", { extra: { approved: true } });
   await assert.rejects(
     verifyArtifact(filename, expectation),
-    (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_SCHEMA_MISMATCH",
+    (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_SCHEMA_MISMATCH",
   );
 });
 
@@ -147,7 +147,7 @@ test("review findings reject unknown severity values", async () => {
   const metadataWithoutHash = {
     artifactType: type,
     schemaVersion: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     stageId: "define",
     attemptId: "attempt-1",
     revision: 1,
@@ -160,11 +160,11 @@ test("review findings reject unknown severity values", async () => {
     verifyArtifact(filename, {
       repositoryRoot: root,
       artifactType: type,
-      workItemId: "WSK-20260816-001",
+      workItemId: "WSS-20260816-001",
       stageId: "define",
       attemptId: "attempt-1",
     }),
-    (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_SCHEMA_MISMATCH",
+    (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_SCHEMA_MISMATCH",
   );
 });
 
@@ -174,7 +174,7 @@ test("body tampering invalidates the declared content hash", async () => {
   await writeFile(filename, `${await import("node:fs/promises").then(({ readFile }) => readFile(filename, "utf8"))}\n篡改\n`, "utf8");
   await assert.rejects(
     verifyArtifact(filename, expectation),
-    (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_HASH_MISMATCH",
+    (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_HASH_MISMATCH",
   );
 });
 
@@ -183,7 +183,7 @@ test("producer identity mismatches are rejected", async () => {
   const { filename, expectation } = await writeArtifact(root, "specification");
   await assert.rejects(
     verifyArtifact(filename, { ...expectation, stageId: "other" }),
-    (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_REFERENCE_INVALID",
+    (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_REFERENCE_INVALID",
   );
 });
 
@@ -195,10 +195,10 @@ test("artifact paths cannot escape the repository", async () => {
     verifyArtifact(filename, {
       repositoryRoot: root,
       artifactType: "design",
-      workItemId: "WSK-20260816-001",
+      workItemId: "WSS-20260816-001",
       stageId: "define",
       attemptId: "attempt-1",
     }),
-    (error: unknown) => error instanceof ArtifactError && error.code === "WSPEC_ARTIFACT_REFERENCE_INVALID",
+    (error: unknown) => error instanceof ArtifactError && error.code === "WSSPEC_ARTIFACT_REFERENCE_INVALID",
   );
 });

@@ -16,7 +16,7 @@ async function prepare(exitCode = 0, script?: string, timeoutSeconds = 10) {
   const command = JSON.stringify([process.execPath, "-e", script ?? `if(process.env.SECRET)process.exit(9); console.log('gate'); process.exit(${exitCode})`]);
   const config = `version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test:\n      command: ${command}\n      cwd: worktree\n      timeoutSeconds: ${timeoutSeconds}\n      required: true\n      evidence: trusted\n`;
   await writeFile(path.join(root, ".wsspec/workflow.yaml"), workflow); await writeFile(path.join(root, ".wsspec/config.yaml"), config); await git(root, "add", "."); await git(root, "commit", "-m", "verify fixture");
-  const workItemId = `WSK-VERIFY-${exitCode}` as `WSK-${string}`; const item = await createWorkItem({ root, workItemId, title: "验证", source: { type: "prompt", content: "验证" } });
+  const workItemId = `WSS-VERIFY-${exitCode}` as `WSS-${string}`; const item = await createWorkItem({ root, workItemId, title: "验证", source: { type: "prompt", content: "验证" } });
   const worktree = path.join(root, item.execution.worktree); await initializeControlPlane({ cwd: root, workItemId, stages: ["verify"] });
   await transitionRuntime({ cwd: root, workItemId, scope: "work-item", to: "active", idempotencyKey: "active" });
   return { root, worktree, workItemId };
@@ -47,14 +47,14 @@ test("Agent supplied command reports can only create reported Evidence", async (
 
 test("required Gate failure blocks verification", async () => {
   const fixture = await prepare(2);
-  await assert.rejects(verifyWorkItem({ cwd: fixture.root, workItemId: fixture.workItemId }), (error: unknown) => error instanceof VerificationError && error.code === "WSPEC_REQUIRED_GATE_FAILED");
+  await assert.rejects(verifyWorkItem({ cwd: fixture.root, workItemId: fixture.workItemId }), (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_REQUIRED_GATE_FAILED");
   assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).workItem.status, "blocked");
 });
 
 test("workspace changes invalidate a previously verified Work Item", async () => {
   const fixture = await prepare(); await verifyWorkItem({ cwd: fixture.root, workItemId: fixture.workItemId });
   await writeFile(path.join(fixture.worktree, "after-verification.txt"), "changed\n");
-  await assert.rejects(verifyWorkItem({ cwd: fixture.root, workItemId: fixture.workItemId }), (error: unknown) => error instanceof VerificationError && error.code === "WSPEC_WORKSPACE_CHANGED");
+  await assert.rejects(verifyWorkItem({ cwd: fixture.root, workItemId: fixture.workItemId }), (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_WORKSPACE_CHANGED");
 });
 
 test("recovery preserves trusted Evidence after projection corruption", async () => {

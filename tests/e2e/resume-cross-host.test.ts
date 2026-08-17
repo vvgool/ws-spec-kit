@@ -36,19 +36,19 @@ test("a second host worktree reads and continues the same shared Work Item", asy
   const root = await createGitRepository(); await mkdir(path.join(root, ".wsspec"));
   await writeFile(path.join(root, ".wsspec/workflow.yaml"), `version: 1\nworkflow: { id: resume }\nstages:\n  - { id: define, kind: define, owner: agent, uses: artifact.generate, output: [specification], approval: { required: true, provider: interactive } }\n  - { id: design, kind: design, owner: agent, uses: artifact.generate, needs: [define], input: [specification], output: [design], approval: { required: true, provider: interactive } }\n  - { id: plan, kind: plan, owner: agent, uses: task.plan, needs: [design], input: [specification, design], output: [plan], approval: { required: true, provider: interactive } }\n  - { id: build, kind: implement, owner: agent, uses: engineering.implement, needs: [plan], input: [specification, design, plan], output: [implementation-result] }\n  - { id: review, kind: review, owner: agent, uses: engineering.review, needs: [build], input: [specification, design, implementation-result], output: [review-result] }\n  - { id: verify, kind: verify, owner: engine, uses: quality.verify, needs: [review], input: [implementation-result, review-result], gates: [test], output: [verification-result] }\n  - { id: close, kind: close, owner: engine, uses: work-item.close, needs: [verify] }\n`);
   await writeFile(path.join(root, ".wsspec/config.yaml"), `version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test: { command: [${process.execPath}, -e, process.exit(0)], cwd: worktree, timeoutSeconds: 10, required: true, evidence: trusted }\n`);
-  await git(root, "add", "."); await git(root, "commit", "-m", "e2e fixture"); await runCommand(root, ["init"], true); await git(root, "add", ".wsspec/repository.yaml"); await git(root, "commit", "-m", "initialize wspec identity"); await runCommand(root, ["new", "WSK-E2E", "E2E", "prompt requirement"], true);
-  const worktree = path.join(root, ".worktrees/WSK-E2E"); const fromRoot = await runCommand(root, ["status", "WSK-E2E"], true); const fromWorktree = await runCommand(worktree, ["status", "WSK-E2E"], true);
+  await git(root, "add", "."); await git(root, "commit", "-m", "e2e fixture"); await runCommand(root, ["init"], true); await git(root, "add", ".wsspec/repository.yaml"); await git(root, "commit", "-m", "initialize wspec identity"); await runCommand(root, ["new", "WSS-E2E", "E2E", "prompt requirement"], true);
+  const worktree = path.join(root, ".worktrees/WSS-E2E"); const fromRoot = await runCommand(root, ["status", "WSS-E2E"], true); const fromWorktree = await runCommand(worktree, ["status", "WSS-E2E"], true);
   assert.deepEqual(fromWorktree, fromRoot);
   assert.doesNotMatch(JSON.stringify(fromRoot), /controlPlane|claimToken|ownerToken|\/private\/|\/Users\//);
-  await finishAgentStages(root, worktree, "WSK-E2E");
-  const closed = await runCommand(worktree, ["next", "WSK-E2E"], true) as { status: string }; assert.equal(closed.status, "closed");
+  await finishAgentStages(root, worktree, "WSS-E2E");
+  const closed = await runCommand(worktree, ["next", "WSS-E2E"], true) as { status: string }; assert.equal(closed.status, "closed");
   await writeFile(path.join(root, "requirement.md"), "# Requirement\n\nDeliver from Markdown.\n"); await git(root, "add", "requirement.md"); await git(root, "commit", "-m", "add requirement");
-  await runCommand(root, ["new-file", "WSK-E2E-FILE", "File E2E", "requirement.md"], true);
-  await finishAgentStages(root, path.join(root, ".worktrees/WSK-E2E-FILE"), "WSK-E2E-FILE");
-  const fileClosed = await runCommand(path.join(root, ".worktrees/WSK-E2E-FILE"), ["next", "WSK-E2E-FILE"], true) as { status: string }; assert.equal(fileClosed.status, "closed");
+  await runCommand(root, ["new-file", "WSS-E2E-FILE", "File E2E", "requirement.md"], true);
+  await finishAgentStages(root, path.join(root, ".worktrees/WSS-E2E-FILE"), "WSS-E2E-FILE");
+  const fileClosed = await runCommand(path.join(root, ".worktrees/WSS-E2E-FILE"), ["next", "WSS-E2E-FILE"], true) as { status: string }; assert.equal(fileClosed.status, "closed");
 });
 
 test("M2 collaboration commands fail explicitly instead of exposing partial behavior", async () => {
-  await assert.rejects(runCommand(process.cwd(), ["issues"], true), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSPEC_FEATURE_NOT_AVAILABLE");
-  await assert.rejects(runCommand(process.cwd(), ["knowledge"], true), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSPEC_FEATURE_NOT_AVAILABLE");
+  await assert.rejects(runCommand(process.cwd(), ["issues"], true), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_FEATURE_NOT_AVAILABLE");
+  await assert.rejects(runCommand(process.cwd(), ["knowledge"], true), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_FEATURE_NOT_AVAILABLE");
 });

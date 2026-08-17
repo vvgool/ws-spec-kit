@@ -25,6 +25,8 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
   const help = await execute(executable, ["--help"], { cwd: consumerDirectory });
 
   assert.equal(version.stdout.trim(), "0.1.0-alpha.1");
+  assert.match(help.stdout, /WSSpecKit/);
+  assert.match(help.stdout, /用法/);
   assert.match(help.stdout, /wspec init/);
   assert.doesNotMatch(help.stdout, /issues|knowledge/);
 });

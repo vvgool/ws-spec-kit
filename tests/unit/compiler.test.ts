@@ -48,38 +48,38 @@ test("compiles a valid workflow and normalizes optional stage fields", () => {
 test("rejects duplicate stage IDs", () => {
   const workflow = validWorkflow();
   workflow.stages.push({ ...workflow.stages[0]! });
-  expectCompileError(workflow, "WSPEC_COMPILE_DUPLICATE_STAGE");
+  expectCompileError(workflow, "WSSPEC_COMPILE_DUPLICATE_STAGE");
 });
 
 test("rejects unknown dependencies", () => {
   const workflow = validWorkflow();
   workflow.stages[1]!.needs = ["missing"];
-  expectCompileError(workflow, "WSPEC_COMPILE_UNKNOWN_DEPENDENCY");
+  expectCompileError(workflow, "WSSPEC_COMPILE_UNKNOWN_DEPENDENCY");
 });
 
 test("rejects dependency cycles", () => {
   const workflow = validWorkflow();
   workflow.stages[0]!.needs = ["design"];
-  expectCompileError(workflow, "WSPEC_COMPILE_CYCLE");
+  expectCompileError(workflow, "WSSPEC_COMPILE_CYCLE");
 });
 
 test("rejects owner and kind mismatches", () => {
   const workflow = validWorkflow();
   workflow.stages[3]!.owner = "engine";
-  expectCompileError(workflow, "WSPEC_COMPILE_OWNER_KIND_MISMATCH");
+  expectCompileError(workflow, "WSSPEC_COMPILE_OWNER_KIND_MISMATCH");
 });
 
 test("rejects executors that cannot serve the stage kind", () => {
   const workflow = validWorkflow();
   workflow.stages[3]!.uses = "artifact.generate";
-  expectCompileError(workflow, "WSPEC_EXECUTOR_CONTRACT_MISMATCH");
+  expectCompileError(workflow, "WSSPEC_EXECUTOR_CONTRACT_MISMATCH");
 });
 
 test("rejects input artifacts not produced by the dependency closure", () => {
   const workflow = validWorkflow();
   workflow.stages[3]!.needs = ["plan"];
   workflow.stages[3]!.input = ["tasks"];
-  expectCompileError(workflow, "WSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER");
+  expectCompileError(workflow, "WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER");
 });
 
 test("rejects implementation paths that bypass approved specification, design or plan", () => {
@@ -87,31 +87,31 @@ test("rejects implementation paths that bypass approved specification, design or
     const workflow = validWorkflow();
     const stage = workflow.stages.find((candidate) => candidate.id === stageId)!;
     stage.approval = { required: false };
-    expectCompileError(workflow, "WSPEC_COMPILE_APPROVAL_REQUIRED");
+    expectCompileError(workflow, "WSSPEC_COMPILE_APPROVAL_REQUIRED");
   }
 });
 
 test("rejects verify stages without a configured required gate", () => {
   const workflow = validWorkflow();
   workflow.stages[5]!.gates = [];
-  expectCompileError(workflow, "WSPEC_COMPILE_REQUIRED_GATE_MISSING");
+  expectCompileError(workflow, "WSSPEC_COMPILE_REQUIRED_GATE_MISSING");
 });
 
 test("rejects close stages without a verify dependency path", () => {
   const workflow = validWorkflow();
   workflow.stages[6]!.needs = ["review"];
-  expectCompileError(workflow, "WSPEC_COMPILE_VERIFY_PATH_REQUIRED");
+  expectCompileError(workflow, "WSSPEC_COMPILE_VERIFY_PATH_REQUIRED");
 });
 
 test("rejects verify stages that bypass review", () => {
   const workflow = validWorkflow();
   workflow.stages[5]!.needs = ["build"];
   workflow.stages[5]!.input = ["implementation-result"];
-  expectCompileError(workflow, "WSPEC_COMPILE_REVIEW_PATH_REQUIRED");
+  expectCompileError(workflow, "WSSPEC_COMPILE_REVIEW_PATH_REQUIRED");
 });
 
 test("rejects kind-specific outputs served by an overly broad executor", () => {
   const workflow = validWorkflow();
   workflow.stages[0]!.output = ["specification", "design"];
-  expectCompileError(workflow, "WSPEC_EXECUTOR_CONTRACT_MISMATCH");
+  expectCompileError(workflow, "WSSPEC_EXECUTOR_CONTRACT_MISMATCH");
 });

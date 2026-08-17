@@ -73,19 +73,19 @@ async function resolveControlPlane(cwd: string, workItemId: string): Promise<{ d
     locator = JSON.parse(await readFile(locatorPath, "utf8")) as { repositoryId?: string; workItemId?: string; worktree?: string };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new ControlPlaneStorageError("WSPEC_WORK_ITEM_NOT_FOUND", `找不到 Work Item：${workItemId}`);
+      throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_NOT_FOUND", `找不到 Work Item：${workItemId}`);
     }
     throw error;
   }
   if (locator.repositoryId !== repository.repositoryId || locator.workItemId !== workItemId || typeof locator.worktree !== "string") {
-    throw new ControlPlaneStorageError("WSPEC_REPOSITORY_ID_MISMATCH", "Work Item locator 与当前仓库身份不一致。");
+    throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "Work Item locator 与当前仓库身份不一致。");
   }
   const repositoryCache = JSON.parse(await readFile(path.join(repository.commonDir, "wsspec", "repository.json"), "utf8")) as {
     repositoryId?: string;
     repositoryRoot?: string;
   };
   if (repositoryCache.repositoryId !== repository.repositoryId || typeof repositoryCache.repositoryRoot !== "string") {
-    throw new ControlPlaneStorageError("WSPEC_REPOSITORY_ID_MISMATCH", "Git common-dir 仓库缓存身份不一致。");
+    throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "Git common-dir 仓库缓存身份不一致。");
   }
   return {
     directory: path.join(repository.commonDir, "wsspec", "work-items", workItemId, "control-plane"),
@@ -145,7 +145,7 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
   const resolved = await resolveControlPlane(cwd, workItemId);
   const stored = JSON.parse(await readFile(path.join(resolved.directory, "runtime.json"), "utf8")) as StoredProjection;
   if (stored.repositoryId !== resolved.repositoryId || stored.workItemId !== workItemId) {
-    throw new ControlPlaneStorageError("WSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
+    throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
   }
   return { ...stored, claims: stored.claims ?? {}, contexts: stored.contexts ?? {}, approvals: stored.approvals ?? {}, evidence: stored.evidence ?? {}, readOnly: stored.readOnly ?? false, controlPlane: resolved.directory };
 }
@@ -175,19 +175,19 @@ export function replayEvents(input: {
   };
   for (const event of input.events) {
     if (event.repositoryId !== recovered.repositoryId || event.workItemId !== recovered.workItemId) {
-      throw new ControlPlaneStorageError("WSPEC_REPOSITORY_ID_MISMATCH", "事件与当前仓库或 Work Item 身份不一致。");
+      throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "事件与当前仓库或 Work Item 身份不一致。");
     }
     if (event.eventType === "work-item.transitioned") {
       recovered = { ...recovered, workItem: transitionWorkItem(recovered.workItem, { type: "transition", to: event.to as WorkItemState["status"] }) };
     } else if (event.eventType === "stage.transitioned") {
       const stageId = event.stageId;
       if (stageId === null || recovered.stages[stageId] === undefined) {
-        throw new ControlPlaneStorageError("WSPEC_EVENT_CHAIN_INVALID", "Stage 事件引用了未知 Stage。");
+        throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "Stage 事件引用了未知 Stage。");
       }
       recovered = { ...recovered, stages: { ...recovered.stages, [stageId]: transitionStage(recovered.stages[stageId], { type: "transition", to: event.to as StageState["status"] }) } };
     } else {
       const result = event.result as ProjectionEventResult;
-      if (result.projection === undefined) throw new ControlPlaneStorageError("WSPEC_EVENT_CHAIN_INVALID", `事件 ${event.eventType} 缺少可重放投影。`);
+      if (result.projection === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件 ${event.eventType} 缺少可重放投影。`);
       recovered = { ...recovered, ...result.projection };
     }
     recovered.lastSequence = event.sequence;
@@ -207,7 +207,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   try {
     const stored = JSON.parse(await readFile(path.join(resolved.directory, "runtime.json"), "utf8")) as StoredProjection;
     if (stored.repositoryId !== resolved.repositoryId || stored.workItemId !== input.workItemId) {
-      throw new ControlPlaneStorageError("WSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
+      throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
     }
     durableProjection = stored;
   } catch (error) {
@@ -227,7 +227,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       durableProjection.lastSequence > events.length ||
       (durableProjection.lastSequence > 0 && anchoredEvent?.eventHash !== durableProjection.lastEventHash)
     ) {
-      throw new ControlPlaneStorageError("WSPEC_EVENT_CHAIN_INVALID", "事件日志短于或偏离持久化投影锚点。");
+      throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件日志短于或偏离持久化投影锚点。");
     }
   }
   let recovered = replayEvents({ repositoryId: resolved.repositoryId, workItemId: input.workItemId, stageIds, controlPlane: resolved.directory, events });
@@ -246,7 +246,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       if (approval.status === "pending") next.approvals[requestId] = { ...approval, status: "expired", decidedAt: recoveryTime };
     }
     const previous = events.at(-1);
-    if (previous === undefined) throw new ControlPlaneStorageError("WSPEC_EVENT_CHAIN_INVALID", "活动 Claim 缺少对应事件历史。");
+    if (previous === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "活动 Claim 缺少对应事件历史。");
     const idempotencyKey = `recover-interrupted:${previous.eventHash}`;
     const event: DomainEvent = {
       eventId: `event-${crypto.randomUUID()}`, eventType: "projection.invalidated", occurredAt: new Date().toISOString(), actor: "recovery",
@@ -265,7 +265,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   if (recovered.workItem.status === "closed") {
     const closedEvent = [...events].reverse().find((event) => event.eventType === "work-item.closed");
     const value = (closedEvent?.result as { value?: { closedAt?: string; workspaceTreeDigest?: string } } | undefined)?.value;
-    if (typeof value?.closedAt !== "string" || typeof value.workspaceTreeDigest !== "string") throw new ControlPlaneStorageError("WSPEC_EVENT_CHAIN_INVALID", "关闭事件缺少归档重建数据。");
+    if (typeof value?.closedAt !== "string" || typeof value.workspaceTreeDigest !== "string") throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "关闭事件缺少归档重建数据。");
     await writeArchiveSnapshot({ projection: recovered, worktree: path.join(resolved.repositoryRoot, resolved.worktree), closedAt: value.closedAt, workspaceTreeDigest: value.workspaceTreeDigest });
   }
   return recovered;

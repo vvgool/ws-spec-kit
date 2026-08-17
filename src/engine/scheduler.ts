@@ -45,14 +45,14 @@ export async function mutateControlPlane<T>(input: {
   const initial = await readControlPlane(input.cwd, input.workItemId);
   return withControlPlaneLock(initial.controlPlane, async () => {
     const projection = await readControlPlane(input.cwd, input.workItemId);
-    if (projection.readOnly) throw new ControlPlaneError("WSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
+    if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const encodedInput = canonicalize(input.operationInput);
-    if (encodedInput === undefined) throw new ControlPlaneError("WSPEC_EVENT_INVALID", "操作输入无法规范化。");
+    if (encodedInput === undefined) throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "操作输入无法规范化。");
     const inputDigest = sha256(encodedInput);
     const previousSequence = projection.idempotency[input.idempotencyKey];
     if (previousSequence !== undefined) {
       const previous = (await readEvents(projection.controlPlane))[previousSequence - 1];
-      if (previous?.inputDigest !== inputDigest) throw new ControlPlaneError("WSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
+      if (previous?.inputDigest !== inputDigest) throw new ControlPlaneError("WSSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
       return (previous.result as { value: T }).value;
     }
     const mutation = await input.mutate(projection);
@@ -89,7 +89,7 @@ export async function mutateControlPlane<T>(input: {
     next.lastSequence = stored.sequence;
     next.lastEventHash = stored.eventHash;
     next.idempotency = { ...projection.idempotency, [input.idempotencyKey]: stored.sequence };
-    if (input.simulateProjectionFailure === true) throw new ControlPlaneError("WSPEC_PROJECTION_WRITE_FAILED", "已追加事件，但模拟的投影写入失败。");
+    if (input.simulateProjectionFailure === true) throw new ControlPlaneError("WSSPEC_PROJECTION_WRITE_FAILED", "已追加事件，但模拟的投影写入失败。");
     await writeProjection(next);
     return mutation.value;
   });
@@ -100,7 +100,7 @@ async function eventMetadata(projection: RuntimeProjection): Promise<{ workflowD
   const locator = JSON.parse(await readFile(path.join(locatorRoot, "locator.json"), "utf8")) as { worktree: string };
   const repositoryCache = JSON.parse(await readFile(path.resolve(projection.controlPlane, "../../../repository.json"), "utf8")) as { repositoryId: string; repositoryRoot: string };
   if (repositoryCache.repositoryId !== projection.repositoryId) {
-    throw new ControlPlaneError("WSPEC_REPOSITORY_ID_MISMATCH", "控制面仓库缓存身份不一致。");
+    throw new ControlPlaneError("WSSPEC_REPOSITORY_ID_MISMATCH", "控制面仓库缓存身份不一致。");
   }
   const manifestPath = path.join(repositoryCache.repositoryRoot, locator.worktree, ".wsspec", "work-items", projection.workItemId, "work-item.yaml");
   const manifest = parse(await readFile(manifestPath, "utf8")) as { execution: { workflowDigest: string; configDigest: string; baselineTreeDigest: string } };
@@ -112,26 +112,26 @@ function apply(projection: RuntimeProjection, input: TransitionInput): RuntimePr
     return { ...projection, workItem: transitionWorkItem(projection.workItem, { type: "transition", to: input.to }) };
   }
   const stage = projection.stages[input.stageId];
-  if (stage === undefined) throw new ControlPlaneError("WSPEC_STAGE_NOT_FOUND", `找不到 Stage：${input.stageId}`);
+  if (stage === undefined) throw new ControlPlaneError("WSSPEC_STAGE_NOT_FOUND", `找不到 Stage：${input.stageId}`);
   return { ...projection, stages: { ...projection.stages, [input.stageId]: transitionStage(stage, { type: "transition", to: input.to }) } };
 }
 
 export async function transitionProjectionLocked(projection: RuntimeProjection, input: TransitionInput): Promise<RuntimeProjection> {
-    if (projection.readOnly) throw new ControlPlaneError("WSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
+    if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const currentStage = input.scope === "stage" ? projection.stages[input.stageId] : undefined;
     if (input.scope === "stage" && currentStage === undefined) {
-      throw new ControlPlaneError("WSPEC_STAGE_NOT_FOUND", `找不到 Stage：${input.stageId}`);
+      throw new ControlPlaneError("WSSPEC_STAGE_NOT_FOUND", `找不到 Stage：${input.stageId}`);
     }
     const metadata = await eventMetadata(projection);
     const from = input.scope === "work-item" ? projection.workItem.status : currentStage!.status;
     const inputContent = canonicalize({ scope: input.scope, stageId: input.stageId ?? null, to: input.to });
-    if (inputContent === undefined) throw new ControlPlaneError("WSPEC_EVENT_INVALID", "状态转换输入无法规范化。");
+    if (inputContent === undefined) throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "状态转换输入无法规范化。");
     const inputDigest = sha256(inputContent);
     const previousSequence = projection.idempotency[input.idempotencyKey];
     if (previousSequence !== undefined) {
       const events = await readEvents(projection.controlPlane);
       const previous = events[previousSequence - 1];
-      if (previous?.inputDigest !== inputDigest) throw new ControlPlaneError("WSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
+      if (previous?.inputDigest !== inputDigest) throw new ControlPlaneError("WSSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
       return replayEvents({
         repositoryId: projection.repositoryId,
         workItemId: projection.workItemId,
@@ -164,7 +164,7 @@ export async function transitionProjectionLocked(projection: RuntimeProjection, 
     next.lastEventHash = stored.eventHash;
     next.idempotency = { ...projection.idempotency, [input.idempotencyKey]: stored.sequence };
     if (input.simulateProjectionFailure === true) {
-      throw new ControlPlaneError("WSPEC_PROJECTION_WRITE_FAILED", "已追加事件，但模拟的投影写入失败。");
+      throw new ControlPlaneError("WSSPEC_PROJECTION_WRITE_FAILED", "已追加事件，但模拟的投影写入失败。");
     }
     return next;
 }

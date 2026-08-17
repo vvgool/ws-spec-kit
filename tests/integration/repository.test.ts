@@ -50,7 +50,7 @@ test("repository cache mismatch fails closed", async () => {
 
   await assert.rejects(
     loadRepository(root),
-    (error: unknown) => error instanceof RepositoryError && error.code === "WSPEC_REPOSITORY_ID_MISMATCH",
+    (error: unknown) => error instanceof RepositoryError && error.code === "WSSPEC_REPOSITORY_ID_MISMATCH",
   );
 });
 

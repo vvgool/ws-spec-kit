@@ -55,7 +55,7 @@ test("creates an isolated Work Item with immutable prompt source and snapshots",
   const root = await prepareRepository();
   const workItem = await createWorkItem({
     root,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     title: "支付重试",
     source: { type: "prompt", content: "实现支付重试" },
     createdAt: "2026-08-16T10:00:00+08:00",
@@ -74,7 +74,7 @@ test("creates an isolated Work Item with immutable prompt source and snapshots",
   assert.equal(source.content.text, "实现支付重试");
   assert.match(source.contentDigest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(await git(root, "worktree", "list", "--porcelain").then((value) => value.includes(worktree)), true);
-  assert.equal(await git(root, "show-ref", "--verify", "refs/heads/wspec/WSK-20260816-001").then(() => true), true);
+  assert.equal(await git(root, "show-ref", "--verify", "refs/heads/wspec/WSS-20260816-001").then(() => true), true);
   await access(path.join(itemRoot, "snapshot", "workflow.yaml"));
   await access(path.join(itemRoot, "snapshot", "config.yaml"));
   await access(path.join(itemRoot, "snapshot", "schemas", "builtin-workflow-v1.schema.json"));
@@ -94,7 +94,7 @@ test("captures Markdown file content instead of retaining a mutable source path"
 
   const workItem = await createWorkItem({
     root,
-    workItemId: "WSK-20260816-002",
+    workItemId: "WSS-20260816-002",
     title: "支付重试文档",
     source: { type: "file", path: "requirement.md" },
     createdAt: "2026-08-16T10:01:00+08:00",
@@ -119,7 +119,7 @@ test("duplicate Work Item IDs fail without overwriting the existing snapshot", a
   const root = await prepareRepository();
   const input = {
     root,
-    workItemId: "WSK-20260816-003" as const,
+    workItemId: "WSS-20260816-003" as const,
     title: "First",
     source: { type: "prompt" as const, content: "first" },
     createdAt: "2026-08-16T10:02:00+08:00",
@@ -128,7 +128,7 @@ test("duplicate Work Item IDs fail without overwriting the existing snapshot", a
 
   await assert.rejects(
     createWorkItem({ ...input, title: "Second", source: { type: "prompt", content: "second" } }),
-    (error: unknown) => error instanceof WorkItemError && error.code === "WSPEC_WORK_ITEM_ID_CONFLICT",
+    (error: unknown) => error instanceof WorkItemError && error.code === "WSSPEC_WORK_ITEM_ID_CONFLICT",
   );
   const manifestPath = path.join(
     root,
@@ -144,17 +144,17 @@ test("duplicate Work Item IDs fail without overwriting the existing snapshot", a
 
 test("an existing target branch fails closed before creating a worktree", async () => {
   const root = await prepareRepository();
-  await git(root, "branch", "wspec/WSK-20260816-004");
+  await git(root, "branch", "wspec/WSS-20260816-004");
 
   await assert.rejects(
     createWorkItem({
       root,
-      workItemId: "WSK-20260816-004",
+      workItemId: "WSS-20260816-004",
       title: "Conflict",
       source: { type: "prompt", content: "conflict" },
       createdAt: "2026-08-16T10:03:00+08:00",
     }),
-    (error: unknown) => error instanceof WorkItemError && error.code === "WSPEC_WORK_ITEM_ID_CONFLICT",
+    (error: unknown) => error instanceof WorkItemError && error.code === "WSSPEC_WORK_ITEM_ID_CONFLICT",
   );
 });
 
@@ -167,12 +167,12 @@ test("file sources cannot escape the repository through a symlink", async () => 
   await assert.rejects(
     createWorkItem({
       root,
-      workItemId: "WSK-20260816-005",
+      workItemId: "WSS-20260816-005",
       title: "Escaping source",
       source: { type: "file", path: "linked.md" },
       createdAt: "2026-08-16T10:04:00+08:00",
     }),
-    (error: unknown) => error instanceof WorkItemError && error.code === "WSPEC_SOURCE_PATH_INVALID",
+    (error: unknown) => error instanceof WorkItemError && error.code === "WSSPEC_SOURCE_PATH_INVALID",
   );
 });
 
@@ -185,12 +185,12 @@ test("worktree roots cannot escape the repository through a symlink", async () =
   await assert.rejects(
     createWorkItem({
       root,
-      workItemId: "WSK-20260816-006",
+      workItemId: "WSS-20260816-006",
       title: "Escaping worktree",
       source: { type: "prompt", content: "escape" },
       createdAt: "2026-08-16T10:05:00+08:00",
     }),
-    (error: unknown) => error instanceof WorkItemError && error.code === "WSPEC_CONTROL_PLANE_INVALID",
+    (error: unknown) => error instanceof WorkItemError && error.code === "WSSPEC_CONTROL_PLANE_INVALID",
   );
-  await assert.rejects(access(path.join(outside, "WSK-20260816-006")));
+  await assert.rejects(access(path.join(outside, "WSS-20260816-006")));
 });

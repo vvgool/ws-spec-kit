@@ -15,7 +15,7 @@ type JsonSchema = Record<string, unknown>;
 const idPattern = "^[a-z][a-z0-9-]{0,62}$";
 const digestPattern = "^sha256:.+$";
 const repositoryIdPattern = "^repo-[0-9A-HJKMNP-TV-Z]{26}$";
-const workItemIdPattern = "^WSK-[A-Za-z0-9-]+$";
+const workItemIdPattern = "^WSS-[A-Za-z0-9-]+$";
 
 const stringArray = { type: "array", items: { type: "string" }, uniqueItems: true } as const;
 

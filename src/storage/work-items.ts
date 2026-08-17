@@ -74,7 +74,7 @@ interface ParsedConfig {
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const publicSchemas = path.join(packageRoot, "schemas");
-const workItemIdPattern = /^WSK-[A-Za-z0-9-]+$/;
+const workItemIdPattern = /^WSS-[A-Za-z0-9-]+$/;
 
 async function exists(target: string): Promise<boolean> {
   try {
@@ -97,12 +97,12 @@ async function branchExists(root: string, branch: string): Promise<boolean> {
 
 function repositoryRelativePath(root: string, configuredPath: string): { absolute: string; relative: string } {
   if (path.isAbsolute(configuredPath)) {
-    throw new WorkItemError("WSPEC_CONTROL_PLANE_INVALID", "M1 worktree root 必须是仓库相对路径。");
+    throw new WorkItemError("WSSPEC_CONTROL_PLANE_INVALID", "M1 worktree root 必须是仓库相对路径。");
   }
   const absolute = path.resolve(root, configuredPath);
   const relative = path.relative(root, absolute);
   if (relative.startsWith("..") || path.isAbsolute(relative) || relative === "") {
-    throw new WorkItemError("WSPEC_CONTROL_PLANE_INVALID", "worktree 路径越出仓库允许边界。");
+    throw new WorkItemError("WSSPEC_CONTROL_PLANE_INVALID", "worktree 路径越出仓库允许边界。");
   }
   return { absolute, relative: relative.split(path.sep).join("/") };
 }
@@ -111,7 +111,7 @@ async function assertRealPathContained(root: string, target: string): Promise<vo
   const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(target)]);
   const relative = path.relative(realRoot, realTarget);
   if (relative.startsWith("..") || path.isAbsolute(relative) || relative === "") {
-    throw new WorkItemError("WSPEC_CONTROL_PLANE_INVALID", "worktree 根目录的真实路径越出仓库允许边界。");
+    throw new WorkItemError("WSSPEC_CONTROL_PLANE_INVALID", "worktree 根目录的真实路径越出仓库允许边界。");
   }
 }
 
@@ -125,21 +125,21 @@ async function snapshotSource(root: string, source: PromptSource | FileSource, c
     const absolute = path.resolve(root, source.path);
     const relative = path.relative(root, absolute);
     if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new WorkItemError("WSPEC_SOURCE_PATH_INVALID", "需求来源必须位于当前仓库内。");
+      throw new WorkItemError("WSSPEC_SOURCE_PATH_INVALID", "需求来源必须位于当前仓库内。");
     }
     const [realRoot, realSource] = await Promise.all([realpath(root), realpath(absolute)]);
     const realRelative = path.relative(realRoot, realSource);
     if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
-      throw new WorkItemError("WSPEC_SOURCE_PATH_INVALID", "需求来源的真实路径越出当前仓库。");
+      throw new WorkItemError("WSSPEC_SOURCE_PATH_INVALID", "需求来源的真实路径越出当前仓库。");
     }
     if (![".md", ".txt"].includes(path.extname(relative).toLowerCase())) {
-      throw new WorkItemError("WSPEC_SOURCE_TYPE_UNSUPPORTED", "M1 只支持 Markdown 和 TXT 文件来源。");
+      throw new WorkItemError("WSSPEC_SOURCE_TYPE_UNSUPPORTED", "M1 只支持 Markdown 和 TXT 文件来源。");
     }
     origin = relative.split(path.sep).join("/");
     text = await readFile(absolute, "utf8");
   }
   if (text.trim() === "") {
-    throw new WorkItemError("WSPEC_SOURCE_EMPTY", "需求来源不能为空。");
+    throw new WorkItemError("WSSPEC_SOURCE_EMPTY", "需求来源不能为空。");
   }
   return { version: 1, type: source.type, capturedAt, origin, content: { text }, contentDigest: sha256(text) };
 }
@@ -170,7 +170,7 @@ async function snapshotSchemas(target: string): Promise<string> {
 
 export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkItem> {
   if (!workItemIdPattern.test(input.workItemId) || input.title.trim() === "") {
-    throw new WorkItemError("WSPEC_WORK_ITEM_INVALID", "Work Item ID 或标题不合法。");
+    throw new WorkItemError("WSSPEC_WORK_ITEM_INVALID", "Work Item ID 或标题不合法。");
   }
   const identity = await loadRepository(input.root);
   const root = identity.repositoryRoot;
@@ -182,7 +182,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
   const locator = path.join(identity.commonDir, "wsspec", "work-items", input.workItemId, "locator.json");
 
   if ((await exists(worktree)) || (await exists(locator)) || (await branchExists(root, branch))) {
-    throw new WorkItemError("WSPEC_WORK_ITEM_ID_CONFLICT", `Work Item 目标已存在：${input.workItemId}`);
+    throw new WorkItemError("WSSPEC_WORK_ITEM_ID_CONFLICT", `Work Item 目标已存在：${input.workItemId}`);
   }
 
   await mkdir(worktreeRoot.absolute, { recursive: true });

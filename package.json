@@ -1,7 +1,7 @@
 {
-  "name": "wiesen-spec-kit",
+  "name": "ws-spec-kit",
   "version": "0.1.0-alpha.1",
-  "description": "Agent-neutral engineering workflow protocol and CLI",
+  "description": "由 Agent Skill 驱动的可定制软件交付工作流引擎",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {

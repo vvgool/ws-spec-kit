@@ -31,7 +31,7 @@ export function getSchema(id: SchemaId): object {
   const schema = schemas[id];
   if (schema === undefined) {
     throw new SchemaValidationError(
-      "WSPEC_SCHEMA_UNSUPPORTED_VERSION",
+      "WSSPEC_SCHEMA_UNSUPPORTED_VERSION",
       "/schemaId",
       `不支持 Schema：${id}`,
       "请使用受支持的 v1 Schema ID，或先执行显式迁移。",
@@ -44,7 +44,7 @@ function diagnostic(error: ErrorObject): SchemaValidationError {
   if (error.keyword === "additionalProperties") {
     const property = String(error.params.additionalProperty);
     return new SchemaValidationError(
-      "WSPEC_SCHEMA_UNKNOWN_FIELD",
+      "WSSPEC_SCHEMA_UNKNOWN_FIELD",
       `${error.instancePath}/${property}`,
       `存在未知字段：${property}`,
       `删除未知字段 ${property}，或升级到明确支持它的 Schema。`,
@@ -53,14 +53,14 @@ function diagnostic(error: ErrorObject): SchemaValidationError {
   if (error.keyword === "required") {
     const property = String(error.params.missingProperty);
     return new SchemaValidationError(
-      "WSPEC_SCHEMA_REQUIRED_FIELD",
+      "WSSPEC_SCHEMA_REQUIRED_FIELD",
       `${error.instancePath}/${property}`,
       `缺少必填字段：${property}`,
       `补充字段 ${property}，并按照对应 v1 参考规范填写。`,
     );
   }
   return new SchemaValidationError(
-    "WSPEC_SCHEMA_INVALID_VALUE",
+    "WSSPEC_SCHEMA_INVALID_VALUE",
     error.instancePath || "/",
     error.message ?? "字段值不符合 Schema",
     "检查字段类型、格式和允许值。",

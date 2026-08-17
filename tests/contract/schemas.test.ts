@@ -53,14 +53,14 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
   },
   "builtin.work-item.v1": {
     version: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     repositoryId: "repo-01J5V8Q4Y7M6F3K2N1P0ABCDER",
     title: "支付重试",
     createdAt: "2026-08-16T10:00:00+08:00",
     status: "active",
     execution: {
-      worktree: ".worktrees/WSK-20260816-001",
-      branch: "wspec/WSK-20260816-001",
+      worktree: ".worktrees/WSS-20260816-001",
+      branch: "wspec/WSS-20260816-001",
       baselineRevision: "abc123",
       baselineTreeDigest: "sha256:baseline",
       workflowDigest: "sha256:workflow",
@@ -72,7 +72,7 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
   },
   "builtin.stage-context.v1": {
     version: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     stageId: "build",
     attemptId: "attempt-3",
     claimToken: "opaque-token",
@@ -91,7 +91,7 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
   },
   "builtin.stage-result.v1": {
     version: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     stageId: "build",
     attemptId: "attempt-3",
     workflowDigest: "sha256:workflow",
@@ -123,7 +123,7 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
   "builtin.artifact.v1": {
     artifactType: "design",
     schemaVersion: 1,
-    workItemId: "WSK-20260816-001",
+    workItemId: "WSS-20260816-001",
     stageId: "design",
     attemptId: "attempt-2",
     revision: 3,
@@ -154,7 +154,7 @@ test("public schemas reject unknown fields with a stable diagnostic", () => {
     () => validate("builtin.artifact.v1", value),
     (error: unknown) => {
       assert.ok(error instanceof SchemaValidationError);
-      assert.equal(error.code, "WSPEC_SCHEMA_UNKNOWN_FIELD");
+      assert.equal(error.code, "WSSPEC_SCHEMA_UNKNOWN_FIELD");
       assert.equal(error.path, "/unexpected");
       assert.match(error.suggestion, /unexpected/);
       return true;
@@ -170,7 +170,7 @@ test("public schemas reject missing required fields with a field path", () => {
     () => validate("builtin.artifact.v1", value),
     (error: unknown) => {
       assert.ok(error instanceof SchemaValidationError);
-      assert.equal(error.code, "WSPEC_SCHEMA_REQUIRED_FIELD");
+      assert.equal(error.code, "WSSPEC_SCHEMA_REQUIRED_FIELD");
       assert.equal(error.path, "/contentHash");
       return true;
     },
@@ -182,7 +182,7 @@ test("unsupported schema IDs fail closed", () => {
     () => getSchema("builtin.artifact.v2" as SchemaId),
     (error: unknown) => {
       assert.ok(error instanceof SchemaValidationError);
-      assert.equal(error.code, "WSPEC_SCHEMA_UNSUPPORTED_VERSION");
+      assert.equal(error.code, "WSSPEC_SCHEMA_UNSUPPORTED_VERSION");
       assert.equal(error.path, "/schemaId");
       return true;
     },

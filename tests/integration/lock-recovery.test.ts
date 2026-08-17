@@ -16,7 +16,7 @@ async function prepare() {
   await writeFile(path.join(root, ".wsspec/workflow.yaml"), "version: 1\nworkflow: { id: lock }\nstages:\n  - { id: define, kind: define, owner: agent, uses: artifact.generate, output: [specification], approval: { required: true, provider: interactive } }\n");
   await writeFile(path.join(root, ".wsspec/config.yaml"), "version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test: { command: [npm, test], cwd: worktree, timeoutSeconds: 60, required: true, evidence: trusted }\n");
   await git(root, "add", "."); await git(root, "commit", "-m", "lock fixture");
-  const workItemId = "WSK-LOCK";
+  const workItemId = "WSS-LOCK";
   await createWorkItem({ root, workItemId, title: "锁恢复", source: { type: "prompt", content: "锁恢复" } });
   const projection = await initializeControlPlane({ cwd: root, workItemId, stages: ["define"] });
   return { root, workItemId, lockPath: path.join(projection.controlPlane, "runtime.lock") };
@@ -30,7 +30,7 @@ test("explicit recover clears a stale lock owned by a dead local process", async
 
   await assert.rejects(
     transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "active", idempotencyKey: "activate" }),
-    (error: unknown) => hasCode(error, "WSPEC_CONTROL_PLANE_STALE_LOCK"),
+    (error: unknown) => hasCode(error, "WSSPEC_CONTROL_PLANE_STALE_LOCK"),
   );
   await recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId });
   const active = await transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "active", idempotencyKey: "activate" });
@@ -43,6 +43,6 @@ test("recover never steals a lock from another host", async () => {
 
   await assert.rejects(
     recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
-    (error: unknown) => hasCode(error, "WSPEC_CONTROL_PLANE_LOCKED"),
+    (error: unknown) => hasCode(error, "WSSPEC_CONTROL_PLANE_LOCKED"),
   );
 });

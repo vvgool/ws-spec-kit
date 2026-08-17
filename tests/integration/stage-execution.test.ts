@@ -48,7 +48,7 @@ async function prepare(): Promise<{ root: string; worktree: string; workItemId: 
   await writeFile(path.join(root, ".wsspec", "config.yaml"), config);
   await git(root, "add", ".wsspec", ".gitignore");
   await git(root, "commit", "-m", "chore: configure stage fixture");
-  const workItemId = "WSK-20260816-STAGE";
+  const workItemId = "WSS-20260816-STAGE";
   const item = await createWorkItem({ root, workItemId, title: "阶段执行", source: { type: "prompt", content: "实现功能" } });
   const worktree = path.join(root, item.execution.worktree);
   await initializeControlPlane({ cwd: root, workItemId, stages: ["build", "review"] });
@@ -83,7 +83,7 @@ test("a Claim can be renewed and explicitly released without reusing its token",
   await releaseClaim({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "build", attemptId: claim.attemptId, claimToken: claim.claimToken });
   const replacement = await claimStage({ cwd: fixture.worktree, workItemId: fixture.workItemId, stageId: "build", actor: "other", now: "2026-08-16T04:00:31.000Z" });
   assert.notEqual(replacement.claimToken, claim.claimToken);
-  await assert.rejects(buildStageContext(claim), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSPEC_ATTEMPT_NOT_ACTIVE");
+  await assert.rejects(buildStageContext(claim), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ATTEMPT_NOT_ACTIVE");
 });
 
 test("recovery cancels active Claim and Context while preserving their audit events", async () => {
@@ -132,7 +132,7 @@ test("completion rejects a missing required Artifact", async () => {
   const claim = await claimStage({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "build", actor: "codex" });
   const context = await buildStageContext(claim);
   await transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "stage", stageId: "build", to: "running", idempotencyKey: "start" });
-  await assert.rejects(completeStage({ cwd: fixture.root, context, result: { version: 1, workItemId: fixture.workItemId, stageId: "build", attemptId: claim.attemptId, workflowDigest: context.workflowDigest, contextDigest: context.contextDigest, baselineTreeDigest: context.baselineTreeDigest, inputWorkspaceTreeDigest: context.inputWorkspaceTreeDigest, outputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(fixture.worktree), status: "completed", summary: "无工件", modifiedFiles: [], artifacts: [], commands: [], evidence: [], externalWrites: [], remainingRisks: [] } }), (error: unknown) => error instanceof StageResultError && error.code === "WSPEC_REQUIRED_ARTIFACT_MISSING");
+  await assert.rejects(completeStage({ cwd: fixture.root, context, result: { version: 1, workItemId: fixture.workItemId, stageId: "build", attemptId: claim.attemptId, workflowDigest: context.workflowDigest, contextDigest: context.contextDigest, baselineTreeDigest: context.baselineTreeDigest, inputWorkspaceTreeDigest: context.inputWorkspaceTreeDigest, outputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(fixture.worktree), status: "completed", summary: "无工件", modifiedFiles: [], artifacts: [], commands: [], evidence: [], externalWrites: [], remainingRisks: [] } }), (error: unknown) => error instanceof StageResultError && error.code === "WSSPEC_REQUIRED_ARTIFACT_MISSING");
 });
 
 test("completion rejects forged output digests and actual changes outside allowedPaths", async () => {
@@ -142,8 +142,8 @@ test("completion rejects forged output digests and actual changes outside allowe
   await transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "stage", stageId: "build", to: "running", idempotencyKey: "start" });
   await writeFile(path.join(fixture.worktree, "README.md"), "outside\n");
   const base = { version: 1 as const, workItemId: fixture.workItemId, stageId: "build", attemptId: claim.attemptId, workflowDigest: context.workflowDigest, contextDigest: context.contextDigest, baselineTreeDigest: context.baselineTreeDigest, inputWorkspaceTreeDigest: context.inputWorkspaceTreeDigest, status: "completed" as const, summary: "伪造", modifiedFiles: ["README.md"], artifacts: [], commands: [], evidence: [], externalWrites: [], remainingRisks: [] };
-  await assert.rejects(completeStage({ cwd: fixture.root, context, result: { ...base, outputWorkspaceTreeDigest: "sha256:fake" } }), (error: unknown) => error instanceof StageResultError && error.code === "WSPEC_OUTPUT_DIGEST_MISMATCH");
-  await assert.rejects(completeStage({ cwd: fixture.root, context, result: { ...base, outputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(fixture.worktree) } }), (error: unknown) => error instanceof StageResultError && error.code === "WSPEC_ALLOWED_PATHS_VIOLATION");
+  await assert.rejects(completeStage({ cwd: fixture.root, context, result: { ...base, outputWorkspaceTreeDigest: "sha256:fake" } }), (error: unknown) => error instanceof StageResultError && error.code === "WSSPEC_OUTPUT_DIGEST_MISMATCH");
+  await assert.rejects(completeStage({ cwd: fixture.root, context, result: { ...base, outputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(fixture.worktree) } }), (error: unknown) => error instanceof StageResultError && error.code === "WSSPEC_ALLOWED_PATHS_VIOLATION");
   assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).stages.build?.status, "running");
 });
 

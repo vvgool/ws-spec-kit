@@ -18,20 +18,20 @@ export async function completeStage(input: { cwd: string; context: StageContext;
   const result = validate<Record<string, unknown>>("builtin.stage-result.v1", input.result);
   const projection = await readControlPlane(input.cwd, input.context.workItemId);
   const claim = projection.claims[input.context.stageId];
-  if (claim?.attemptId !== input.context.attemptId || claim.claimToken !== input.context.claimToken) throw new StageResultError("WSPEC_ATTEMPT_NOT_ACTIVE", "Attempt 或 Claim 令牌已经失效。");
-  if (result.contextDigest !== input.context.contextDigest || result.inputWorkspaceTreeDigest !== input.context.inputWorkspaceTreeDigest) throw new StageResultError("WSPEC_CONTEXT_STALE", "Result 与当前 Context 不匹配。");
+  if (claim?.attemptId !== input.context.attemptId || claim.claimToken !== input.context.claimToken) throw new StageResultError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Attempt 或 Claim 令牌已经失效。");
+  if (result.contextDigest !== input.context.contextDigest || result.inputWorkspaceTreeDigest !== input.context.inputWorkspaceTreeDigest) throw new StageResultError("WSSPEC_CONTEXT_STALE", "Result 与当前 Context 不匹配。");
   const worktree = await worktreeFor(input.cwd, input.context.workItemId);
   const output = await computeWorkspaceTreeDigest(worktree);
-  if (result.outputWorkspaceTreeDigest !== output) throw new StageResultError("WSPEC_OUTPUT_DIGEST_MISMATCH", "Result 声明的输出工作区摘要不真实。");
+  if (result.outputWorkspaceTreeDigest !== output) throw new StageResultError("WSSPEC_OUTPUT_DIGEST_MISMATCH", "Result 声明的输出工作区摘要不真实。");
   const current = await computeWorkspaceSnapshot(worktree);
   const before = new Map(claim.workspaceSnapshot.map((entry) => [entry.path, JSON.stringify(entry)]));
   const after = new Map(current.map((entry) => [entry.path, JSON.stringify(entry)]));
   const changed = new Set([...before.keys(), ...after.keys()].filter((file) => before.get(file) !== after.get(file)));
-  if ([...changed].some((file) => !permitted(file, claim.allowedPaths))) throw new StageResultError("WSPEC_ALLOWED_PATHS_VIOLATION", "Attempt 修改了 allowedPaths 以外的文件。");
+  if ([...changed].some((file) => !permitted(file, claim.allowedPaths))) throw new StageResultError("WSSPEC_ALLOWED_PATHS_VIOLATION", "Attempt 修改了 allowedPaths 以外的文件。");
   const artifacts = result.artifacts as Array<{ artifactType?: string; path?: string }>;
   for (const expected of input.context.expectedOutputs) {
     const artifact = artifacts.find((candidate) => candidate.artifactType === expected.artifactType && typeof candidate.path === "string");
-    if (artifact?.path === undefined) throw new StageResultError("WSPEC_REQUIRED_ARTIFACT_MISSING", `缺少必需 Artifact：${expected.artifactType}`);
+    if (artifact?.path === undefined) throw new StageResultError("WSSPEC_REQUIRED_ARTIFACT_MISSING", `缺少必需 Artifact：${expected.artifactType}`);
     await verifyArtifact(pathFor(worktree, artifact.path), { repositoryRoot: worktree, artifactType: expected.artifactType, workItemId: input.context.workItemId, stageId: input.context.stageId, attemptId: input.context.attemptId });
   }
   return transitionRuntime({ cwd: input.cwd, workItemId: input.context.workItemId, scope: "stage", stageId: input.context.stageId, to: "validating", idempotencyKey: `complete:${input.context.attemptId}` });
@@ -39,7 +39,7 @@ export async function completeStage(input: { cwd: string; context: StageContext;
 
 function pathFor(root: string, relative: string): string {
   const normalized = relative.replaceAll("\\", "/");
-  if (normalized.startsWith("/") || normalized.split("/").includes("..")) throw new StageResultError("WSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 路径必须位于工作区内。");
+  if (normalized.startsWith("/") || normalized.split("/").includes("..")) throw new StageResultError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 路径必须位于工作区内。");
   return `${root}/${normalized}`;
 }
 
@@ -72,7 +72,7 @@ export async function invalidateFromArtifact(input: { cwd: string; workItemId: s
     stageId: input.stageId, operationInput: { stageId: input.stageId, affected: [...affected].sort() },
     mutate: (current) => {
     let projection = { ...current, stages: { ...current.stages }, claims: { ...current.claims }, contexts: { ...current.contexts }, approvals: { ...current.approvals }, evidence: { ...current.evidence } };
-    if (projection.stages[input.stageId] === undefined) throw new StageResultError("WSPEC_STAGE_NOT_FOUND", `找不到 Stage ${input.stageId}。`);
+    if (projection.stages[input.stageId] === undefined) throw new StageResultError("WSSPEC_STAGE_NOT_FOUND", `找不到 Stage ${input.stageId}。`);
     for (const stageId of affected) {
       if (projection.stages[stageId]?.status === "cancelled" || projection.stages[stageId]?.status === "invalidated") continue;
       projection.stages[stageId] = transitionStage(projection.stages[stageId]!, { type: "transition", to: "invalidated" });
