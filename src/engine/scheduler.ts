@@ -45,7 +45,6 @@ export async function mutateControlPlane<T>(input: {
   const initial = await readControlPlane(input.cwd, input.workItemId);
   return withControlPlaneLock(initial.controlPlane, async () => {
     const projection = await readControlPlane(input.cwd, input.workItemId);
-    if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const encodedInput = canonicalize(input.operationInput);
     if (encodedInput === undefined) throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "操作输入无法规范化。");
     const inputDigest = sha256(encodedInput);
@@ -55,6 +54,7 @@ export async function mutateControlPlane<T>(input: {
       if (previous?.inputDigest !== inputDigest) throw new ControlPlaneError("WSSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
       return (previous.result as { value: T }).value;
     }
+    if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const mutation = await input.mutate(projection);
     const metadata = await eventMetadata(projection);
     const snapshot = {

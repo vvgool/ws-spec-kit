@@ -234,6 +234,10 @@ export async function readWorkflowTrustRecords(root: string): Promise<WorkflowTr
   return (await readJournal(await workflowTrustPath(root))).records;
 }
 
+export async function readWorkflowTrustRequest(root: string, requestId: string): Promise<WorkflowTrustRequestedEvent | undefined> {
+  return (await readJournal(await workflowTrustPath(root))).requests.get(requestId);
+}
+
 interface TrustLockFileState { dev: bigint; ino: bigint; mtimeMs: bigint; mtimeNs: bigint; size: bigint }
 
 async function trustLockFileState(lockPath: string): Promise<TrustLockFileState | undefined> {

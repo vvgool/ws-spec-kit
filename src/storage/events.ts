@@ -16,6 +16,8 @@ export interface DomainEvent {
     | "claim.renewed"
     | "claim.released"
     | "context.created"
+    | "attempt.acquired"
+    | "attempt.submitted"
     | "approval.requested"
     | "approval.decided"
     | "approval.expired"

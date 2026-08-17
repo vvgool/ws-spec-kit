@@ -13,7 +13,7 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
   const packageDirectory = await mkdtemp(path.join(os.tmpdir(), "wspec-package-"));
   const consumerDirectory = await mkdtemp(path.join(os.tmpdir(), "wspec-consumer-"));
   await execute("npm", ["run", "build"], { cwd: repositoryRoot });
-  const packed = await execute("npm", ["pack", "--json", "--pack-destination", packageDirectory], { cwd: repositoryRoot });
+  const packed = await execute("npm", ["pack", repositoryRoot, "--json"], { cwd: packageDirectory });
   const packedEntries = JSON.parse(packed.stdout) as Array<{ filename: string }>;
   const filename = packedEntries[0]?.filename;
   assert.ok(filename, "npm pack must return a tarball filename");

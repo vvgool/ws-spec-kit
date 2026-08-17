@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
@@ -32,6 +32,14 @@ export interface RuntimeApproval {
   attemptId: string;
   artifactPath: string;
   contentHash: string;
+  artifacts?: Array<{
+    artifactType: string;
+    schemaVersion: number;
+    path: string;
+    revision: number;
+    contentHash: string;
+    mediaType?: string;
+  }>;
   artifactDiff?: string;
   workspaceTreeDigest: string;
   status: "pending" | "approved" | "rejected" | "expired";
@@ -51,6 +59,13 @@ export interface RuntimeClaim {
   workspaceSnapshot: TreeEntry[];
 }
 
+export const applicationCloseEvidenceKey = "application.close";
+
+export interface ApplicationCloseEvidence {
+  closedAt: string;
+  workspaceTreeDigest: string;
+}
+
 interface ProjectionEventResult {
   projection?: Pick<RuntimeProjection, "workItem" | "stages" | "claims" | "contexts" | "approvals" | "evidence" | "readOnly">;
   value?: unknown;
@@ -58,10 +73,30 @@ interface ProjectionEventResult {
 
 interface StoredProjection extends Omit<RuntimeProjection, "controlPlane"> {}
 
+export interface ApplicationAnchor {
+  version: 1;
+  workItemId: string;
+  manifestDigest: string;
+  ownerToken: string;
+}
+
 export class ControlPlaneStorageError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
     this.name = "ControlPlaneStorageError";
+  }
+}
+
+async function readApplicationAnchorFile(controlPlane: string): Promise<ApplicationAnchor | undefined> {
+  try {
+    const anchor = JSON.parse(await readFile(path.join(controlPlane, "application-anchor.json"), "utf8")) as Partial<ApplicationAnchor>;
+    if (anchor.version !== 1 || typeof anchor.workItemId !== "string" || typeof anchor.manifestDigest !== "string" || typeof anchor.ownerToken !== "string") {
+      throw new ControlPlaneStorageError("WSSPEC_APPLICATION_ANCHOR_INVALID", "Application 锚点不完整。");
+    }
+    return anchor as ApplicationAnchor;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
@@ -87,11 +122,26 @@ async function resolveControlPlane(cwd: string, workItemId: string): Promise<{ d
   if (repositoryCache.repositoryId !== repository.repositoryId || typeof repositoryCache.repositoryRoot !== "string") {
     throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "Git common-dir 仓库缓存身份不一致。");
   }
+  if (path.isAbsolute(locator.worktree) || locator.worktree.split(/[\\/]/u).includes("..")) {
+    throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_LOCATION_INVALID", "Work Item locator 必须指向仓库内相对 worktree。");
+  }
+  let cachedRoot: string;
+  let worktree: string;
+  try {
+    cachedRoot = await realpath(repositoryCache.repositoryRoot);
+    worktree = await realpath(path.resolve(cachedRoot, locator.worktree));
+  } catch {
+    throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_LOCATION_INVALID", "Work Item locator 指向的 worktree 不存在。");
+  }
+  const worktreeRelative = path.relative(cachedRoot, worktree);
+  if (worktreeRelative === "" || worktreeRelative.startsWith("..") || path.isAbsolute(worktreeRelative)) {
+    throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_LOCATION_INVALID", "Work Item locator 的真实路径越出仓库边界。");
+  }
   return {
     directory: path.join(repository.commonDir, "wsspec", "work-items", workItemId, "control-plane"),
     repositoryId: repository.repositoryId,
-    repositoryRoot: repositoryCache.repositoryRoot,
-    worktree: locator.worktree,
+    repositoryRoot: cachedRoot,
+    worktree: worktreeRelative,
   };
 }
 
@@ -102,6 +152,39 @@ function withoutLocation(projection: RuntimeProjection): StoredProjection {
 
 export async function writeProjection(projection: RuntimeProjection): Promise<void> {
   await writeFileAtomic(path.join(projection.controlPlane, "runtime.json"), `${JSON.stringify(withoutLocation(projection), null, 2)}\n`);
+}
+
+async function writeFileExclusive(target: string, content: string): Promise<void> {
+  const handle = await open(target, "wx", 0o600);
+  try {
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function writeApplicationAnchor(input: { cwd: string; workItemId: string; manifestDigest: string; ownerToken: string }): Promise<void> {
+  const resolved = await resolveControlPlane(input.cwd, input.workItemId);
+  await mkdir(resolved.directory);
+  const anchor: ApplicationAnchor = { version: 1, workItemId: input.workItemId, manifestDigest: input.manifestDigest, ownerToken: input.ownerToken };
+  try {
+    await writeFileExclusive(path.join(resolved.directory, "application-anchor.json"), `${JSON.stringify(anchor, null, 2)}\n`);
+  } catch (error) {
+    await rmdir(resolved.directory).catch((cleanupError: unknown) => {
+      if (!["ENOTEMPTY", "EEXIST"].includes((cleanupError as NodeJS.ErrnoException).code ?? "")) throw cleanupError;
+    });
+    throw error;
+  }
+}
+
+export async function readApplicationAnchor(cwd: string, workItemId: string): Promise<ApplicationAnchor | undefined> {
+  const resolved = await resolveControlPlane(cwd, workItemId);
+  const anchor = await readApplicationAnchorFile(resolved.directory);
+  if (anchor !== undefined && anchor.workItemId !== workItemId) {
+    throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "Application 锚点与 Work Item 身份不一致。");
+  }
+  return anchor;
 }
 
 export async function writeArchiveSnapshot(input: { projection: RuntimeProjection; worktree: string; closedAt: string; workspaceTreeDigest: string }): Promise<void> {
@@ -118,15 +201,21 @@ export async function writeArchiveSnapshot(input: { projection: RuntimeProjectio
   await writeFileAtomic(path.join(input.worktree, ".wsspec", "archive", input.projection.workItemId, "audit.json"), `${JSON.stringify(audit, null, 2)}\n`);
 }
 
-export async function initializeControlPlane(input: { cwd: string; workItemId: string; stages: string[] }): Promise<RuntimeProjection> {
+export async function initializeControlPlane(input: {
+  cwd: string;
+  workItemId: string;
+  stages: string[];
+  initialWorkItem?: WorkItemState;
+  initialStages?: Record<string, StageState>;
+}): Promise<RuntimeProjection> {
   const resolved = await resolveControlPlane(input.cwd, input.workItemId);
   await mkdir(resolved.directory, { recursive: true });
   const projection: RuntimeProjection = {
     version: 1,
     repositoryId: resolved.repositoryId,
     workItemId: input.workItemId,
-    workItem: { status: "draft" },
-    stages: Object.fromEntries(input.stages.map((stage) => [stage, { status: "pending" }])),
+    workItem: input.initialWorkItem ?? { status: "draft" },
+    stages: input.initialStages ?? Object.fromEntries(input.stages.map((stage) => [stage, { status: "pending" }])),
     lastSequence: 0,
     lastEventHash: null,
     idempotency: {},
@@ -137,7 +226,7 @@ export async function initializeControlPlane(input: { cwd: string; workItemId: s
     readOnly: false,
     controlPlane: resolved.directory,
   };
-  await writeProjection(projection);
+  await writeFileExclusive(path.join(projection.controlPlane, "runtime.json"), `${JSON.stringify(withoutLocation(projection), null, 2)}\n`);
   return projection;
 }
 
@@ -156,13 +245,15 @@ export function replayEvents(input: {
   stageIds: string[];
   controlPlane: string;
   events: StoredEvent[];
+  initialWorkItem?: WorkItemState;
+  initialStages?: Record<string, StageState>;
 }): RuntimeProjection {
   let recovered: RuntimeProjection = {
     version: 1,
     repositoryId: input.repositoryId,
     workItemId: input.workItemId,
-    workItem: { status: "draft" },
-    stages: Object.fromEntries(input.stageIds.map((stage) => [stage, { status: "pending" }])),
+    workItem: input.initialWorkItem ?? { status: "draft" },
+    stages: input.initialStages ?? Object.fromEntries(input.stageIds.map((stage) => [stage, { status: "pending" }])),
     lastSequence: 0,
     lastEventHash: null,
     idempotency: {},
@@ -214,9 +305,41 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     if (error instanceof ControlPlaneStorageError) throw error;
     if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const workflowPath = path.join(resolved.repositoryRoot, resolved.worktree, ".wsspec", "work-items", input.workItemId, "snapshot", "workflow.yaml");
-  const workflow = parse(await readFile(workflowPath, "utf8")) as { stages?: Array<{ id?: string }> };
-  const stageIds = workflow.stages?.map((stage) => stage.id).filter((id): id is string => typeof id === "string") ?? [];
+  const snapshotRoot = path.join(resolved.repositoryRoot, resolved.worktree, ".wsspec", "work-items", input.workItemId, "snapshot");
+  let stageIds: string[];
+  let initialWorkItem: WorkItemState | undefined;
+  let initialStages: Record<string, StageState> | undefined;
+  const anchor = await readApplicationAnchorFile(resolved.directory);
+  try {
+    const applicationText = await readFile(path.join(snapshotRoot, "application.json"), "utf8");
+    const manifestText = await readFile(path.join(resolved.repositoryRoot, resolved.worktree, ".wsspec", "work-items", input.workItemId, "work-item.yaml"), "utf8");
+    if (anchor?.workItemId !== input.workItemId || sha256(manifestText) !== anchor.manifestDigest) {
+      throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_MANIFEST_CHANGED", "Work Item manifest 与可信 Application 锚点不一致。");
+    }
+    const manifest = parse(manifestText) as { execution?: { workflowDigest?: unknown } };
+    if (typeof manifest.execution?.workflowDigest !== "string" || sha256(applicationText) !== manifest.execution.workflowDigest) {
+      throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "Application 快照摘要与 Work Item manifest 不一致。");
+    }
+    const application = JSON.parse(applicationText) as { profiles?: Record<string, { order?: unknown; steps?: Array<{ id?: unknown; enabled?: unknown; needs?: unknown }> }>; selectedProfile?: string };
+    const profile = application.selectedProfile === undefined ? undefined : application.profiles?.[application.selectedProfile];
+    const order = profile?.order;
+    if (!Array.isArray(order) || !order.every((id) => typeof id === "string") || !Array.isArray(profile?.steps)) {
+      throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_INVALID", "Application 快照缺少有效的 Profile Stage 定义。");
+    }
+    stageIds = order;
+    initialWorkItem = { status: "active" };
+    initialStages = Object.fromEntries((profile?.steps ?? []).filter((step): step is { id: string; enabled?: unknown; needs?: unknown } => typeof step.id === "string").map((step) => [
+      step.id,
+      { status: step.enabled === false ? "skipped" : Array.isArray(step.needs) && step.needs.length === 0 ? "ready" : "pending" },
+    ])) as Record<string, StageState>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (anchor !== undefined) {
+      throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "已锚定 Work Item 缺少 Application 快照，拒绝降级恢复。");
+    }
+    const workflow = parse(await readFile(path.join(snapshotRoot, "workflow.yaml"), "utf8")) as { stages?: Array<{ id?: string }> };
+    stageIds = workflow.stages?.map((stage) => stage.id).filter((id): id is string => typeof id === "string") ?? [];
+  }
   const events = await readEvents(resolved.directory).catch((error: unknown) => {
     if (error instanceof EventStoreError) throw new ControlPlaneStorageError(error.code, error.message);
     throw error;
@@ -230,12 +353,26 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件日志短于或偏离持久化投影锚点。");
     }
   }
-  let recovered = replayEvents({ repositoryId: resolved.repositoryId, workItemId: input.workItemId, stageIds, controlPlane: resolved.directory, events });
-  const abandonedStages = Object.entries(recovered.stages).filter(([, stage]) => stage.status === "claimed" || stage.status === "running").map(([stageId]) => stageId);
+  let recovered = replayEvents({
+    repositoryId: resolved.repositoryId,
+    workItemId: input.workItemId,
+    stageIds,
+    controlPlane: resolved.directory,
+    events,
+    ...(initialWorkItem === undefined ? {} : { initialWorkItem }),
+    ...(initialStages === undefined ? {} : { initialStages }),
+  });
+  const recoveryTime = new Date();
+  const abandonedStages = Object.entries(recovered.stages).filter(([stageId, stage]) => {
+    if (stage.status === "running") return true;
+    if (stage.status !== "claimed") return false;
+    const expiresAt = Date.parse(recovered.claims[stageId]?.expiresAt ?? "");
+    return !Number.isFinite(expiresAt) || expiresAt <= recoveryTime.getTime();
+  }).map(([stageId]) => stageId);
   const approvalStages = Object.entries(recovered.stages).filter(([, stage]) => stage.status === "awaiting_approval").map(([stageId]) => stageId);
   const recoveryStages = [...new Set([...abandonedStages, ...approvalStages])];
   if (recoveryStages.length > 0 || recovered.workItem.status === "awaiting_approval") {
-    const recoveryTime = new Date().toISOString();
+    const recoveredAt = recoveryTime.toISOString();
     const next = { ...recovered, workItem: recovered.workItem.status === "awaiting_approval" ? { status: "active" as const } : recovered.workItem, stages: { ...recovered.stages }, claims: { ...recovered.claims }, contexts: { ...recovered.contexts }, approvals: { ...recovered.approvals } };
     for (const stageId of recoveryStages) {
       next.stages[stageId] = { status: "ready" };
@@ -243,7 +380,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       delete next.contexts[stageId];
     }
     for (const [requestId, approval] of Object.entries(next.approvals)) {
-      if (approval.status === "pending") next.approvals[requestId] = { ...approval, status: "expired", decidedAt: recoveryTime };
+      if (approval.status === "pending") next.approvals[requestId] = { ...approval, status: "expired", decidedAt: recoveredAt };
     }
     const previous = events.at(-1);
     if (previous === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "活动 Claim 缺少对应事件历史。");
@@ -265,8 +402,11 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   if (recovered.workItem.status === "closed") {
     const closedEvent = [...events].reverse().find((event) => event.eventType === "work-item.closed");
     const value = (closedEvent?.result as { value?: { closedAt?: string; workspaceTreeDigest?: string } } | undefined)?.value;
-    if (typeof value?.closedAt !== "string" || typeof value.workspaceTreeDigest !== "string") throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "关闭事件缺少归档重建数据。");
-    await writeArchiveSnapshot({ projection: recovered, worktree: path.join(resolved.repositoryRoot, resolved.worktree), closedAt: value.closedAt, workspaceTreeDigest: value.workspaceTreeDigest });
+    const applicationClose = recovered.evidence[applicationCloseEvidenceKey] as Partial<ApplicationCloseEvidence> | undefined;
+    const closedAt = value?.closedAt ?? applicationClose?.closedAt;
+    const workspaceTreeDigest = value?.workspaceTreeDigest ?? applicationClose?.workspaceTreeDigest;
+    if (typeof closedAt !== "string" || typeof workspaceTreeDigest !== "string") throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "关闭事件缺少归档重建数据。");
+    await writeArchiveSnapshot({ projection: recovered, worktree: path.join(resolved.repositoryRoot, resolved.worktree), closedAt, workspaceTreeDigest });
   }
   return recovered;
   });

@@ -6,7 +6,8 @@ import test from "node:test";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { ApprovalError, decideArtifactApproval, requestArtifactApproval } from "../../src/engine/approvals.js";
 import { transitionRuntime } from "../../src/engine/scheduler.js";
-import { initializeControlPlane, readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
+import { initializeControlPlane, readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
+import { withControlPlaneLock } from "../../src/storage/events.js";
 import { initRepository } from "../../src/storage/repository.js";
 import { createWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
@@ -30,27 +31,69 @@ async function prepare() {
 }
 
 test("non-TTY input cannot approve an Artifact", async () => {
-  const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
+  const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: false } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_INTERACTIVE_TTY_REQUIRED");
 });
 
 test("approval expires when the bound workspace changes", async () => {
-  const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
+  const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   await writeFile(path.join(fixture.worktree, "changed.txt"), "changed\n");
   await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_EXPIRED");
 });
 
+test("a stale expiration cannot overwrite a completed approval decision", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+  await writeFile(path.join(fixture.worktree, "changed.txt"), "changed\n");
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  let expiring: Promise<unknown> | undefined;
+  await withControlPlaneLock(projection.controlPlane, async () => {
+    expiring = decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const decided = await readControlPlane(fixture.root, fixture.workItemId);
+    decided.approvals[request.requestId] = { ...request, status: "approved", decidedAt: new Date().toISOString() };
+    decided.stages.define = { status: "succeeded" };
+    await writeProjection(decided);
+  });
+  assert.ok(expiring);
+  await assert.rejects(
+    expiring,
+    (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_NOT_PENDING",
+  );
+  assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).approvals[request.requestId]?.status, "approved");
+});
+
+test("an approval decision revalidates the workspace after acquiring the control-plane lock", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  let deciding: Promise<unknown> | undefined;
+  await withControlPlaneLock(projection.controlPlane, async () => {
+    deciding = decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    await writeFile(path.join(fixture.worktree, "changed-while-waiting.txt"), "changed\n");
+  });
+  assert.ok(deciding);
+  await assert.rejects(
+    deciding,
+    (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_EXPIRED",
+  );
+  const current = await readControlPlane(fixture.root, fixture.workItemId);
+  assert.equal(current.approvals[request.requestId]?.status, "expired");
+  assert.notEqual(current.stages.define?.status, "succeeded");
+});
+
 test("TTY decisions approve or reject the exact pending request", async () => {
-  const approvedFixture = await prepare(); const approvedRequest = await requestArtifactApproval({ cwd: approvedFixture.root, workItemId: approvedFixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: approvedFixture.artifactPath });
+  const approvedFixture = await prepare(); const approvedRequest = await requestArtifactApproval({ cwd: approvedFixture.root, workItemId: approvedFixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: approvedFixture.artifactPath, artifactType: "specification" });
   const approved = await decideArtifactApproval({ cwd: approvedFixture.root, workItemId: approvedFixture.workItemId, requestId: approvedRequest.requestId, decision: "approve", terminal: { isTTY: true } }); assert.equal(approved.status, "approved");
-  const rejectedFixture = await prepare(); const rejectedRequest = await requestArtifactApproval({ cwd: rejectedFixture.root, workItemId: rejectedFixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: rejectedFixture.artifactPath });
+  const rejectedFixture = await prepare(); const rejectedRequest = await requestArtifactApproval({ cwd: rejectedFixture.root, workItemId: rejectedFixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: rejectedFixture.artifactPath, artifactType: "specification" });
   const rejected = await decideArtifactApproval({ cwd: rejectedFixture.root, workItemId: rejectedFixture.workItemId, requestId: rejectedRequest.requestId, decision: "reject", terminal: { isTTY: true }, reason: "需要修订" }); assert.equal(rejected.status, "rejected");
 });
 
 test("approval persistence excludes environment preauthorization and terminal secrets", async () => {
   const fixture = await prepare(); const secret = `secret-${crypto.randomUUID()}`; process.env.WSSPEC_APPROVAL = secret;
   try {
-    const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
+    const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
     await decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } });
     const projection = await readControlPlane(fixture.root, fixture.workItemId); const persisted = `${await readFile(path.join(projection.controlPlane, "runtime.json"), "utf8")}\n${await readFile(path.join(projection.controlPlane, "events.jsonl"), "utf8")}`;
     assert.doesNotMatch(persisted, new RegExp(secret));
@@ -59,7 +102,7 @@ test("approval persistence excludes environment preauthorization and terminal se
 
 test("recovery preserves completed approval history after projection corruption", async () => {
   const fixture = await prepare();
-  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   await decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: true } });
   const projection = await readControlPlane(fixture.root, fixture.workItemId);
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
@@ -72,7 +115,7 @@ test("recovery preserves completed approval history after projection corruption"
 
 test("recovery expires a pending approval and preserves its audit record", async () => {
   const fixture = await prepare();
-  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath });
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   const projection = await readControlPlane(fixture.root, fixture.workItemId);
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
 

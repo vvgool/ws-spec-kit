@@ -67,12 +67,13 @@ export async function runCommand(cwd: string, argv: string[], _json = false): Pr
   if (command === "complete") {
     const stageId = required(args, 1, "stageId"); const resultPath = required(args, 2, "result"); const projection = await readControlPlane(cwd, workItemId); const context = projection.contexts[stageId];
     if (context === undefined) throw new CliError("WSSPEC_CONTEXT_STALE", "Stage 没有活动 Context。");
-    const result = JSON.parse(await readFile(path.resolve(cwd, resultPath), "utf8")) as { attemptId: string; artifacts?: Array<{ path?: string }> };
+    const result = JSON.parse(await readFile(path.resolve(cwd, resultPath), "utf8")) as { attemptId: string; artifacts?: Array<{ artifactType?: string; path?: string }> };
     await completeStage({ cwd, context: context as never, result });
     const stage = (await workflowFor(cwd, workItemId)).stages.find((candidate) => candidate.id === stageId);
     if (stage?.approval?.required === true) {
-      const artifactPath = result.artifacts?.[0]?.path; if (artifactPath === undefined) throw new CliError("WSSPEC_REQUIRED_ARTIFACT_MISSING", "审批 Stage 缺少 Artifact。");
-      return requestArtifactApproval({ cwd, workItemId, stageId, attemptId: result.attemptId, artifactPath });
+      const artifact = result.artifacts?.[0];
+      if (artifact?.path === undefined || artifact.artifactType === undefined) throw new CliError("WSSPEC_REQUIRED_ARTIFACT_MISSING", "审批 Stage 缺少带类型的 Artifact。");
+      return requestArtifactApproval({ cwd, workItemId, stageId, attemptId: result.attemptId, artifactPath: artifact.path, artifactType: artifact.artifactType });
     }
     return transitionRuntime({ cwd, workItemId, scope: "stage", stageId, to: "succeeded", idempotencyKey: `validated:${result.attemptId}` });
   }
