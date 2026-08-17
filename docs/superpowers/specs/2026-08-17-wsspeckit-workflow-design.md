@@ -127,15 +127,18 @@ ws-spec-kit/
 
 ### 7.1 Skill 来源
 
-Workflow 可以显式引用三类 Skill：
+Workflow 可以显式引用四类 Skill：
 
 | URI | 来源 | 示例 |
 |---|---|---|
 | `builtin://` | WSSpecKit 发布包 | `builtin://skills/tdd-implementation` |
+| `package://` | 当前 Workflow Package | `package://skills/security-review` |
 | `global://` | 用户全局安装 | `global://superpowers/test-driven-development` |
 | `project://` | 当前项目 | `project://skills/payment-security-review` |
 
 不允许按照名称隐式覆盖。每个引用必须声明来源，避免在不同机器或 Agent 上解析到不同内容。
+`package://` 始终以声明当前 Step 的 Workflow Package 根为基准，不能解析到其他 Package；
+同一 Package 被安装到 Builtin 或 Project 位置时，引用语义保持不变。
 
 ### 7.2 组合与回退
 
@@ -211,7 +214,7 @@ skills:
     fallbackDigest: sha256:fallback
 ```
 
-- Builtin 和 Project Skill 随 Work Item 完整快照。
+- Builtin、Package 和 Project Skill 随 Work Item 完整快照。
 - Global Skill 首版记录来源和摘要，不复制其内容。
 - Global Skill 缺失时，尚未开始的 Step 可以使用已锁定 fallback。
 - Global Skill 内容变化时暂停执行，要求更新锁或选择 fallback。
@@ -235,6 +238,11 @@ skills:
 ```
 
 `manifest.yaml` 声明 Workflow 版本、所需 WSSpecKit 版本、支持的 Profile、能力、Connector 和入口文件。第三方 Workflow Package 首次使用时必须展示来源、文件清单、Skill 摘要和外部副作用能力，并由用户确认信任。
+
+Package 内 Skill 必须使用 `package://skills/<name>` 引用。Resolver 将其解析为当前
+Package 的 `skills/<name>/SKILL.md`，拒绝绝对路径、父目录逃逸、跨 Package 符号链接和
+Manifest 未列出的 Skill。Workflow Lock 同时记录 Package 摘要和每个 Package Skill 摘要；
+活动 Work Item 使用完整快照，不受项目目录中的后续修改影响。
 
 ## 9. Workflow Language v1
 
@@ -279,7 +287,7 @@ Profile 是 Workflow Package 内的显式 overlay。Workflow 定义完整 Step �
 - Issue、Knowledge 等发布目标是否为关闭前必需项。
 - 审计记录级别和保留要求。
 
-Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类别或外部目标，也不能关闭引擎安全内核。每份 Profile 都必须与 Workflow 一起编译；被启用 Step 如果消费了被跳过 Step 的必需输出，编译直接失败。
+Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类别或外部目标，也不能关闭引擎安全内核和功能交付 Workflow 的 TDD Red/Green Gate。每份 Profile 都必须与 Workflow 一起编译；被启用 Step 如果消费了被跳过 Step 的必需输出，编译直接失败。
 
 内置基础工作流提供：
 
@@ -366,7 +374,38 @@ profilePolicy:
 
 路径信息尚不可用时不提前猜测；在代码探索、计划或实际修改暴露路径后再升级。Profile 选择和每次升级都写入事件及审计快照。
 
-### 9.4 内置基础工作流
+### 9.4 可验证 TDD
+
+内置基础工作流不能只依赖 Agent 声明“使用了 TDD”。每个实现批次必须形成一组
+`TddCycleEvidence`：
+
+```ts
+interface TddCycleEvidence {
+  taskId: string;
+  testPaths: string[];
+  commandId: string;
+  redEvidenceId: string;
+  greenEvidenceId: string;
+  refactorEvidenceId?: string;
+}
+```
+
+- `write-tests` 只允许修改测试、Fixture 和必要测试配置路径，不允许修改生产实现路径。
+- `verify-red` 由引擎执行项目注册的确定性测试 Gate，预期非零退出；语法错误、依赖缺失、
+  命令不存在、超时和基础设施错误不能算 Red 成功。
+- Red Evidence 必须包含失败测试标识、与当前任务验收条件的绑定和脱敏失败摘要。
+- `implement` 只有在有效 Red Evidence 后才能获取，负责最小实现，不得改写或删除 Red 测试逃避失败。
+- `verify-green` 由引擎以同一 `commandId` 运行测试，必须零退出，并把结果与 Red Evidence 绑定。
+- 可选重构后必须再次执行 Green Gate；失败则当前 TDD Cycle 未完成。
+- Review-Fix 修改生产代码后，循环内的 `verify` 必须以相同 `commandId` 追加 Green Evidence；
+  修改测试路径或测试内容会使原 TDD Evidence 失效，并将该任务路由回 `write-tests`，不能直接 Close。
+- Agent 自报命令只能形成 reported Evidence，不能替代 Red/Green trusted Evidence。
+
+Quick、Standard 和 Governed 都要求 TDD Cycle；Profile 只能调整 Artifact 详细程度和额外 Gate，
+不能关闭 Red/Green 底线。纯文档或无可执行代码变更由风险策略选择专用非代码 Workflow，
+而不是在功能交付 Workflow 中跳过 TDD。
+
+### 9.5 内置基础工作流
 
 ```yaml
 version: 1
@@ -435,18 +474,42 @@ steps:
       - artifact: design
         required: false
 
-  - id: implement
+  - id: write-tests
     uses: agent.execute
     needs: [plan]
-    objective: 按任务使用 TDD 完成功能
+    objective: 根据当前任务先编写能够因缺少功能而失败的测试
+    skills:
+      - ref: builtin://skills/tdd-implementation
+        required: true
+    outputs: [red-test-result]
+
+  - id: verify-red
+    uses: command.execute
+    action: quality.test
+    expectedOutcome: test-failure
+    needs: [write-tests]
+    outputs: [red-evidence]
+
+  - id: implement
+    uses: agent.execute
+    needs: [verify-red]
+    objective: 在保留 Red 测试的前提下完成最小实现
     skills:
       - ref: builtin://skills/tdd-implementation
         required: true
     outputs: [implementation-result]
 
+  - id: verify-green
+    uses: command.execute
+    action: quality.test
+    expectedOutcome: success
+    needs: [implement]
+    inputs: [red-evidence]
+    outputs: [tdd-evidence]
+
   - id: review-fix
     uses: control.loop
-    needs: [implement]
+    needs: [verify-green]
     until: ${review-result.approved}
     maxIterations: 5
     steps:
@@ -483,15 +546,26 @@ steps:
   - id: update-wiki
     uses: connector.execute
     action: knowledge.publish
-    needs: [commit]
+    needs: [update-issue]
     when: ${bindings.knowledge.exists}
+
+  - id: close-issue
+    uses: connector.execute
+    action: issue.close
+    needs: [update-wiki]
+    when: ${bindings.issue.exists}
+    approval: required
 
   - id: close
     uses: control.close
-    needs: [update-issue, update-wiki]
+    needs: [close-issue]
 ```
 
-`update-issue` 和 `update-wiki` 在 Binding 不存在时进入 `skipped`；内置基础工作流允许关闭。配置为必需发布目标时，确定失败或缺少回读证据必须阻止关闭。
+交付顺序固定为 `commit -> update-issue -> update-wiki -> close-issue -> close`。Binding
+不存在时对应外部 Step 进入 `skipped`，但依赖链继续；Binding 存在时不得重排或并行执行。
+`close-issue` 关闭 GitHub/GitLab Issue，`close` 只关闭 WSSpecKit Work Item，两者不是同一动作。
+外部 Issue Close 必须经过独立精确授权和状态回读；失败或回读不一致时不得关闭 Work Item。
+配置为必需知识目标时，知识发布失败或缺少回读证据同样阻止后续 Close。
 
 `plan` 对 `design` 的依赖是可选 Artifact 依赖：Quick 中 `design` 为 `skipped` 时，
 `plan` 必须直接根据 `specification` 生成一个包含修改范围、测试先行步骤、验收命令和
@@ -554,7 +628,7 @@ Driver Skill 的循环是：
 
 ```text
 识别工作流触发
-  -> start 或 resume
+  -> 新任务 start；已有任务 inspect
   -> acquire
   -> 读取当前 Step 绑定的 Skills
   -> 当前 Agent 原生执行
@@ -598,7 +672,7 @@ wspec workflow validate
 wspec workflow use project://workflows/feature-delivery
 ```
 
-`eject` 将内置 Workflow 复制到项目目录，此后由项目维护，不再随包升级自动变化。项目 Workflow 可以删除、增加或重排 Step，绑定 Builtin、Global 和 Project Skill，并增加项目专用审批或 Connector。
+`eject` 将内置 Workflow 复制到项目目录，此后由项目维护，不再随包升级自动变化。项目 Workflow 可以删除、增加或重排 Step，绑定 Builtin、Package、Global 和 Project Skill，并增加项目专用审批或 Connector。
 
 ## 13. Connector 架构
 
@@ -607,11 +681,13 @@ wspec workflow use project://workflows/feature-delivery
 - Requirement Source：用户描述、本地 Markdown/TXT、GitHub Issue、GitLab Issue、飞书文档。
 - Git：worktree、status、diff、commit。
 - Issue：GitHub/GitLab Issue 读取、更新进度、写回交付结果、关闭或状态同步。
-- Knowledge：创建或更新 Wiki/飞书文档并回读。
+- Knowledge：创建或更新知识页面并回读；首版内置 Provider 为飞书文档/飞书知识库。
 
 Connector Manifest 必须声明 `external-read` 或 `external-write`、目标类型、幂等能力、回读能力和所需凭据引用。凭据由 Agent/Connector 运行环境管理，不进入 Workflow、Artifact、Work Package、事件或日志。
 
 外部写入必须具备稳定目标、内容摘要、幂等键和回读证据。Git commit、Issue 状态修改、知识库发布以及未来的 push、merge、release 都受精确授权策略控制。
+GitHub Wiki、GitLab Wiki 和其他知识平台不属于首版内置 Provider；项目 Workflow 可以通过
+受信任的项目 Connector 扩展 `knowledge.publish`，但必须满足同一授权、幂等和回读契约。
 
 ### 13.1 首版 Provider
 
@@ -674,7 +750,7 @@ Git common-dir 保存共享运行控制面：
 
 1. Skill 是执行指导，不是授权主体。
 2. Workflow 和 Skill 不能关闭引擎安全不变量。
-3. 第三方 Workflow、Global Skill 和 Project Skill 均视为不可信指令来源。
+3. 第三方 Workflow、Package Skill、Global Skill 和 Project Skill 均视为不可信指令来源。
 4. Skill 内容变化必须通过摘要检测，不能静默继续。
 5. WSSpecKit 的路径限制和摘要校验不是 OS 沙箱，也不防御拥有当前用户完整 Shell 权限的恶意 Agent。
 6. 外部写入、Git 高风险操作和发布动作需要精确目标授权。
@@ -738,13 +814,13 @@ src/
 
 1. **规格基线**：产品改名、Workflow Language v1、Skill URI、Manifest 和 Application Protocol Schema。
 2. **Application Facade**：在现有内核上实现 `start/acquire/submit/decide/inspect`。
-3. **Skill Catalog**：内置 Skills、三层 Resolver、fallback、摘要和 Skill Lock。
+3. **Skill Catalog**：Builtin、Package、Global、Project 四类 Skill、fallback、摘要和 Skill Lock。
 4. **Workflow Package**：内置基础工作流、项目 Workflow、`list/show/eject/validate/use`。
 5. **Profile Engine**：三种内置 Profile、overlay 编译、风险策略、单向升级和失效传播。
 6. **有限控制流**：条件、重试和有界 Review-Fix 循环。
 7. **Driver Adapter**：Codex、Claude、Cursor 和 Generic 安装与恢复流程。
 8. **Source Connector**：Prompt、文件、GitHub/GitLab Issue 和飞书文档快照。
-9. **Delivery Connector**：Git commit、Issue 更新、Wiki 发布、幂等和回读。
+9. **Delivery Connector**：Git commit、Issue 更新、知识发布、外部 Issue Close、幂等和回读。
 10. **发布验收**：完整文档、安装包、Driver Skill 和真实客户端验收。
 
 每个阶段必须先为新协议增加失败测试再实现。可复用的现有安全与恢复场景必须按新协议重写，不要求旧接口测试继续通过。
@@ -758,22 +834,52 @@ src/
 - Profile overlay 不能修改 Step 安全类别、外部目标或关闭安全内核。
 - Profile 升级会补回必需 Step，并失效受影响的审批、结果和 Evidence。
 - 项目自定义 Workflow 可以声明自己的 Profile overlay 和最低风险要求。
-- 项目 Workflow 可以绑定多个 Builtin、Global 和 Project Skill。
+- 项目 Workflow 可以绑定多个 Builtin、Package、Global 和 Project Skill。
+- Workflow Package 可以使用 `package://` 绑定并快照自身携带的 Skill。
 - Global Skill 可以显式回退到 Builtin Skill。
 - Global Skill 按宿主官方目录和显式附加目录解析；同名不同摘要必须阻塞，不得静默覆盖。
 - 必需 Skill 缺失、摘要变化或 Workflow Package 被篡改时 fail closed。
 - Workflow 可以携带项目自己的 Skill、Schema 和模板。
 - 用户描述、本地文件、GitHub Issue、GitLab Issue 和飞书文档均能形成不可变需求来源快照。
 - Quick 也必须产出紧凑单任务计划，任何 Profile 都不能直接从规格跳到无计划实现。
+- 功能交付 Workflow 的每个实现批次都有可信 Red/Green Evidence，Profile 不能关闭该要求。
 - Review-Fix 循环能在通过时结束，并在达到 `maxIterations` 时阻塞。
 - Agent 自主管理上下文；Work Package 不默认内嵌工件正文或对话历史。
 - 会话中断后，新 Agent 会话可以从下一可执行 Step 恢复。
-- Git commit、Issue 更新和 Wiki 发布具备审批、幂等和回读证据。
+- Git commit、Issue 更新和知识发布具备审批、幂等和回读证据。
+- 存在 Issue Binding 时，Issue 更新、知识发布、外部 Issue Close 和 Work Item Close 严格串行；外部关闭失败时 Work Item 不得关闭。
 - 仓库中不残留旧产品名、旧公开命令、旧 Schema ID、`WSK-` 或 `WSPEC_` 对外协议。
 - 单元、契约、集成、E2E、构建、Schema 漂移和 `npm pack --dry-run` 全部通过。
 - 本地 Fixture、已登录客户端测试和真实 GitHub/GitLab/飞书验收必须分别报告，不能互相替代。
 
-## 20. 非目标
+## 20. 需求追踪矩阵
+
+| ID | 用户需求 | 设计落点 | 实施计划 | 必需验收证据 |
+|---|---|---|---|---|
+| `REQ-01` | 当前 Agent 会话由 Skill 驱动 | 4、10、11 | Foundation Task 7-8 | 四宿主协议契约及真实客户端 Smoke |
+| `REQ-02` | Agent 管上下文、Token、模型 | 2、4、10.1 | Foundation Task 2、7 | Work Package Schema 不含会话与模型字段 |
+| `REQ-03` | 用户描述、文件、GitHub/GitLab、飞书输入 | 9.5、13 | Connector Task 2-4 | 五类不可变 Source Artifact |
+| `REQ-04` | 探索代码并澄清需求 | 9.5 `explore/clarify` | Foundation Task 3、Control Task 6 | exploration/specification Artifact |
+| `REQ-05` | 方案设计和任务计划 | 9.3、9.5 | Foundation Task 3、6 | Standard/Governed 完整 Artifact；Quick 紧凑计划 |
+| `REQ-06` | 可验证 TDD 实现 | 9.4、9.5 | Control Task 5-6 | 同 commandId 的 trusted Red/Green Evidence |
+| `REQ-07` | Review-Fix 循环 | 9.2、9.5 | Control Task 2、6 | 有界循环、修复后 Green/质量 Gate |
+| `REQ-08` | Git commit | 9.5、13 | Connector Task 5-7 | 精确授权、commit/tree/parent 回读 |
+| `REQ-09` | Issue 更新、知识发布、Issue Close、Work Item Close | 9.5、13 | Connector Task 3-7 | 串行事件、各外部回读和最终 Close |
+| `REQ-10` | Step 可绑定对应 Skill | 7、9 | Foundation Task 5-6 | 多 Skill Binding 编译与 Work Package |
+| `REQ-11` | Workflow Package 自带 Skill | 7、8 | Foundation Task 4-5 | `package://` 搬迁、逃逸、快照测试 |
+| `REQ-12` | 包内提供全部基础中文 Skill | 6 | Foundation Task 3 | Catalog 完整性和中文扫描 |
+| `REQ-13` | 项目自定义 Workflow | 8、12 | Foundation Task 4、8；Release Task 1 | eject/modify/validate/use E2E |
+| `REQ-14` | 使用用户全局安装 Skill | 7.3 | Foundation Task 5；Release Task 1 | 四宿主目录、歧义、fallback 测试 |
+| `REQ-15` | Quick/Standard/Governed 按风险升级 | 9.3 | Foundation Task 6；Control Task 3、6 | 三 Profile 和升级恢复 E2E |
+| `REQ-16` | 跨会话恢复 | 10、11、14 | Foundation Task 7-8；Release Task 2-3 | 新会话 `inspect + acquire` |
+| `REQ-17` | 中文文档和 Skill | 2、6 | Foundation Task 1、3、8-9；Release Task 6 | 中文契约扫描 |
+| `REQ-18` | 不兼容旧协议，直接替换 | 17 | Foundation Task 1-2、8-9 | 旧命令、Schema、文档均不存在 |
+
+发布门禁维护机器可读的 `docs/acceptance/requirements-traceability.yaml`。每个 `REQ-*` 必须至少
+绑定一个设计章节、一个实施 Task 和一个自动或真实验收证据；缺失、重复 ID、指向不存在 Task、
+状态不是 `passed/not_run/failed` 或必需证据为 `not_run` 时，总体发布结论必须为 NO-GO。
+
+## 21. 非目标
 
 - WSSpecKit 直接选择或调用模型。
 - 管理 Agent 对话、Token、记忆或上下文压缩。

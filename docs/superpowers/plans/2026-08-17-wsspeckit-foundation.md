@@ -2,7 +2,7 @@
 
 > **Agent 执行要求：** 实施本计划时必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，逐任务执行并使用复选框跟踪进度。
 
-**目标：** 直接替换当前 alpha 协议，建立 WSSpecKit 首个正式协议基线，包括新产品标识、Application Protocol、完整内置资源、三层 Skill 解析、Workflow Package 和风险分级 Profile。
+**目标：** 直接替换当前 alpha 协议，建立 WSSpecKit 首个正式协议基线，包括新产品标识、Application Protocol、完整内置资源、四类 Skill 解析、Workflow Package 和风险分级 Profile。
 
 **架构：** 复用已经验证的摘要、原子文件、事件存储、锁、审批和 Evidence 实现，删除旧公开 Workflow 与 CLI 协议。CLI 和 Driver Skill 只调用 Application Protocol；Application 层组合 Workflow、Skill、Profile 和 Runtime 服务，不感知当前由 Codex、Claude 还是 Cursor 驱动。
 
@@ -16,7 +16,7 @@
 - 所有用户文档、CLI 文案、内置 Workflow 说明、模板和内置 Skill 正文使用中文。
 - 协议字段、命令、URI、Schema ID、类型名和错误码使用英文标识。
 - WSSpecKit 不选择或调用模型，不管理 Agent 的对话、Token 或上下文。
-- Builtin、Global、Project Skill 必须使用显式 URI，不允许同名隐式覆盖。
+- Builtin、Package、Global、Project Skill 必须使用显式 URI，不允许同名隐式覆盖。
 - Profile 不得削弱 Executor 安全类别、可信验证或外部写入精确授权。
 - 所有公开对象拒绝未知字段和不支持的版本。
 - 每项任务先写失败测试，再写最小实现，最后单独提交。
@@ -242,7 +242,7 @@ git commit -m "feat: bundle Chinese builtin workflows and skills"
 
 - [ ] **步骤 1：编写失败的 Package 测试**
 
-覆盖 Builtin/Project URI、路径逃逸、符号链接逃逸、缺少 Manifest、不支持版本、锁文件未知内容和确定性摘要。
+覆盖 Builtin/Project URI、Package 自带 Skill 清单、路径逃逸、符号链接逃逸、缺少 Manifest、不支持版本、锁文件未知内容和确定性摘要。
 
 ```ts
 await assert.rejects(
@@ -268,6 +268,7 @@ export interface WorkflowPackage {
   manifest: WorkflowManifest;
   workflow: WorkflowDefinition;
   profiles: Map<string, ProfileDefinition>;
+  packageSkills: Map<string, { entrypoint: string; digest: string }>;
   contentDigest: string;
 }
 ```
@@ -285,7 +286,7 @@ git add src/workflow-package tests/unit/workflow-package.test.ts
 git commit -m "feat: load and lock workflow packages"
 ```
 
-### Task 5：三层 Skill Resolver 与 Skill Lock
+### Task 5：四类 Skill Resolver 与 Skill Lock
 
 **文件：**
 - 创建：`src/registry/skills/{types,resolver,lock}.ts`
@@ -296,9 +297,9 @@ git commit -m "feat: load and lock workflow packages"
 - 输入：Task 4 的 `WorkflowPackage`。
 - 输出：`resolveSkill(binding, context): Promise<ResolvedSkill>`、`createSkillLock(resolved): SkillLock`。
 
-- [ ] **步骤 1：编写失败的三层解析测试**
+- [ ] **步骤 1：编写失败的四类解析测试**
 
-覆盖 Builtin、Project、四种 Provider 默认 Global 根、附加 Global 根、显式 fallback、
+覆盖 Builtin、Package、Project、四种 Provider 默认 Global 根、附加 Global 根、显式 fallback、
 可选缺失、必需缺失、相同摘要重复项、不同摘要歧义、摘要变化、路径逃逸和符号链接逃逸。
 
 ```ts
@@ -321,7 +322,7 @@ assert.equal(result.usedFallback, true);
 export interface ResolvedSkill {
   requestedRef: string;
   ref: string;
-  source: "builtin" | "global" | "project";
+  source: "builtin" | "package" | "global" | "project";
   provider: "codex" | "claude" | "cursor" | "generic";
   rootId: string;
   entrypoint: string;
@@ -332,7 +333,11 @@ export interface ResolvedSkill {
 }
 ```
 
-Builtin/Project Skill 可进入 Work Item 快照；Global Skill 只记录逻辑引用、Provider 和摘要。不得搜索同名替代品。
+Builtin/Package/Project Skill 可进入 Work Item 快照；Global Skill 只记录逻辑引用、Provider 和摘要。不得搜索同名替代品。
+
+`package://skills/<name>` 只相对当前 `WorkflowPackage.root` 解析，并要求 Skill 出现在
+Manifest 文件清单。增加测试证明同一 Package 从 Builtin 位置 eject 到 Project 位置后解析结果
+摘要不变；`package://../other`、跨 Package 符号链接和未声明 Skill 分别 fail closed。
 
 实现固定默认根：Codex 为 `~/.agents/skills`，Claude 为 `~/.claude/skills`，Cursor
 为 `~/.agents/skills`、`~/.cursor/skills`、`~/.claude/skills`、`~/.codex/skills`，
@@ -372,7 +377,7 @@ git commit -m "feat: resolve and lock workflow skills"
 
 - [ ] **步骤 1：编写失败的编译器测试**
 
-覆盖重复 ID、循环、未知依赖、非法表达式、未知 Executor、必需 Skill 缺失、启用 Step 消费已跳过必需输出，以及 Profile 修改 `uses`、依赖、安全类别或外部目标。
+覆盖重复 ID、循环、未知依赖、非法表达式、未知 Executor、必需 Skill 缺失、启用 Step 消费已跳过必需输出，以及 Profile 修改 `uses`、依赖、安全类别、外部目标或关闭 TDD Red/Green Gate。
 
 - [ ] **步骤 2：编写失败的 Profile 选择测试**
 
@@ -509,7 +514,7 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 - [ ] **步骤 1：编写失败的 CLI 与安装测试**
 
-验证帮助只暴露 `init/start/acquire/submit/decide/inspect/workflow/agent install`；旧命令返回 `WSSPEC_COMMAND_UNKNOWN`；`workflow list/show/eject/validate/use` 均有正反例；所有帮助、错误和 Driver Skill 正文为中文。测试必须使用临时 HOME，不能写入真实用户 Skill 目录。
+验证帮助只暴露 `init/start/acquire/submit/decide/inspect/workflow/agent install`；旧命令和不存在的 `resume` 返回 `WSSPEC_COMMAND_UNKNOWN`；`workflow list/show/eject/validate/use` 均有正反例；所有帮助、错误和 Driver Skill 正文为中文。测试必须使用临时 HOME，不能写入真实用户 Skill 目录。
 
 - [ ] **步骤 2：运行测试，确认旧 CLI 仍存在**
 
@@ -566,7 +571,7 @@ git commit -m "feat: expose the Chinese WSSpecKit driver protocol"
 - 删除：`docs/reference/{artifacts-v1,execution-contracts-v1,project-config-v1,state-transitions-v1,work-item-v1,workflow-language-v1}.md`
 - 删除：`docs/plans/2026-08-16-{m1-control-plane-hardening-plan,m1-implementation-plan,protocol-hardening-plan}.md`
 - 创建：`docs/reference/{application-protocol,workflow-language,skill-resolution,connector-contracts}.md`
-- 创建：`tests/contract/documentation-baseline.test.ts`
+- 创建：`tests/contract/{documentation-baseline,requirements-traceability}.test.ts`
 
 **接口：**
 - 输入：本计划已实现的公开 Schema、CLI 和资源。
@@ -578,15 +583,18 @@ git commit -m "feat: expose the Chinese WSSpecKit driver protocol"
 Skill URI 和错误码，逐项断言参考文档包含对应标识。另用 `rg` 断言旧产品名、旧命令和
 旧 Schema ID 只允许出现在负例测试夹具中。
 
+需求追踪测试读取设计规格中的 `REQ-01` 至 `REQ-18`，断言 ID 唯一且连续，每项都包含设计落点、
+实施 Task 和验收证据；计划中引用的 Task 标题必须真实存在。
+
 - [ ] **步骤 2：运行测试，确认旧文档造成失败**
 
-运行：`node --import tsx --test tests/contract/documentation-baseline.test.ts`
+运行：`node --import tsx --test tests/contract/documentation-baseline.test.ts tests/contract/requirements-traceability.test.ts`
 
 预期：FAIL，输出仍存在的旧文档路径和缺失的新参考文档。
 
 - [ ] **步骤 3：删除旧文档并写入中文参考文档**
 
-四份参考文档分别覆盖五个 Application 操作、Workflow Language v1、三层 Skill 解析与
+四份参考文档分别覆盖五个 Application 操作、Workflow Language v1、四类 Skill 解析与
 锁定、Connector/Provider/审批/回读契约。文档中的 JSON/YAML 示例必须通过契约测试解析，
 不复制已经失效的旧类型。
 
@@ -599,7 +607,7 @@ Skill URI 和错误码，逐项断言参考文档包含对应标识。另用 `rg
 - [ ] **步骤 5：提交**
 
 ```bash
-git add -A docs/specs docs/reference docs/plans tests/contract/documentation-baseline.test.ts
+git add -A docs/specs docs/reference docs/plans tests/contract/documentation-baseline.test.ts tests/contract/requirements-traceability.test.ts
 git commit -m "docs: replace legacy protocol documentation"
 ```
 

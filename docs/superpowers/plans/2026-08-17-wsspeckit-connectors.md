@@ -2,7 +2,7 @@
 
 > **Agent 执行要求：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 逐任务执行；每一步使用复选框跟踪。
 
-**目标：** 实现 Prompt、文件、GitHub/GitLab Issue、飞书文档来源，以及受审批保护的 Git commit、Issue 更新和飞书知识发布。
+**目标：** 实现 Prompt、文件、GitHub/GitLab Issue、飞书文档来源，以及受审批保护的 Git commit、Issue 更新、飞书知识发布和外部 Issue Close。
 
 **架构：** Connector Registry 暴露规范化能力，Provider Adapter 只用固定 executable/argv 与外部 CLI 通信。所有来源先快照为不可变 Artifact；所有写入先授权、再执行、再回读，并以稳定目标和幂等键恢复。
 
@@ -166,8 +166,9 @@ GitLab `iid/id` 不混用、企业 Host、404、限流、恶意路径、Schema �
 - [ ] **步骤 3：实现 CLI Adapter 和规范化**
 
 请求体一律经 stdin；host 使用 CLI 专用参数，不进入端点字符串。GitHub 使用 `gh` 自身认证，
-GitLab 使用 `glab` 自身认证；WSSpecKit 不提供 Token 配置字段。写操作只暴露 comment、更新正文/
-标签/状态三个固定动作，所有内容来自已批准 payload。
+GitLab 使用 `glab` 自身认证；WSSpecKit 不提供 Token 配置字段。写操作只暴露 comment、更新正文、
+标签/状态和 `issue.close` 四个固定动作，所有内容来自已批准 payload。`issue.close` 必须验证
+当前状态为 open、写入 closed 状态并回读稳定 ID 和最终状态；已经 closed 的相同目标按幂等成功处理。
 
 - [ ] **步骤 4：运行测试和安全扫描**
 
@@ -240,7 +241,8 @@ git commit -m "feat: add Feishu document provider"
 - [ ] **步骤 1：编写失败测试**
 
 覆盖审批前零写入、过期/错目标/错摘要授权、同幂等键重复提交、发送前崩溃、发送后回读前崩溃、
-远端已写入但本地未知、可选目标 warning、必需目标阻止 Close。
+远端已写入但本地未知、知识发布前禁止 Issue Close、外部 Issue Close 失败阻止 Work Item Close、
+可选知识目标 warning 和必需知识目标阻塞。
 
 - [ ] **步骤 2：运行失败测试**
 
@@ -316,8 +318,9 @@ git commit -m "feat: add approved git commit connector"
 
 - [ ] **步骤 1：编写三条失败 E2E**
 
-分别跑通 GitHub Issue、GitLab Issue、飞书文档来源；每条都经过开发 Fixture、Git commit、Issue
-更新（适用时）、飞书知识发布和 Close。注入每个外部阶段崩溃，验证不重复写入。
+分别跑通 GitHub Issue、GitLab Issue、飞书文档来源；Issue 链严格断言
+`Git commit -> Issue 更新 -> 飞书知识发布或 skipped -> 外部 Issue Close -> Work Item Close`。
+注入每个外部阶段崩溃，验证不越序、不重复写入，且外部 Close 回读失败时 Work Item 保持 blocked。
 
 - [ ] **步骤 2：运行 E2E，确认未接线失败**
 
@@ -346,5 +349,6 @@ git commit -m "test: cover fixture external delivery"
 ## 完成门禁
 
 `wspec doctor connectors` 能分别诊断 `git`、`gh`、`glab`、`lark-cli`；GitHub/GitLab/飞书
-Fixture 全部通过；授权前无写入，未知写入结果不自动重试，回读不一致不形成成功 Evidence。
+Fixture 全部通过；授权前无写入，未知写入结果不自动重试，回读不一致不形成成功 Evidence；
+存在 Issue Binding 时，没有经过授权并回读成功的外部 Issue Close 就不能关闭 Work Item。
 本机未安装或未认证某个 CLI 只影响该 Provider 的真实验收，不得用 Fixture 标记其生产可用。

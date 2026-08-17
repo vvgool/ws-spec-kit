@@ -24,17 +24,18 @@
 **文件：**
 - 创建：`tests/e2e/custom-workflow.test.ts`
 - 创建：`tests/fixtures/workflows/custom-delivery/*`
-- 创建：`tests/fixtures/skills/{global-security-review,project-security-review}/*`
+- 创建：`tests/fixtures/skills/{package-security-review,global-security-review,project-security-review}/*`
 
 **接口：**
-- 输入：`workflow list/show/eject/validate/use`、三层 Skill Resolver 和 Workflow 快照。
+- 输入：`workflow list/show/eject/validate/use`、四类 Skill Resolver 和 Workflow 快照。
 - 输出：无新接口；形成用户自定义能力验收。
 
 - [ ] **步骤 1：编写失败 E2E**
 
-在临时 HOME 和项目中 eject 内置 Workflow，新增 Project Skill、安全 Review Step 和
+在临时 HOME 和项目中 eject 内置 Workflow，新增 Package Skill、Project Skill、安全 Review Step 和
 `global://global-security-review` + Builtin fallback。分别断言 Global 命中、缺失走 fallback、
-同名同摘要去重、同名不同摘要返回 `WSSPEC_SKILL_AMBIGUOUS`。
+同名同摘要去重、同名不同摘要返回 `WSSPEC_SKILL_AMBIGUOUS`；移动 Package 后
+`package://skills/security-review` 仍绑定同一摘要，且活动 Work Item 使用其快照。
 
 - [ ] **步骤 2：运行失败测试**
 
@@ -112,7 +113,8 @@ git commit -m "test: validate agent driver contracts"
 
 `prepare-agent-smoke.mjs --client <name>` 创建临时 Git 仓库、安装 Driver、启动固定 Quick 文档任务，
 输出 work item ID 和中文操作提示。`verify-agent-smoke.mjs` 只读取事件、Artifact、Git diff 和状态，
-断言至少一次真实 `acquire/submit`、紧凑计划、测试 Evidence、Review 和 Close。
+断言至少一次真实 `acquire/submit`、紧凑计划、trusted Red/Green Evidence、Review、外部 Close
+（存在 Issue Binding 时）和 Work Item Close。
 
 - [ ] **步骤 2：运行真实 Codex 验收**
 
@@ -157,12 +159,14 @@ git commit -m "test: record live agent acceptance"
 
 - [ ] **步骤 2：执行 GitHub 写入验收**
 
-在专用 Issue 写入唯一验收标记、回读 comment/状态/更新时间，再按授权恢复测试目标。重复相同
-幂等键，断言没有第二条写入。记录 `gh --version` 和脱敏目标。
+在专用 Issue 写入唯一验收标记、完成知识发布后关闭并回读 Issue 状态，再按单独授权恢复测试目标。
+重复相同幂等键，断言没有第二条写入；尝试在知识发布前 Close 必须被本地顺序 Gate 拒绝。
+记录 `gh --version` 和脱敏目标。
 
 - [ ] **步骤 3：执行 GitLab 写入验收**
 
-安装并认证 `glab` 后在专用 Issue 执行同样矩阵，额外断言 `iid` 与全局 `id` 映射正确。
+安装并认证 `glab` 后在专用 Issue 执行同样的更新、知识发布、Close、回读和越序拒绝矩阵，
+额外断言 `iid` 与全局 `id` 映射正确。
 本机未满足前置条件时保持 NO-GO，不切换成未设计的 HTTP Token Provider。
 
 - [ ] **步骤 4：提交脱敏结果**
@@ -231,7 +235,7 @@ git commit -m "test: record live Feishu acceptance"
 
 - [ ] **步骤 3：完成指南和 tarball 安装 E2E**
 
-指南覆盖安装、初始化、五操作协议、三 Profile、自定义 Workflow、三层 Skill、四个 Provider、审批、
+指南覆盖安装、初始化、五操作协议、三 Profile、自定义 Workflow、四类 Skill、四个 Provider、审批、
 恢复和故障诊断。从 `npm pack` 产物安装到全新临时项目，执行 Quick Fixture和 Driver dry-run。
 
 - [ ] **步骤 4：运行并提交**
@@ -251,6 +255,7 @@ git commit -m "docs: publish the Chinese WSSpecKit guide"
 - 创建：`scripts/run-release-gate.sh`
 - 创建：`scripts/check-release-baseline.mjs`
 - 创建：`docs/acceptance/release-report.md`
+- 创建：`docs/acceptance/requirements-traceability.yaml`
 
 **接口：**
 - 输入：当前 commit、干净工作树要求和全部验收矩阵。
@@ -259,7 +264,8 @@ git commit -m "docs: publish the Chinese WSSpecKit guide"
 - [ ] **步骤 1：编写失败的发布基线检查**
 
 检查旧产品名、旧 Schema、旧命令、`WSK-`、`WSPEC_`、旧文档、占位符、未预期 tarball 文件、
-未提交生成物和矩阵字段缺失。负例 Fixture 必须通过显式 allowlist，不得全局忽略。
+未提交生成物和矩阵字段缺失。逐项校验设计中的 `REQ-01` 至 `REQ-18` 均绑定真实 Task 和 Evidence；
+负例 Fixture 必须通过显式 allowlist，不得全局忽略。
 
 - [ ] **步骤 2：实现确定性门禁脚本**
 
@@ -281,7 +287,7 @@ build、pack、干净安装 E2E；任何检查不得用 `|| true` 掩盖失败�
 - [ ] **步骤 5：提交**
 
 ```bash
-git add scripts/run-release-gate.sh scripts/check-release-baseline.mjs docs/acceptance/release-report.md
+git add scripts/run-release-gate.sh scripts/check-release-baseline.mjs docs/acceptance/release-report.md docs/acceptance/requirements-traceability.yaml
 git commit -m "build: add the WSSpecKit release gate"
 ```
 
@@ -289,4 +295,5 @@ git commit -m "build: add the WSSpecKit release gate"
 
 四份计划的自动门禁全部通过；Quick/Standard/Governed 和项目自定义 Workflow 均完成 E2E；
 Codex、Claude、Cursor 的真实发现与跨会话恢复有可重复证据；GitHub、GitLab、飞书真实验收各自
-独立报告。任何 `not_run` 或失败都明确降低对应发布结论，发布脚本不执行外部发布动作。
+独立报告；`REQ-01` 至 `REQ-18` 的追踪矩阵不存在未绑定或必需证据缺失项。任何 `not_run`
+或失败都明确降低对应发布结论，发布脚本不执行外部发布动作。

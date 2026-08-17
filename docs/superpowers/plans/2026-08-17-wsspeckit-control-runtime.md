@@ -151,7 +151,37 @@ export interface CloseDecision {
 - [ ] 运行审批伪终端、验证、归档和关闭测试。
 - [ ] 提交：`git commit -m "feat: enforce profile approvals and close gates"`。
 
-### Task 5：三 Profile 本地 E2E
+### Task 5：可信 TDD Red/Green Evidence
+
+**文件：**
+- 创建：`src/engine/tdd/{types,red-gate,green-gate}.ts`
+- 修改：`src/engine/verification.ts`
+- 修改：`src/application/submit.ts`
+- 创建：`tests/integration/tdd-evidence.test.ts`
+
+**接口：**
+- 输入：Compiled `write-tests/verify-red/implement/verify-green` Step、项目固定 Test Gate 和当前 workspace digest。
+- 输出：`recordRedEvidence(input): TrustedEvidence`、`recordGreenEvidence(input): TddCycleEvidence`。
+
+```ts
+export interface TddCycleEvidence {
+  taskId: string;
+  testPaths: string[];
+  commandId: string;
+  redEvidenceId: string;
+  greenEvidenceId: string;
+  refactorEvidenceId?: string;
+}
+```
+
+- [ ] 编写失败测试：Red 只修改测试路径、同一 commandId 的预期测试失败、语法错误/缺依赖/超时不算 Red、无 Red 不能 acquire implement、修改或删除 Red 测试使 Evidence 失效、Green 必须同命令零退出、Profile 不能跳过两个 Gate；Review-Fix 修改生产代码后追加 Green Evidence，修改测试后路由回 `write-tests`。
+- [ ] 运行：`node --import tsx --test tests/integration/tdd-evidence.test.ts`；预期缺少 TDD Evidence 模块失败。
+- [ ] 实现失败分类和 Evidence 绑定；引擎直接运行固定 argv，记录 exit code、失败测试标识、test file digest、workspace digest 和脱敏摘要，Agent 报告不得升级为 trusted。
+- [ ] 在 `submit` 后重算测试路径和摘要；Red 测试被删除、改成无断言通过或命令变化时返回 `WSSPEC_TDD_EVIDENCE_INVALIDATED`。Review-Fix 的 verify 使用同一 commandId 扩展 Evidence 链，测试摘要变化则重新开始当前 TDD Cycle。
+- [ ] 运行：`node --import tsx --test tests/integration/tdd-evidence.test.ts tests/integration/profile-runtime.test.ts tests/integration/recovery.test.ts && npm run typecheck`；预期全部通过。
+- [ ] 提交：`git commit -m "feat: require trusted TDD red green evidence"`。
+
+### Task 6：三 Profile 本地 E2E
 
 **文件：**
 - 创建：`tests/e2e/quick-workflow.test.ts`
@@ -163,7 +193,7 @@ export interface CloseDecision {
 - 输入：本计划全部 Runtime 能力。
 - 输出：无新接口；形成控制流完成门禁。
 
-- [ ] 编写 Quick E2E：Prompt -> explore -> compact spec -> compact single-task plan -> TDD implement -> 单轮 review -> test -> close；断言 design skipped、tasks 存在且 implement 明确消费 tasks。
+- [ ] 编写 Quick E2E：Prompt -> explore -> compact spec -> compact single-task plan -> write failing test -> trusted Red -> minimal implementation -> trusted Green -> 单轮 review -> close；断言 design skipped、tasks 和 `TddCycleEvidence` 存在。
 - [ ] 编写 Standard E2E：完整规格/设计/计划、审批、Review-Fix 两轮、required Gates、close。
 - [ ] 编写 Governed E2E：独立 Review Actor、完整 Gate、完整审计；外部目标使用可回读本地 Fixture。
 - [ ] 编写运行中由 Quick 升级到 Governed 的 E2E，验证新增前置 Step 和失效传播。
@@ -173,4 +203,4 @@ export interface CloseDecision {
 
 ## 完成门禁
 
-三个 Profile 必须由同一 Runtime 执行；崩溃恢复后循环次数、重试预算、Profile 和审批保持一致；不存在无界循环、自动降级或 Agent 自报 trusted Evidence 的路径。
+三个 Profile 必须由同一 Runtime 执行；崩溃恢复后循环次数、重试预算、Profile、TDD Evidence 和审批保持一致；不存在无界循环、自动降级、跳过 Red/Green 或 Agent 自报 trusted Evidence 的路径。
