@@ -15,6 +15,10 @@ export interface ResolvedSkillFallback {
   digest: string;
 }
 
+export interface ResolvedSkillPrimary extends ResolvedSkillFallback {
+  candidates: SkillCandidate[];
+}
+
 export interface ResolvedSkill {
   requestedRef: string;
   ref: string;
@@ -26,7 +30,15 @@ export interface ResolvedSkill {
   candidates: SkillCandidate[];
   required: boolean;
   usedFallback: boolean;
+  primary?: ResolvedSkillPrimary;
   fallback?: ResolvedSkillFallback;
+}
+
+export interface SkillLockFallback {
+  ref: string;
+  source: SkillSource;
+  rootId: string;
+  digest: string;
 }
 
 export interface SkillLockEntry {
@@ -34,15 +46,11 @@ export interface SkillLockEntry {
   resolved: string;
   source: SkillSource;
   provider: SkillProvider;
-  rootId: string;
-  digest: string;
+  rootId?: string;
+  digest?: string;
   candidates: SkillCandidate[];
   required: boolean;
-  usedFallback: boolean;
-  fallback?: string;
-  fallbackDigest?: string;
-  fallbackSource?: SkillSource;
-  fallbackRootId?: string;
+  fallback?: SkillLockFallback;
 }
 
 export interface SkillLock {
@@ -55,8 +63,9 @@ export interface SkillResolverContext {
   projectRoot: string;
   home: string;
   package: WorkflowPackage;
+  stepStatus: "not_started" | "started";
   additionalGlobalRoots?: string[];
-  lock?: SkillLock;
+  lock?: unknown;
 }
 
 export type SkillBinding = WorkflowSkillBinding;

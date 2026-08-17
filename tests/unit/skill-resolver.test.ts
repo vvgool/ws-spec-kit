@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -31,7 +31,7 @@ async function context(provider: SkillProvider = "generic"): Promise<SkillResolv
   const root = await temporaryRoot();
   const packageRoot = path.join(root, ".wsspec", "workflows", "fixture");
   await mkdir(packageRoot, { recursive: true });
-  return { provider, projectRoot: root, home: path.join(root, "home"), package: packageSnapshot(packageRoot) };
+  return { provider, projectRoot: root, home: path.join(root, "home"), package: packageSnapshot(packageRoot), stepStatus: "not_started" };
 }
 
 async function writeSkill(root: string, relative: string, contents = "# Skill\n"): Promise<string> {
@@ -194,4 +194,35 @@ test("Project Skill 符号链接不得离开 .wsspec/skills 声明根", async (t
   }
 
   await assert.rejects(resolveSkill({ ref: "project://skills/review", required: true }, resolverContext), /WSSPEC_SKILL_PATH_ESCAPE/);
+});
+
+test("Project 的 .wsspec 与 skills 根均拒绝现存和悬空的越界符号链接", async (t) => {
+  for (const [level, dangling] of [
+    ["configuration", false],
+    ["configuration", true],
+    ["skills", false],
+    ["skills", true],
+  ] as const) {
+    const resolverContext = await context();
+    const outside = path.join(await temporaryRoot(), "outside");
+    if (!dangling) await writeSkill(outside, level === "configuration" ? "skills/review" : "review", "# Outside\n");
+    try {
+      if (level === "configuration") {
+        await rm(path.join(resolverContext.projectRoot, ".wsspec"), { recursive: true });
+        await symlink(outside, path.join(resolverContext.projectRoot, ".wsspec"));
+      } else {
+        await mkdir(path.join(resolverContext.projectRoot, ".wsspec"), { recursive: true });
+        await symlink(dangling ? outside : path.dirname(path.join(outside, "review")), path.join(resolverContext.projectRoot, ".wsspec", "skills"));
+      }
+    } catch (caught) {
+      if ((caught as NodeJS.ErrnoException).code === "EPERM") return t.skip("当前文件系统不支持符号链接");
+      throw caught;
+    }
+
+    await assert.rejects(
+      resolveSkill({ ref: "project://skills/review", required: true }, { ...resolverContext, stepStatus: "not_started" }),
+      /WSSPEC_SKILL_PATH_ESCAPE/,
+      `${level}/${dangling ? "dangling" : "existing"}`,
+    );
+  }
 });

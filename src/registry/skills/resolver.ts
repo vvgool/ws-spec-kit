@@ -7,7 +7,8 @@ import { assertContainedPath } from "../../workflow-package/path-boundary.js";
 import { workflowPackageContentDigest } from "../../workflow-package/lock.js";
 import { WorkflowPackageError } from "../../workflow-package/types.js";
 import type { WorkflowSkillBinding } from "../../workflow-package/types.js";
-import type { ResolvedSkill, ResolvedSkillFallback, SkillCandidate, SkillLockEntry, SkillProvider, SkillResolverContext, SkillSource } from "./types.js";
+import { parseSkillLock } from "./lock.js";
+import type { ResolvedSkill, ResolvedSkillFallback, ResolvedSkillPrimary, SkillCandidate, SkillLockEntry, SkillProvider, SkillResolverContext, SkillSource } from "./types.js";
 import { SkillResolutionError } from "./types.js";
 
 interface ParsedSkillRef {
@@ -198,7 +199,14 @@ async function resolvePackage(parsed: ParsedSkillRef, context: SkillResolverCont
 
 async function resolveProject(parsed: ParsedSkillRef, context: SkillResolverContext): Promise<ResolvedReference | undefined> {
   if (!path.isAbsolute(context.projectRoot)) error("WSSPEC_SKILL_PATH_INVALID", "Skill Resolver projectRoot 必须是绝对路径。");
-  const projectSkillsRoot = path.join(context.projectRoot, ".wsspec", "skills");
+  const projectConfigurationRoot = path.join(context.projectRoot, ".wsspec");
+  if (!(await exists(projectConfigurationRoot))) return undefined;
+  await assertSkillPath(context.projectRoot, projectConfigurationRoot);
+  if (!(await stat(projectConfigurationRoot)).isDirectory()) error("WSSPEC_SKILL_PATH_INVALID", ".wsspec 必须是目录。");
+  const projectSkillsRoot = path.join(projectConfigurationRoot, "skills");
+  if (!(await exists(projectSkillsRoot))) return undefined;
+  await assertSkillPath(projectConfigurationRoot, projectSkillsRoot);
+  if (!(await stat(projectSkillsRoot)).isDirectory()) error("WSSPEC_SKILL_PATH_INVALID", ".wsspec/skills 必须是目录。");
   const found = await candidate({ rootId: "project", directory: projectSkillsRoot }, parsed.segments.slice(1));
   if (found === undefined) return undefined;
   return { ref: parsed.ref, source: "project", rootId: found.rootId, entrypoint: found.entrypoint, digest: found.digest, candidates: [{ rootId: found.rootId, digest: found.digest }] };
@@ -216,15 +224,32 @@ function fallbackDescriptor(fallback: ResolvedReference): ResolvedSkillFallback 
   return { ref: fallback.ref, source: fallback.source, rootId: fallback.rootId, digest: fallback.digest };
 }
 
-function assertLockIdentity(lock: SkillLockEntry, binding: WorkflowSkillBinding, context: SkillResolverContext): void {
-  if (lock.requested !== binding.ref || lock.provider !== context.provider || lock.required !== (binding.required ?? true)) {
+function primaryDescriptor(primary: ResolvedReference): ResolvedSkillPrimary {
+  return { ...fallbackDescriptor(primary), candidates: primary.candidates };
+}
+
+function lockedPrimaryDescriptor(lock: SkillLockEntry): ResolvedSkillPrimary | undefined {
+  if (lock.rootId === undefined || lock.digest === undefined) return undefined;
+  return { ref: lock.requested, source: lock.source, rootId: lock.rootId, digest: lock.digest, candidates: lock.candidates };
+}
+
+function assertLockIdentity(lock: SkillLockEntry, binding: WorkflowSkillBinding, context: SkillResolverContext, requested: ParsedSkillRef): void {
+  if (lock.requested !== binding.ref || lock.resolved !== binding.ref || lock.source !== requested.source || lock.provider !== context.provider || lock.required !== (binding.required ?? true)) {
     error("WSSPEC_SKILL_LOCK_CHANGED", "Skill Lock 与当前绑定或 Provider 不一致。");
   }
 }
 
-function assertSelectedLock(lock: SkillLockEntry, selected: ResolvedReference, usedFallback: boolean): void {
-  if (lock.resolved !== selected.ref || lock.digest !== selected.digest || lock.rootId !== selected.rootId || lock.usedFallback !== usedFallback) {
-    error("WSSPEC_SKILL_LOCK_CHANGED", "Skill 当前解析结果与已有 Lock 不一致。");
+function assertFallbackLock(lock: SkillLockEntry, binding: WorkflowSkillBinding, resolvedFallback: ResolvedReference | undefined): void {
+  if (lock.fallback?.ref !== binding.fallback) error("WSSPEC_SKILL_LOCK_CHANGED", "Workflow fallback 声明与 Skill Lock 不一致。");
+  if (lock.fallback === undefined) return;
+  if (resolvedFallback === undefined || lock.fallback.source !== resolvedFallback.source || lock.fallback.rootId !== resolvedFallback.rootId || lock.fallback.digest !== resolvedFallback.digest) {
+    error("WSSPEC_SKILL_LOCK_CHANGED", "Workflow fallback 当前内容与 Skill Lock 不一致。");
+  }
+}
+
+function assertPrimaryLock(lock: SkillLockEntry, primary: ResolvedReference): void {
+  if (lock.rootId !== primary.rootId || lock.digest !== primary.digest) {
+    error("WSSPEC_SKILL_LOCK_CHANGED", "Skill 主项当前解析结果与已有 Lock 不一致。");
   }
 }
 
@@ -232,6 +257,7 @@ export function resolveSkill(binding: WorkflowSkillBinding & { required: false }
 export function resolveSkill(binding: WorkflowSkillBinding & { required?: true }, context: SkillResolverContext): Promise<ResolvedSkill>;
 export function resolveSkill(binding: WorkflowSkillBinding, context: SkillResolverContext): Promise<ResolvedSkill | undefined>;
 export async function resolveSkill(binding: WorkflowSkillBinding, context: SkillResolverContext): Promise<ResolvedSkill | undefined> {
+  if (context.stepStatus !== "not_started" && context.stepStatus !== "started") error("WSSPEC_SKILL_CONTEXT_INVALID", "Skill Resolver 必须显式声明 Step 状态。");
   const requested = parseSkillRef(binding.ref);
   if (binding.fallback !== undefined) {
     const fallbackRef = parseSkillRef(binding.fallback);
@@ -240,35 +266,41 @@ export async function resolveSkill(binding: WorkflowSkillBinding, context: Skill
   const required = binding.required ?? true;
   let locked: SkillLockEntry | undefined;
   if (context.lock !== undefined) {
-    const matches = context.lock.skills.filter(({ requested }) => requested === binding.ref);
+    const lock = parseSkillLock(context.lock);
+    const matches = lock.skills.filter(({ requested }) => requested === binding.ref);
     if (matches.length !== 1) error("WSSPEC_SKILL_LOCK_CHANGED", "Skill Lock 缺少当前绑定或包含重复绑定。");
     locked = matches[0]!;
-    assertLockIdentity(locked, binding, context);
+    assertLockIdentity(locked, binding, context, requested);
   }
   const [primary, fallback] = await Promise.all([
     resolveReference(binding.ref, context),
     binding.fallback === undefined ? Promise.resolve(undefined) : resolveReference(binding.fallback, context),
   ]);
+  if (binding.fallback !== undefined && fallback === undefined) {
+    error("WSSPEC_SKILL_NOT_FOUND", `找不到声明的 fallback ${binding.fallback}。`);
+  }
+
+  if (locked !== undefined) assertFallbackLock(locked, binding, fallback);
 
   let selected = primary;
   let usedFallback = false;
-  if (selected === undefined && fallback !== undefined) {
+  if (primary !== undefined) {
+    if (locked !== undefined) assertPrimaryLock(locked, primary);
+  } else if (fallback !== undefined) {
     selected = fallback;
     usedFallback = true;
+    if (context.stepStatus === "started" && (locked === undefined || locked.digest !== undefined)) {
+      error("WSSPEC_SKILL_LOCK_CHANGED", "已开始的 Step 只能继续使用已锁定的 fallback。");
+    }
   }
   if (selected === undefined) {
     if (!required) return undefined;
     error("WSSPEC_SKILL_NOT_FOUND", `找不到必需 Skill ${binding.ref}${binding.fallback === undefined ? "" : " 或其 fallback"}。`);
   }
 
-  if (locked !== undefined) {
-    assertSelectedLock(locked, selected, usedFallback);
-    if (usedFallback) {
-      if (locked.fallback !== selected.ref || locked.fallbackDigest !== selected.digest) {
-        error("WSSPEC_SKILL_LOCK_CHANGED", "Global Skill fallback 未锁定或摘要已变化。");
-      }
-    }
-  }
+  const resolvedPrimary = primary === undefined
+    ? (locked === undefined ? undefined : lockedPrimaryDescriptor(locked))
+    : primaryDescriptor(primary);
 
   return {
     requestedRef: binding.ref,
@@ -281,6 +313,7 @@ export async function resolveSkill(binding: WorkflowSkillBinding, context: Skill
     candidates: selected.candidates,
     required,
     usedFallback,
+    ...(resolvedPrimary === undefined ? {} : { primary: resolvedPrimary }),
     ...(fallback === undefined ? {} : { fallback: fallbackDescriptor(fallback) }),
   };
 }
