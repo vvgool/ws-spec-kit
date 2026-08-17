@@ -6,7 +6,7 @@ WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定�
 
 它支持从用户描述、本地文件、Git/GitLab Issue、飞书文档等来源获取需求，并将任务编排为代码探索、需求澄清、方案设计、任务计划、TDD 实现、Review-Fix 循环、可信验证、Git 提交、Issue 更新、知识库发布和关闭等阶段。
 
-首版提供完整的内置 Skill Catalog 和一个基础功能交付工作流。用户可以在项目内组合、修改或创建 Workflow，也可以引用 WSSpecKit 内置 Skill、用户全局安装的 Skill 和项目自定义 Skill。
+首版提供完整的内置 Skill Catalog、一个基础功能交付工作流，以及 `quick`、`standard`、`governed` 三种执行 Profile。用户可以在项目内组合、修改或创建 Workflow，也可以引用 WSSpecKit 内置 Skill、用户全局安装的 Skill 和项目自定义 Skill。
 
 ## 2. 设计原则
 
@@ -17,6 +17,7 @@ WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定�
 5. 当前 Agent 会话负责驱动流程；首版不提供 daemon、模型 Provider 或无人值守 Agent Runner。
 6. 活动 Work Item 固定 Workflow、Skill、Schema、配置和来源快照，后续升级不能静默改变执行语义。
 7. Workflow Language 只提供有限控制结构，不演变为通用编程语言。
+8. Profile 只调整执行强度，不能关闭可信验证、外部写入授权等安全底线。
 
 ## 3. 产品命名
 
@@ -71,6 +72,7 @@ WSSpecKit 负责：
 面向用户和 Workflow 作者的核心概念只有：
 
 - **Workflow**：一套可版本化的软件交付流程。
+- **Profile**：同一 Workflow 的执行强度配置，用于调整 Step、审批、Gate、Review 和发布要求。
 - **Step**：Workflow 中的一个执行单元。
 - **Skill Binding**：Step 要求当前 Agent 使用的工作方法。
 - **Artifact**：Step 之间传递的持久化工件。
@@ -93,6 +95,10 @@ ws-spec-kit/
 │   │   └── feature-delivery/
 │   │       ├── manifest.yaml
 │   │       ├── workflow.yaml
+│   │       ├── profiles/
+│   │       │   ├── quick.yaml
+│   │       │   ├── standard.yaml
+│   │       │   └── governed.yaml
 │   │       └── workflow.lock
 │   ├── skills/
 │   │   ├── driver/SKILL.md
@@ -197,6 +203,7 @@ skills:
 ├── manifest.yaml
 ├── workflow.yaml
 ├── workflow.lock
+├── profiles/
 ├── skills/
 ├── schemas/
 ├── templates/
@@ -204,7 +211,7 @@ skills:
 └── tests/
 ```
 
-`manifest.yaml` 声明 Workflow 版本、所需 WSSpecKit 版本、能力、Connector 和入口文件。第三方 Workflow Package 首次使用时必须展示来源、文件清单、Skill 摘要和外部副作用能力，并由用户确认信任。
+`manifest.yaml` 声明 Workflow 版本、所需 WSSpecKit 版本、支持的 Profile、能力、Connector 和入口文件。第三方 Workflow Package 首次使用时必须展示来源、文件清单、Skill 摘要和外部副作用能力，并由用户确认信任。
 
 ## 9. Workflow Language v1
 
@@ -237,7 +244,106 @@ skills:
 
 表达式只能引用已声明的 Step 输出、Artifact 元数据、Binding 状态和有限比较操作。解析失败、未知引用或类型不匹配必须在编译期拒绝。
 
-### 9.3 内置基础工作流
+### 9.3 Profile
+
+Profile 是 Workflow Package 内的显式 overlay。Workflow 定义完整 Step 图，Profile 只能调整以下字段：
+
+- Step 是否启用；禁用后以 `skipped` 参与依赖计算。
+- Artifact 是否必需以及内容级别。
+- Step 是否需要人工审批。
+- Review 循环上限和是否要求独立执行主体。
+- 必需质量 Gate 集合。
+- Issue、Knowledge 等发布目标是否为关闭前必需项。
+- 审计记录级别和保留要求。
+
+Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类别或外部目标，也不能关闭引擎安全内核。每份 Profile 都必须与 Workflow 一起编译；被启用 Step 如果消费了被跳过 Step 的必需输出，编译直接失败。
+
+内置基础工作流提供：
+
+| Profile | 适用任务 | 流程强度 |
+|---|---|---|
+| `quick` | 小型、低风险、局部修改 | 简要规格，设计和计划可跳过，单轮 Review，最小可信 Gate |
+| `standard` | 默认功能和缺陷开发 | 完整规格、设计、计划、Review-Fix 和项目标准 Gate |
+| `governed` | 权限、支付、数据、发布及高风险任务 | 分阶段审批、独立 Review、完整 Gate、必需发布回读和完整审计 |
+
+内置 Profile 的规范差异为：
+
+| 策略 | `quick` | `standard` | `governed` |
+|---|---|---|---|
+| 设计与计划 | 可跳过 | 必需 | 必需 |
+| Artifact 审批 | 无默认审批 | 规格、设计 | 规格、设计、计划 |
+| Review-Fix | 最多 1 轮 | 最多 5 轮 | 最多 5 轮且 Review Actor 独立 |
+| Trusted Gate | `test` | 项目 required Gates | 项目全部 configured Gates |
+| Issue/Knowledge | 默认可选 | 默认可选 | 按项目策略，可设为关闭前必需 |
+| 审计 | 标准事件和结果 | 标准事件、Artifact、Evidence | 完整决策、审批、Actor、发布与回读记录 |
+
+所有 Profile 中，Git commit 和外部写入仍受独立的精确授权约束；表中的 Artifact 审批不能替代外部动作授权。
+
+示例 overlay：
+
+```yaml
+version: 1
+profile:
+  id: quick
+  workflow: feature-delivery
+
+steps:
+  clarify:
+    approval: false
+    artifactLevel: compact
+  design:
+    enabled: false
+  plan:
+    enabled: false
+  review-fix:
+    maxIterations: 1
+  verify:
+    gates: [test]
+
+publishing:
+  issueRequired: false
+  knowledgeRequired: false
+
+audit:
+  level: standard
+```
+
+#### Profile 选择与升级
+
+`wspec start` 接受 `auto`、`quick`、`standard` 或 `governed`，默认 `auto`：
+
+- `auto` 初始以 provisional `quick` 只执行需求采集和代码探索，不允许提前进入实现。
+- 探索完成后，风险为 low 时选择 `quick`，medium 或未知时选择 `standard`，high 时选择 `governed`。
+- 用户可以在创建 Work Item 时显式选择 Profile。
+- Agent 可以提交带理由的升级建议，但不能自行降低 Profile。
+- 项目风险策略可以根据 Issue 标签、需求风险字段、受影响路径、文件类型和计划动作声明最低 Profile。
+- Runtime 在每次 `submit` 后重新评估确定性风险规则，只允许 `quick -> standard -> governed` 单向自动升级。
+- 升级后重新编译未完成执行图；新增的前置 Step 必须完成，受影响的审批和下游结果失效。
+- 降级必须由用户显式创建决策记录，并且仍不能低于项目风险策略要求或安全内核底线。
+
+项目风险策略示例：
+
+```yaml
+version: 1
+profilePolicy:
+  mode: auto
+  provisional: quick
+  unknown: standard
+  rules:
+    - id: security-code
+      paths: ["src/auth/**", "src/permissions/**"]
+      minimum: governed
+    - id: database-change
+      paths: ["migrations/**", "schema/**"]
+      minimum: governed
+    - id: documentation-only
+      paths: ["docs/**"]
+      minimum: quick
+```
+
+路径信息尚不可用时不提前猜测；在代码探索、计划或实际修改暴露路径后再升级。Profile 选择和每次升级都写入事件及审计快照。
+
+### 9.4 内置基础工作流
 
 ```yaml
 version: 1
@@ -446,6 +552,7 @@ version: 1
 activeWorkflow:
   ref: builtin://workflows/feature-delivery
   version: 1
+profile: auto
 ```
 
 用户可以执行：
@@ -572,17 +679,23 @@ src/
 2. **Application Facade**：在现有内核上实现 `start/acquire/submit/decide/inspect`。
 3. **Skill Catalog**：内置 Skills、三层 Resolver、fallback、摘要和 Skill Lock。
 4. **Workflow Package**：内置基础工作流、项目 Workflow、`list/show/eject/validate/use`。
-5. **有限控制流**：条件、重试和有界 Review-Fix 循环。
-6. **Driver Adapter**：Codex、Claude、Cursor 和 Generic 安装与恢复流程。
-7. **Source Connector**：Prompt、文件、GitLab Issue 和飞书文档快照。
-8. **Delivery Connector**：Git commit、Issue 更新、Wiki 发布、幂等和回读。
-9. **发布验收**：完整文档、安装包、Driver Skill 和真实客户端验收。
+5. **Profile Engine**：三种内置 Profile、overlay 编译、风险策略、单向升级和失效传播。
+6. **有限控制流**：条件、重试和有界 Review-Fix 循环。
+7. **Driver Adapter**：Codex、Claude、Cursor 和 Generic 安装与恢复流程。
+8. **Source Connector**：Prompt、文件、GitLab Issue 和飞书文档快照。
+9. **Delivery Connector**：Git commit、Issue 更新、Wiki 发布、幂等和回读。
+10. **发布验收**：完整文档、安装包、Driver Skill 和真实客户端验收。
 
 每个阶段必须先为新协议增加失败测试再实现。可复用的现有安全与恢复场景必须按新协议重写，不要求旧接口测试继续通过。
 
 ## 19. 验收标准
 
 - 首次安装后，不依赖第三方 Skill 即可执行内置基础工作流。
+- 内置基础工作流提供 `quick`、`standard`、`governed`，并由同一 Runtime 执行。
+- `auto` 先以 provisional `quick` 完成采集和探索，再按风险选择 Profile；风险未知使用 `standard`。
+- Profile overlay 不能修改 Step 安全类别、外部目标或关闭安全内核。
+- Profile 升级会补回必需 Step，并失效受影响的审批、结果和 Evidence。
+- 项目自定义 Workflow 可以声明自己的 Profile overlay 和最低风险要求。
 - 项目 Workflow 可以绑定多个 Builtin、Global 和 Project Skill。
 - Global Skill 可以显式回退到 Builtin Skill。
 - 必需 Skill 缺失、摘要变化或 Workflow Package 被篡改时 fail closed。
