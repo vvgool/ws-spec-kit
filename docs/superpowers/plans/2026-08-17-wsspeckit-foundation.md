@@ -23,12 +23,18 @@
 
 ## 计划边界
 
-本计划交付可本地验证的 `init -> start -> acquire -> submit -> inspect` 基础链路。以下能力拆分为后续独立计划：有界循环运行、真实 GitLab/飞书/Wiki Connector、完整交付动作和最终发布。后续计划只能依赖本计划冻结的四组接口：
+本计划交付可本地验证的 `init -> start -> acquire -> submit -> decide -> inspect` 基础链路，以及 Prompt/本地文件需求采集和 Workflow 管理命令。以下能力拆分为后续独立计划：有界循环运行、真实 GitLab/飞书/Wiki Connector、完整交付动作和最终发布。后续计划只能依赖本计划冻结的四组接口：
 
 1. Task 2 的 `WSSpecApplication`、`AgentAction` 和 `WorkPackage`。
 2. Task 4-5 的 `WorkflowPackage`、`ResolvedSkill` 和 `SkillLock`。
 3. Task 6 的 `CompiledWorkflow` 和 `ResolvedProfile`。
 4. Task 7 的 `StepExecutor` Registry。
+
+后续按顺序执行：
+
+1. `2026-08-17-wsspeckit-control-runtime.md`
+2. `2026-08-17-wsspeckit-connectors.md`
+3. `2026-08-17-wsspeckit-release-acceptance.md`
 
 ---
 
@@ -412,8 +418,9 @@ git commit -m "feat: compile workflows with risk profiles"
 ### Task 7：Application Facade 与原子 Acquire/Submit
 
 **文件：**
-- 创建：`src/application/{application,start,acquire,submit,inspect}.ts`
+- 创建：`src/application/{application,start,acquire,submit,decide,inspect}.ts`
 - 创建：`src/registry/executors/{types,registry}.ts`
+- 创建：`src/registry/connectors/local-requirement.ts`
 - 修改：`src/storage/{work-items,control-plane}.ts`
 - 替换：`tests/integration/stage-execution.test.ts`
 - 创建：`tests/integration/application-flow.test.ts`
@@ -432,7 +439,7 @@ assert.equal(action.workPackage.stepId, "intake");
 assert.equal("conversationHistory" in action.workPackage, false);
 ```
 
-同时覆盖幂等重试、旧 Attempt 提交、Profile 升级、第二个 Git worktree 恢复。
+同时覆盖 Prompt/本地文件采集、幂等重试、旧 Attempt 提交和第二个 Git worktree 恢复。Profile 运行时升级由下一份计划实现，本任务只持久化初始 Profile 决策。
 
 - [ ] **步骤 2：运行测试，确认 Application Factory 缺失**
 
@@ -451,11 +458,11 @@ export interface StepExecutor {
 }
 ```
 
-本阶段只注册 `agent.execute` 和线性本地 Fixture 所需的 control executor。
+本阶段注册 `agent.execute`、线性本地 Fixture 所需的 control executor，以及只支持 Prompt/仓库内 Markdown/TXT 的 `connector.execute / requirement.capture`。本地来源必须生成不可变 Source Artifact；GitLab 和飞书来源在 Connector 计划实现。
 
-- [ ] **步骤 4：实现 Start、快照和原子 Acquire/Submit**
+- [ ] **步骤 4：实现 Start、快照、原子 Acquire/Submit 和 Decide**
 
-Start 快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、Schema、配置、来源和基线摘要。Acquire 在一次控制面变更中创建 Attempt、内部 Lease 和 Work Package；Submit 独立校验身份、摘要、路径、Artifact 和 Profile。
+Start 快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、Schema、配置、来源和基线摘要。Acquire 在一次控制面变更中创建 Attempt、内部 Lease 和 Work Package；Submit 独立校验身份、摘要、路径和 Artifact。新增 `src/application/decide.ts`，复用真实 TTY 审批边界，并在批准、拒绝和请求过期后返回下一条 `AgentAction`。
 
 - [ ] **步骤 5：运行 Application、恢复、锁和类型测试**
 
@@ -466,7 +473,7 @@ Start 快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、S
 - [ ] **步骤 6：提交**
 
 ```bash
-git add src/application src/registry/executors src/storage/work-items.ts src/storage/control-plane.ts tests/integration/application-flow.test.ts tests/integration/stage-execution.test.ts
+git add src/application src/registry/executors src/registry/connectors/local-requirement.ts src/storage/work-items.ts src/storage/control-plane.ts tests/integration/application-flow.test.ts tests/integration/stage-execution.test.ts
 git commit -m "feat: add the WSSpecKit application facade"
 ```
 
@@ -475,9 +482,13 @@ git commit -m "feat: add the WSSpecKit application facade"
 **文件：**
 - 替换：`src/cli/{main.ts,commands/core.ts}`
 - 创建：`src/adapters/cli/output.ts`
+- 创建：`src/adapters/cli/workflow.ts`
 - 创建：`src/adapters/skills/{install,codex,claude,cursor,generic}.ts`
+- 创建：`src/resources/chinese-content.ts`
 - 替换：`tests/contract/integrations.test.ts`
+- 创建：`tests/contract/chinese-content.test.ts`
 - 创建：`tests/e2e/{driver-install,application-cli}.test.ts`
+- 创建：`tests/e2e/workflow-cli.test.ts`
 
 **接口：**
 - 输入：Task 7 的 `WSSpecApplication` 和 Task 3 的中文 Driver Skill。
@@ -485,11 +496,11 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 - [ ] **步骤 1：编写失败的 CLI 与安装测试**
 
-验证帮助只暴露 `init/start/acquire/submit/decide/inspect/workflow/agent install`；旧命令返回 `WSSPEC_COMMAND_UNKNOWN`；所有帮助、错误和 Driver Skill 正文为中文。测试必须使用临时 HOME，不能写入真实用户 Skill 目录。
+验证帮助只暴露 `init/start/acquire/submit/decide/inspect/workflow/agent install`；旧命令返回 `WSSPEC_COMMAND_UNKNOWN`；`workflow list/show/eject/validate/use` 均有正反例；所有帮助、错误和 Driver Skill 正文为中文。测试必须使用临时 HOME，不能写入真实用户 Skill 目录。
 
 - [ ] **步骤 2：运行测试，确认旧 CLI 仍存在**
 
-运行：`node --import tsx --test tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/contract/integrations.test.ts`
+运行：`node --import tsx --test tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts tests/contract/integrations.test.ts tests/contract/chinese-content.test.ts`
 
 预期：失败，因为旧命令仍存在且没有安装器。
 
@@ -497,15 +508,19 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 每个命令只解析参数、调用一个 Application 方法并输出稳定 JSON；CLI 模块不得包含业务状态转换。
 
+`workflow eject` 必须原子复制 Builtin Package，目标存在时拒绝覆盖；`workflow use` 必须先完成 Package、Profile 和 Skill 编译校验再更新 `.wsspec/workflow.yaml`。
+
 - [ ] **步骤 4：实现中文 Driver Skill 生成与原子安装**
 
 所有客户端共享同一中文循环说明：
 
 ```text
-启动或恢复 -> acquire -> 读取绑定 Skill -> 当前 Agent 执行 -> submit -> 重复
+新任务 start / 已有任务 inspect -> acquire -> 读取绑定 Skill -> 当前 Agent 执行 -> submit -> 重复
 ```
 
 安装时展示精确目标，拒绝覆盖无关 Skill，并支持 `--dry-run`。
+
+实现中文内容检查器：只扫描 `docs/`、`resources/skills/`、`resources/templates/` 和 CLI 用户文案；忽略 fenced code、内联代码、URL、路径和协议标识，并维护显式英文术语允许表。失败输出必须包含文件、行号和未登记文本。
 
 - [ ] **步骤 5：运行完整基础门禁**
 
@@ -522,7 +537,7 @@ npm pack --dry-run
 - [ ] **步骤 6：提交**
 
 ```bash
-git add src/cli src/adapters tests/contract/integrations.test.ts tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts
+git add src/cli src/adapters src/resources/chinese-content.ts tests/contract/integrations.test.ts tests/contract/chinese-content.test.ts tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts
 git commit -m "feat: expose the Chinese WSSpecKit driver protocol"
 ```
 
