@@ -29,10 +29,10 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
     "import { loadBuiltinCatalog } from './node_modules/ws-spec-kit/dist/resources/catalog.js'; console.log((await loadBuiltinCatalog()).workflows.length)",
   ], { cwd: consumerDirectory });
 
-  assert.equal(version.stdout.trim(), "0.1.0-alpha.1");
+  assert.equal(JSON.parse(version.stdout).version, "0.1.0-alpha.1");
   assert.match(help.stdout, /WSSpecKit/);
   assert.match(help.stdout, /用法/);
   assert.match(help.stdout, /wspec init/);
-  assert.doesNotMatch(help.stdout, /issues|knowledge/);
+  assert.doesNotMatch(help.stdout, /issues|knowledge|wspec next|wspec claim|wspec context|wspec complete/);
   assert.equal(catalog.stdout.trim(), "2");
 });

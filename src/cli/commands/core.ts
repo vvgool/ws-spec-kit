@@ -1,81 +1,110 @@
 import { readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { parse } from "yaml";
 
-import { claimStage, buildStageContext, type Claim } from "../../engine/claims.js";
-import { completeStage } from "../../engine/results.js";
-import { verifyWorkItem } from "../../engine/verification.js";
-import { closeWorkItem } from "../../engine/archive.js";
-import { transitionRuntime } from "../../engine/scheduler.js";
-import { advanceWorkflow } from "../../engine/orchestrator.js";
-import { validateLegacyWorkflowSnapshot, workflowFor } from "../../engine/orchestrator.js";
-import { requestArtifactApproval } from "../../engine/approvals.js";
-import { initializeControlPlane, readControlPlane, recoverControlPlane } from "../../storage/control-plane.js";
+import { installDriverSkill, type DriverAgent } from "../../adapters/skills/install.js";
+import { CliAdapterError } from "../../adapters/cli/output.js";
+import { runWorkflowCommand } from "../../adapters/cli/workflow.js";
+import { createApplication } from "../../application/application.js";
+import type { DecisionInput, StartInput, SubmitInput } from "../../protocol/application.js";
 import { initRepository } from "../../storage/repository.js";
-import { createWorkItem } from "../../storage/work-items.js";
 
-export class CliError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "CliError"; } }
+function required(value: string | undefined, name: string): string {
+  if (value === undefined || value === "") throw new CliAdapterError("WSSPEC_ARGUMENT_REQUIRED", `缺少参数 ${name}。`);
+  return value;
+}
 
-function required(args: string[], index: number, name: string): string { const value = args[index]; if (value === undefined) throw new CliError("WSSPEC_ARGUMENT_REQUIRED", `缺少参数 ${name}。`); return value; }
+function option(argv: string[], name: string): string | undefined {
+  const index = argv.indexOf(name);
+  return index < 0 ? undefined : required(argv[index + 1], name);
+}
 
-export async function runCommand(cwd: string, argv: string[], _json = false): Promise<unknown> {
-  const [command, ...args] = argv.filter((arg) => arg !== "--json");
-  if (command === "issues" || command === "knowledge") throw new CliError("WSSPEC_FEATURE_NOT_AVAILABLE", `${command} 属于 M2，当前版本不可用。`);
-  if (command === "init") return initRepository(cwd);
-  if (command === "new" || command === "new-file") {
-    const workItemId = required(args, 0, "workItemId") as `WSS-${string}`; const title = required(args, 1, "title"); const source = required(args, 2, "source");
-    const [workflowSource, configSource] = await Promise.all([
-      readFile(path.join(cwd, ".wsspec/workflow.yaml"), "utf8"),
-      readFile(path.join(cwd, ".wsspec/config.yaml"), "utf8"),
-    ]);
-    validateLegacyWorkflowSnapshot(parse(workflowSource), parse(configSource));
-    const item = await createWorkItem({ root: cwd, workItemId, title, source: command === "new" ? { type: "prompt", content: source } : { type: "file", path: source } });
-    const workflow = parse(await readFile(path.join(cwd, item.execution.worktree, ".wsspec/work-items", workItemId, "snapshot/workflow.yaml"), "utf8")) as { stages: Array<{ id: string }> };
-    await initializeControlPlane({ cwd, workItemId, stages: workflow.stages.map((stage) => stage.id) });
-    await transitionRuntime({ cwd, workItemId, scope: "work-item", to: "active", idempotencyKey: "work-item-created" });
-    return item;
+function noUnknownOptions(argv: string[], allowed: readonly string[]): void {
+  for (const value of argv) if (value.startsWith("--") && !allowed.includes(value)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", `不支持参数 ${value}。`);
+}
+
+function positional(argv: string[]): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index]!.startsWith("--")) { index += 1; continue; }
+    values.push(argv[index]!);
   }
-  const workItemId = required(args, 0, "workItemId");
-  if (command === "status") {
-    const projection = await readControlPlane(cwd, workItemId);
-    return {
-      version: projection.version,
-      repositoryId: projection.repositoryId,
-      workItemId: projection.workItemId,
-      workItem: projection.workItem,
-      stages: projection.stages,
-      lastSequence: projection.lastSequence,
-      lastEventHash: projection.lastEventHash,
-      claims: Object.fromEntries(Object.entries(projection.claims).map(([stageId, claim]) => [stageId, { stageId: claim.stageId, attemptId: claim.attemptId, actor: claim.actor, claimedAt: claim.claimedAt, expiresAt: claim.expiresAt }])),
-      approvals: projection.approvals,
-      evidence: projection.evidence,
-      readOnly: projection.readOnly,
-    };
+  return values;
+}
+
+function application(home: string, actor: string | undefined) {
+  return createApplication({ home, terminal: process.stdin, workflowTrust: { interactive: process.stdin.isTTY === true, actor: actor ?? "cli" } });
+}
+
+async function start(root: string, argv: string[], home: string): Promise<unknown> {
+  noUnknownOptions(argv, ["--prompt", "--file", "--workflow", "--profile", "--actor"]);
+  const prompt = option(argv, "--prompt");
+  const file = option(argv, "--file");
+  if ((prompt === undefined) === (file === undefined)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "start 必须且只能提供 --prompt 或 --file。 ");
+  const workflowRef = option(argv, "--workflow");
+  const profile = option(argv, "--profile");
+  if (profile !== undefined && !["auto", "quick", "standard", "governed"].includes(profile)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "Profile 必须是 auto、quick、standard 或 governed。");
+  const input: StartInput = {
+    root,
+    source: prompt === undefined ? { type: "file", path: file! } : { type: "prompt", text: prompt },
+    ...(workflowRef === undefined ? {} : { workflowRef }),
+    ...(profile === undefined ? {} : { profile: profile as NonNullable<StartInput["profile"]> }),
+  };
+  return application(home, option(argv, "--actor")).start(input);
+}
+
+async function acquire(root: string, argv: string[], home: string): Promise<unknown> {
+  noUnknownOptions(argv, ["--actor"]);
+  return application(home, option(argv, "--actor")).acquire({ root, workItemId: required(positional(argv)[0], "workItemId") as `WSS-${string}`, actor: required(option(argv, "--actor"), "--actor") });
+}
+
+async function submit(root: string, argv: string[], home: string): Promise<unknown> {
+  noUnknownOptions(argv, ["--step", "--attempt", "--lease", "--result", "--actor"]);
+  const resultPath = required(option(argv, "--result"), "--result");
+  const result = JSON.parse(await readFile(path.resolve(root, resultPath), "utf8")) as SubmitInput["result"];
+  return application(home, option(argv, "--actor")).submit({
+    root,
+    workItemId: required(positional(argv)[0], "workItemId") as `WSS-${string}`,
+    stepId: required(option(argv, "--step"), "--step"),
+    attemptId: required(option(argv, "--attempt"), "--attempt"),
+    leaseToken: required(option(argv, "--lease"), "--lease"),
+    result,
+  });
+}
+
+async function decide(root: string, argv: string[], home: string): Promise<unknown> {
+  noUnknownOptions(argv, ["--input", "--actor"]);
+  const input = JSON.parse(await readFile(path.resolve(root, required(option(argv, "--input"), "--input")), "utf8")) as Omit<DecisionInput, "root" | "actor">;
+  return application(home, option(argv, "--actor")).decide({ ...input, root, actor: required(option(argv, "--actor"), "--actor") } as DecisionInput);
+}
+
+async function inspect(root: string, argv: string[], home: string): Promise<unknown> {
+  noUnknownOptions(argv, []);
+  return application(home, undefined).inspect({ root, workItemId: required(positional(argv)[0], "workItemId") as `WSS-${string}` });
+}
+
+async function agent(argv: string[], home: string): Promise<unknown> {
+  if (argv[0] !== "install") throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知 Agent 命令：${argv[0] ?? ""}`);
+  noUnknownOptions(argv, ["--target", "--dry-run"]);
+  const name = required(argv[1], "agent");
+  if (!(["codex", "claude", "cursor", "generic"] as string[]).includes(name)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "Agent 必须是 codex、claude、cursor 或 generic。");
+  const target = option(argv, "--target");
+  return installDriverSkill({ agent: name as DriverAgent, home, ...(target === undefined ? {} : { target }), dryRun: argv.includes("--dry-run") });
+}
+
+export async function runCommand(cwd: string, argv: string[]): Promise<unknown> {
+  const [command, ...args] = argv;
+  const home = process.env.HOME ?? os.homedir();
+  if (command === "init") { noUnknownOptions(args, []); return initRepository(cwd); }
+  if (command === "start") return start(cwd, args, home);
+  if (command === "acquire") return acquire(cwd, args, home);
+  if (command === "submit") return submit(cwd, args, home);
+  if (command === "decide") return decide(cwd, args, home);
+  if (command === "inspect") return inspect(cwd, args, home);
+  if (command === "workflow") {
+    const actor = option(args, "--actor");
+    return runWorkflowCommand({ root: cwd, argv: args, home, interactive: process.stdin.isTTY === true, ...(actor === undefined ? {} : { actor }) });
   }
-  if (command === "recover") return recoverControlPlane({ cwd, workItemId });
-  if (command === "verify") return verifyWorkItem({ cwd, workItemId });
-  if (command === "close") return closeWorkItem({ cwd, workItemId });
-  if (command === "next") return advanceWorkflow(cwd, workItemId);
-  if (command === "claim") return claimStage({ cwd, workItemId, stageId: required(args, 1, "stageId"), actor: required(args, 2, "actor") });
-  if (command === "context") {
-    const stageId = required(args, 1, "stageId"); const projection = await readControlPlane(cwd, workItemId); const claim = projection.claims[stageId];
-    if (claim === undefined) throw new CliError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Stage 没有活动 Claim。");
-    const context = await buildStageContext({ ...claim, cwd, workItemId, worktree: "" } satisfies Claim);
-    await transitionRuntime({ cwd, workItemId, scope: "stage", stageId, to: "running", idempotencyKey: `start:${claim.attemptId}` });
-    return context;
-  }
-  if (command === "complete") {
-    const stageId = required(args, 1, "stageId"); const resultPath = required(args, 2, "result"); const projection = await readControlPlane(cwd, workItemId); const context = projection.contexts[stageId];
-    if (context === undefined) throw new CliError("WSSPEC_CONTEXT_STALE", "Stage 没有活动 Context。");
-    const result = JSON.parse(await readFile(path.resolve(cwd, resultPath), "utf8")) as { attemptId: string; artifacts?: Array<{ artifactType?: string; path?: string }> };
-    await completeStage({ cwd, context: context as never, result });
-    const stage = (await workflowFor(cwd, workItemId)).stages.find((candidate) => candidate.id === stageId);
-    if (stage?.approval?.required === true) {
-      const artifact = result.artifacts?.[0];
-      if (artifact?.path === undefined || artifact.artifactType === undefined) throw new CliError("WSSPEC_REQUIRED_ARTIFACT_MISSING", "审批 Stage 缺少带类型的 Artifact。");
-      return requestArtifactApproval({ cwd, workItemId, stageId, attemptId: result.attemptId, artifactPath: artifact.path, artifactType: artifact.artifactType });
-    }
-    return transitionRuntime({ cwd, workItemId, scope: "stage", stageId, to: "succeeded", idempotencyKey: `validated:${result.attemptId}` });
-  }
-  throw new CliError("WSSPEC_COMMAND_UNKNOWN", `未知命令：${command ?? ""}`);
+  if (command === "agent") return agent(args, home);
+  throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知命令：${command ?? ""}`);
 }

@@ -179,7 +179,7 @@ export async function withControlPlaneLock<T>(controlPlane: string, operation: (
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         const existing = await readLock(lockPath);
         if (existing?.hostname === hostname() && !processIsAlive(existing.pid)) {
-          throw new EventStoreError("WSSPEC_CONTROL_PLANE_STALE_LOCK", "检测到异常退出遗留的控制面锁，请执行 wspec recover。");
+          throw new EventStoreError("WSSPEC_CONTROL_PLANE_STALE_LOCK", "检测到异常退出遗留的控制面锁，请在确认所有者已退出后执行受控恢复。");
         }
       }
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) {
