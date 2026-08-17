@@ -57,19 +57,34 @@ export async function loadBuiltinCatalog(root = builtinResourcesRoot()): Promise
     assertContainedPath(resourcesRoot, workflowsRoot, codes, "Builtin workflows root"),
     assertContainedPath(resourcesRoot, skillsRoot, codes, "Builtin skills root"),
   ]);
-  const source = parseCatalog(parse(await readFile(path.join(resourcesRoot, "catalog.yaml"), "utf8")));
+  const catalogFilename = path.join(resourcesRoot, "catalog.yaml");
+  await assertContainedPath(resourcesRoot, catalogFilename, codes, "Builtin catalog.yaml");
+  const source = parseCatalog(parse(await readFile(catalogFilename, "utf8")));
   const skills = await Promise.all(source.skills.map(async (skill) => {
     const entry = path.join(skillsRoot, skill.id, "SKILL.md");
-    await assertContainedPath(skillsRoot, entry, codes, `Builtin Skill ${skill.id}`);
+    await assertContainedPath(resourcesRoot, entry, codes, `Builtin Skill ${skill.id}`);
     return { ...skill, entry };
   }));
   const workflows = await Promise.all(source.workflows.map(async (id) => {
     const directory = path.join(workflowsRoot, id);
-    await assertContainedPath(workflowsRoot, directory, codes, `Builtin Workflow ${id}`);
-    const workflow = parseWorkflowV1(parse(await readFile(path.join(directory, "workflow.yaml"), "utf8")));
+    await assertContainedPath(resourcesRoot, directory, codes, `Builtin Workflow ${id}`);
+    const workflowFilename = path.join(directory, "workflow.yaml");
+    await assertContainedPath(resourcesRoot, workflowFilename, codes, `Builtin Workflow ${id} workflow.yaml`);
+    const workflow = parseWorkflowV1(parse(await readFile(workflowFilename, "utf8")));
+    if (workflow.workflow.id !== id) {
+      throw new WorkflowPackageError("WSSPEC_BUILTIN_WORKFLOW_ID_MISMATCH", "Builtin Catalog 引用、目录与 Workflow id 必须一致。");
+    }
     const profiles = await Promise.all(["quick", "standard", "governed"].map(async (profile) => {
-      const value = parse(await readFile(path.join(directory, "profiles", `${profile}.yaml`), "utf8"));
-      return parseProfileV1(value);
+      const profileFilename = path.join(directory, "profiles", `${profile}.yaml`);
+      await assertContainedPath(resourcesRoot, profileFilename, codes, `Builtin Workflow ${id} Profile ${profile}`);
+      const definition = parseProfileV1(parse(await readFile(profileFilename, "utf8")));
+      if (definition.profile.id !== profile) {
+        throw new WorkflowPackageError("WSSPEC_BUILTIN_PROFILE_ID_MISMATCH", "Builtin Profile 文件名与 Profile id 必须一致。");
+      }
+      if (definition.profile.workflow !== workflow.workflow.id) {
+        throw new WorkflowPackageError("WSSPEC_BUILTIN_PROFILE_WORKFLOW_MISMATCH", "Builtin Profile 必须绑定当前 Workflow id。");
+      }
+      return definition;
     }));
     return { ...workflow, profiles };
   }));

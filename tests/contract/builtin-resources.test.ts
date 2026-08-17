@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { loadBuiltinCatalog } from "../../src/resources/catalog.js";
+import { WorkflowPackageError } from "../../src/workflow-package/types.js";
 import { invalidProfileV1Fixtures, invalidWorkflowV1Fixtures, profileV1Fixture, workflowV1Fixture } from "../helpers/workflow-v1-fixtures.js";
 
 async function writeCatalogFixture(workflow: string, profile: string, catalogSuffix = ""): Promise<string> {
@@ -125,4 +126,66 @@ test("Builtin Catalog 将 workflows 绑定到 canonical resources root", async (
     }
     await assert.rejects(loadBuiltinCatalog(root), /WSSPEC_BUILTIN_RESOURCE_PATH_ESCAPE/, targetState);
   }
+});
+
+test("Builtin Catalog 拒绝越出 canonical resources root 的叶子 YAML", async (context) => {
+  const leaves = [
+    ["catalog", "catalog.yaml"],
+    ["workflow", path.join("workflows", "fixture-workflow", "workflow.yaml")],
+    ["profile", path.join("workflows", "fixture-workflow", "profiles", "standard.yaml")],
+  ] as const;
+  for (const [label, relative] of leaves) {
+    for (const targetState of ["existing", "dangling"] as const) {
+      await context.test(`${label} ${targetState}`, async (leafContext) => {
+        const root = await writeCatalogFixture(workflowV1Fixture, profileV1Fixture);
+        const outside = await writeCatalogFixture(workflowV1Fixture, profileV1Fixture);
+        const leaf = path.join(root, relative);
+        await rm(leaf);
+        try {
+          await symlink(
+            targetState === "existing" ? path.join(outside, relative) : path.join(outside, "missing", relative),
+            leaf,
+          );
+        } catch (caught) {
+          if ((caught as NodeJS.ErrnoException).code === "EPERM") leafContext.skip("当前文件系统不支持测试符号链接");
+          throw caught;
+        }
+        await assert.rejects(
+          loadBuiltinCatalog(root),
+          (error: unknown) => error instanceof WorkflowPackageError && error.code === "WSSPEC_BUILTIN_RESOURCE_PATH_ESCAPE",
+        );
+      });
+    }
+  }
+});
+
+test("Builtin Catalog 拒绝 Catalog ref 与 Workflow id 不一致", async () => {
+  const root = await writeCatalogFixture(
+    workflowV1Fixture.replace("id: fixture-workflow", "id: other-workflow"),
+    profileV1Fixture,
+  );
+  await assert.rejects(
+    loadBuiltinCatalog(root),
+    (error: unknown) => error instanceof WorkflowPackageError && error.code === "WSSPEC_BUILTIN_WORKFLOW_ID_MISMATCH",
+  );
+});
+
+test("Builtin Catalog 拒绝 Profile 文件名与 Profile id 不一致", async () => {
+  const root = await writeCatalogFixture(workflowV1Fixture, profileV1Fixture);
+  const standard = path.join(root, "workflows", "fixture-workflow", "profiles", "standard.yaml");
+  await writeFile(standard, profileV1Fixture.replace("id: standard", "id: quick"));
+  await assert.rejects(
+    loadBuiltinCatalog(root),
+    (error: unknown) => error instanceof WorkflowPackageError && error.code === "WSSPEC_BUILTIN_PROFILE_ID_MISMATCH",
+  );
+});
+
+test("Builtin Catalog 拒绝 Profile 绑定其他 Workflow", async () => {
+  const root = await writeCatalogFixture(workflowV1Fixture, profileV1Fixture);
+  const standard = path.join(root, "workflows", "fixture-workflow", "profiles", "standard.yaml");
+  await writeFile(standard, profileV1Fixture.replace("workflow: fixture-workflow", "workflow: other-workflow"));
+  await assert.rejects(
+    loadBuiltinCatalog(root),
+    (error: unknown) => error instanceof WorkflowPackageError && error.code === "WSSPEC_BUILTIN_PROFILE_WORKFLOW_MISMATCH",
+  );
 });
