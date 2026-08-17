@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -6,6 +6,12 @@ import { schemaIds, schemas } from "./definitions.js";
 
 export async function generatePublicSchemas(outputDir: string): Promise<void> {
   await mkdir(outputDir, { recursive: true });
+  const expected = new Set(schemaIds.map((schemaId) => `${schemaId.replaceAll(".", "-")}.schema.json`));
+  for (const filename of await readdir(outputDir)) {
+    if (filename.endsWith(".schema.json") && !expected.has(filename)) {
+      await unlink(path.join(outputDir, filename));
+    }
+  }
   for (const schemaId of schemaIds) {
     const filename = `${schemaId.replaceAll(".", "-")}.schema.json`;
     await writeFile(path.join(outputDir, filename), `${JSON.stringify(schemas[schemaId], null, 2)}\n`, "utf8");
@@ -20,4 +26,3 @@ if (invokedPath === fileURLToPath(import.meta.url)) {
   }
   await generatePublicSchemas(path.resolve(outputDir));
 }
-

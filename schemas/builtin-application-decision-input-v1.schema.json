@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.application-decision-input.v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "root",
+        "workItemId",
+        "requestId",
+        "decision",
+        "expectedDigest",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "approval"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workItemId": {
+          "type": "string",
+          "pattern": "^WSS-[A-Za-z0-9-]+$"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "rejected"
+          ]
+        },
+        "expectedDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "root",
+        "requestId",
+        "decision",
+        "expectedPackageDigest",
+        "expectedCapabilityDigest",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "workflow_trust"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "trusted",
+            "rejected"
+          ]
+        },
+        "expectedPackageDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "expectedCapabilityDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  ]
+}

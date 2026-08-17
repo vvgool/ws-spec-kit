@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.application-acquire-input.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "root",
+    "workItemId",
+    "actor"
+  ],
+  "properties": {
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSS-[A-Za-z0-9-]+$"
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

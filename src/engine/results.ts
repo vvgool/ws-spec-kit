@@ -15,7 +15,18 @@ function permitted(file: string, allowedPaths: string[]): boolean {
 }
 
 export async function completeStage(input: { cwd: string; context: StageContext; result: unknown }): Promise<RuntimeProjection> {
-  const result = validate<Record<string, unknown>>("builtin.stage-result.v1", input.result);
+  const result = input.result as Record<string, unknown>;
+  validate("builtin.submit-result.v1", {
+    version: result.version,
+    status: result.status,
+    summary: result.summary,
+    modifiedFiles: result.modifiedFiles,
+    artifacts: result.artifacts,
+    commands: result.commands,
+    evidence: result.evidence,
+    externalWrites: result.externalWrites,
+    remainingRisks: result.remainingRisks,
+  });
   const projection = await readControlPlane(input.cwd, input.context.workItemId);
   const claim = projection.claims[input.context.stageId];
   if (claim?.attemptId !== input.context.attemptId || claim.claimToken !== input.context.claimToken) throw new StageResultError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Attempt 或 Claim 令牌已经失效。");

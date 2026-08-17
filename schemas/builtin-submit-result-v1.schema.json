@@ -1,18 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "builtin.stage-result.v1",
+  "$id": "builtin.submit-result.v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "version",
-    "workItemId",
-    "stageId",
-    "attemptId",
-    "workflowDigest",
-    "contextDigest",
-    "baselineTreeDigest",
-    "inputWorkspaceTreeDigest",
-    "outputWorkspaceTreeDigest",
     "status",
     "summary",
     "modifiedFiles",
@@ -25,38 +17,6 @@
   "properties": {
     "version": {
       "const": 1
-    },
-    "workItemId": {
-      "type": "string",
-      "pattern": "^WSS-[A-Za-z0-9-]+$"
-    },
-    "stageId": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]{0,62}$"
-    },
-    "attemptId": {
-      "type": "string",
-      "pattern": "^attempt-.+$"
-    },
-    "workflowDigest": {
-      "type": "string",
-      "pattern": "^sha256:.+$"
-    },
-    "contextDigest": {
-      "type": "string",
-      "pattern": "^sha256:.+$"
-    },
-    "baselineTreeDigest": {
-      "type": "string",
-      "pattern": "^sha256:.+$"
-    },
-    "inputWorkspaceTreeDigest": {
-      "type": "string",
-      "pattern": "^sha256:.+$"
-    },
-    "outputWorkspaceTreeDigest": {
-      "type": "string",
-      "pattern": "^sha256:.+$"
     },
     "status": {
       "enum": [

@@ -2,8 +2,14 @@ export const schemaIds = [
   "builtin.workflow.v1",
   "builtin.project-config.v1",
   "builtin.work-item.v1",
-  "builtin.stage-context.v1",
-  "builtin.stage-result.v1",
+  "builtin.application-start-input.v1",
+  "builtin.application-acquire-input.v1",
+  "builtin.application-submit-input.v1",
+  "builtin.application-decision-input.v1",
+  "builtin.application-inspect-input.v1",
+  "builtin.agent-action.v1",
+  "builtin.work-package.v1",
+  "builtin.submit-result.v1",
   "builtin.evidence.v1",
   "builtin.artifact.v1",
 ] as const;
@@ -16,6 +22,8 @@ const idPattern = "^[a-z][a-z0-9-]{0,62}$";
 const digestPattern = "^sha256:.+$";
 const repositoryIdPattern = "^repo-[0-9A-HJKMNP-TV-Z]{26}$";
 const workItemIdPattern = "^WSS-[A-Za-z0-9-]+$";
+const attemptIdPattern = "^attempt-.+$";
+const errorCodePattern = "^WSSPEC_[A-Z0-9_]+$";
 
 const stringArray = { type: "array", items: { type: "string" }, uniqueItems: true } as const;
 
@@ -87,6 +95,87 @@ const artifactReferenceSchema: JsonSchema = {
     revision: { type: "integer", minimum: 1 },
     contentHash: { type: "string", pattern: digestPattern },
     mediaType: { type: "string" },
+  },
+};
+
+const requirementSourceSchema: JsonSchema = {
+  oneOf: [
+    {
+      type: "object", additionalProperties: false, required: ["type", "text"],
+      properties: { type: { const: "prompt" }, text: { type: "string", minLength: 1 } },
+    },
+    {
+      type: "object", additionalProperties: false, required: ["type", "path"],
+      properties: { type: { const: "file" }, path: { type: "string", minLength: 1 } },
+    },
+    {
+      type: "object", additionalProperties: false, required: ["type", "provider", "id"],
+      properties: {
+        type: { const: "issue" }, provider: { type: "string", minLength: 1 },
+        id: { type: "string", minLength: 1 }, url: { type: "string", format: "uri" },
+      },
+    },
+  ],
+};
+
+const submitResultSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "status", "summary", "modifiedFiles", "artifacts", "commands", "evidence", "externalWrites", "remainingRisks"],
+  properties: {
+    version: { const: 1 },
+    status: { enum: ["completed", "failed"] },
+    summary: { type: "string", minLength: 1 },
+    modifiedFiles: stringArray,
+    artifacts: { type: "array", items: artifactReferenceSchema },
+    commands: { type: "array", items: { type: "object" } },
+    evidence: { type: "array", items: { type: "object" } },
+    externalWrites: { type: "array", items: { type: "object" } },
+    remainingRisks: { type: "array", items: { type: "object" } },
+  },
+};
+
+const workPackageSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "workItemId", "stepId", "attemptId", "lease", "objective", "skills", "artifacts", "constraints", "requiredOutputs", "gates", "resultSchema"],
+  properties: {
+    version: { const: 1 },
+    workItemId: { type: "string", pattern: workItemIdPattern },
+    stepId: { type: "string", pattern: idPattern },
+    attemptId: { type: "string", pattern: attemptIdPattern },
+    lease: {
+      type: "object", additionalProperties: false, required: ["token", "expiresAt"],
+      properties: { token: { type: "string", minLength: 1 }, expiresAt: { type: "string", format: "date-time" } },
+    },
+    objective: { type: "string", minLength: 1 },
+    skills: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false, required: ["ref", "version", "digest", "description"],
+        properties: {
+          ref: { type: "string", minLength: 1 }, version: { type: "string", minLength: 1 },
+          digest: { type: "string", pattern: digestPattern }, description: { type: "string", minLength: 1 },
+        },
+      },
+    },
+    artifacts: { type: "array", items: artifactReferenceSchema },
+    constraints: {
+      type: "object", additionalProperties: false, required: ["allowedPaths", "forbiddenActions"],
+      properties: { allowedPaths: stringArray, forbiddenActions: stringArray },
+    },
+    requiredOutputs: { type: "array", items: artifactReferenceSchema },
+    gates: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false, required: ["id", "evidence", "required"],
+        properties: {
+          id: { type: "string", pattern: idPattern },
+          evidence: { enum: ["trusted", "attested", "reported"] }, required: { type: "boolean" },
+        },
+      },
+    },
+    resultSchema: { const: "builtin.submit-result.v1" },
   },
 };
 
@@ -229,57 +318,118 @@ export const schemas: Record<SchemaId, JsonSchema> = {
       },
     },
   },
-  "builtin.stage-context.v1": {
-    $schema: "https://json-schema.org/draft/2020-12/schema",
-    $id: "builtin.stage-context.v1",
-    type: "object",
-    additionalProperties: false,
-    required: ["version", "workItemId", "stageId", "attemptId", "claimToken", "claimExpiresAt", "workflowDigest", "configDigest", "baselineTreeDigest", "inputWorkspaceTreeDigest", "contextDigest", "objective", "inputs", "expectedOutputs", "allowedPaths", "gates", "resultSchema"],
+  "builtin.application-start-input.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-start-input.v1",
+    type: "object", additionalProperties: false, required: ["root", "source"],
     properties: {
-      version: { const: 1 },
-      workItemId: { type: "string", pattern: workItemIdPattern },
-      stageId: { type: "string", pattern: idPattern },
-      attemptId: { type: "string", pattern: "^attempt-.+$" },
-      claimToken: { type: "string", minLength: 1 },
-      claimExpiresAt: { type: "string", format: "date-time" },
-      workflowDigest: { type: "string", pattern: digestPattern },
-      configDigest: { type: "string", pattern: digestPattern },
-      baselineTreeDigest: { type: "string", pattern: digestPattern },
-      inputWorkspaceTreeDigest: { type: "string", pattern: digestPattern },
-      contextDigest: { type: "string", pattern: digestPattern },
-      objective: { type: "string", minLength: 1 },
-      inputs: { type: "array", items: artifactReferenceSchema },
-      expectedOutputs: { type: "array", items: artifactReferenceSchema },
-      allowedPaths: stringArray,
-      gates: stringArray,
-      resultSchema: { const: "builtin.stage-result.v1" },
+      root: { type: "string", minLength: 1 }, source: requirementSourceSchema,
+      workflowRef: { type: "string", minLength: 1 },
+      profile: { enum: ["auto", "quick", "standard", "governed"] },
     },
   },
-  "builtin.stage-result.v1": {
-    $schema: "https://json-schema.org/draft/2020-12/schema",
-    $id: "builtin.stage-result.v1",
-    type: "object",
-    additionalProperties: false,
-    required: ["version", "workItemId", "stageId", "attemptId", "workflowDigest", "contextDigest", "baselineTreeDigest", "inputWorkspaceTreeDigest", "outputWorkspaceTreeDigest", "status", "summary", "modifiedFiles", "artifacts", "commands", "evidence", "externalWrites", "remainingRisks"],
+  "builtin.application-acquire-input.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-acquire-input.v1",
+    type: "object", additionalProperties: false, required: ["root", "workItemId", "actor"],
     properties: {
-      version: { const: 1 },
-      workItemId: { type: "string", pattern: workItemIdPattern },
-      stageId: { type: "string", pattern: idPattern },
-      attemptId: { type: "string", pattern: "^attempt-.+$" },
-      workflowDigest: { type: "string", pattern: digestPattern },
-      contextDigest: { type: "string", pattern: digestPattern },
-      baselineTreeDigest: { type: "string", pattern: digestPattern },
-      inputWorkspaceTreeDigest: { type: "string", pattern: digestPattern },
-      outputWorkspaceTreeDigest: { type: "string", pattern: digestPattern },
-      status: { enum: ["completed", "failed"] },
-      summary: { type: "string", minLength: 1 },
-      modifiedFiles: stringArray,
-      artifacts: { type: "array", items: artifactReferenceSchema },
-      commands: { type: "array", items: { type: "object" } },
-      evidence: { type: "array", items: { type: "object" } },
-      externalWrites: { type: "array", items: { type: "object" } },
-      remainingRisks: { type: "array", items: { type: "object" } },
+      root: { type: "string", minLength: 1 }, workItemId: { type: "string", pattern: workItemIdPattern },
+      actor: { type: "string", minLength: 1 },
     },
+  },
+  "builtin.application-submit-input.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-submit-input.v1",
+    type: "object", additionalProperties: false,
+    required: ["root", "workItemId", "stepId", "attemptId", "leaseToken", "result"],
+    properties: {
+      root: { type: "string", minLength: 1 }, workItemId: { type: "string", pattern: workItemIdPattern },
+      stepId: { type: "string", pattern: idPattern }, attemptId: { type: "string", pattern: attemptIdPattern },
+      leaseToken: { type: "string", minLength: 1 }, result: submitResultSchema,
+    },
+  },
+  "builtin.application-decision-input.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-decision-input.v1",
+    oneOf: [
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor"],
+        properties: {
+          kind: { const: "approval" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { enum: ["approved", "rejected"] }, expectedDigest: { type: "string", pattern: digestPattern },
+          actor: { type: "string", minLength: 1 },
+        },
+      },
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "requestId", "decision", "expectedPackageDigest", "expectedCapabilityDigest", "actor"],
+        properties: {
+          kind: { const: "workflow_trust" }, root: { type: "string", minLength: 1 },
+          requestId: { type: "string", minLength: 1 }, decision: { enum: ["trusted", "rejected"] },
+          expectedPackageDigest: { type: "string", pattern: digestPattern },
+          expectedCapabilityDigest: { type: "string", pattern: digestPattern }, actor: { type: "string", minLength: 1 },
+        },
+      },
+    ],
+  },
+  "builtin.application-inspect-input.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-inspect-input.v1",
+    type: "object", additionalProperties: false, required: ["root", "workItemId"],
+    properties: { root: { type: "string", minLength: 1 }, workItemId: { type: "string", pattern: workItemIdPattern } },
+  },
+  "builtin.agent-action.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.agent-action.v1",
+    oneOf: [
+      {
+        type: "object", additionalProperties: false, required: ["action", "workPackage"],
+        properties: { action: { const: "execute" }, workPackage: workPackageSchema },
+      },
+      {
+        type: "object", additionalProperties: false, required: ["action", "approval"],
+        properties: {
+          action: { const: "await_approval" },
+          approval: {
+            type: "object", additionalProperties: false,
+            required: ["kind", "requestId", "workItemId", "title", "digest"],
+            properties: {
+              kind: { enum: ["step", "external_action", "workflow_trust"] }, requestId: { type: "string", minLength: 1 },
+              workItemId: { type: "string", pattern: workItemIdPattern }, title: { type: "string", minLength: 1 },
+              digest: { type: "string", pattern: digestPattern },
+            },
+          },
+        },
+      },
+      {
+        type: "object", additionalProperties: false, required: ["action", "problems"],
+        properties: {
+          action: { const: "blocked" }, problems: {
+            type: "array", minItems: 1, items: {
+              type: "object", additionalProperties: false, required: ["code", "message", "retryable"],
+              properties: {
+                code: { type: "string", pattern: errorCodePattern }, message: { type: "string", minLength: 1 },
+                retryable: { type: "boolean" },
+              },
+            },
+          },
+        },
+      },
+      {
+        type: "object", additionalProperties: false, required: ["action", "summary"],
+        properties: {
+          action: { const: "completed" }, summary: {
+            type: "object", additionalProperties: false, required: ["workItemId", "status", "message"],
+            properties: {
+              workItemId: { type: "string", pattern: workItemIdPattern }, status: { enum: ["closed", "cancelled"] },
+              message: { type: "string", minLength: 1 },
+            },
+          },
+        },
+      },
+    ],
+  },
+  "builtin.work-package.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.work-package.v1", ...workPackageSchema,
+  },
+  "builtin.submit-result.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.submit-result.v1", ...submitResultSchema,
   },
   "builtin.evidence.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",
