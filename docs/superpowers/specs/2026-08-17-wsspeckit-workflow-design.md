@@ -18,6 +18,7 @@ WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定�
 6. 活动 Work Item 固定 Workflow、Skill、Schema、配置和来源快照，后续升级不能静默改变执行语义。
 7. Workflow Language 只提供有限控制结构，不演变为通用编程语言。
 8. Profile 只调整执行强度，不能关闭可信验证、外部写入授权等安全底线。
+9. 所有用户文档、CLI 文案、内置 Workflow 说明、模板和内置 Skill 正文使用中文；协议字段、命令、URI、Schema ID 和错误码使用英文标识。
 
 ## 3. 产品命名
 
@@ -691,6 +692,7 @@ src/
 ## 19. 验收标准
 
 - 首次安装后，不依赖第三方 Skill 即可执行内置基础工作流。
+- 所有发布文档、模板和内置 Skill 正文均为中文，且 CI 扫描不得出现未登记的英文用户文案。
 - 内置基础工作流提供 `quick`、`standard`、`governed`，并由同一 Runtime 执行。
 - `auto` 先以 provisional `quick` 完成采集和探索，再按风险选择 Profile；风险未知使用 `standard`。
 - Profile overlay 不能修改 Step 安全类别、外部目标或关闭安全内核。
