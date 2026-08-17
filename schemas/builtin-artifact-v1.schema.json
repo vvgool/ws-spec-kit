@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.artifact.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifactType",
+    "schemaVersion",
+    "workItemId",
+    "stageId",
+    "attemptId",
+    "revision",
+    "contentHash"
+  ],
+  "properties": {
+    "artifactType": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSK-[A-Za-z0-9-]+$"
+    },
+    "stageId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-.+$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "contentHash": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    }
+  }
+}

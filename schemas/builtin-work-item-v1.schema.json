@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.work-item.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "workItemId",
+    "repositoryId",
+    "title",
+    "createdAt",
+    "status",
+    "execution",
+    "source",
+    "bindings"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSK-[A-Za-z0-9-]+$"
+    },
+    "repositoryId": {
+      "type": "string",
+      "pattern": "^repo-[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "active",
+        "awaiting_approval",
+        "verifying",
+        "verified",
+        "blocked",
+        "pending_publish",
+        "reconciliation_required",
+        "paused",
+        "closed",
+        "cancelled"
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worktree",
+        "branch",
+        "baselineRevision",
+        "baselineTreeDigest",
+        "workflowDigest",
+        "configDigest",
+        "schemaDigest"
+      ],
+      "properties": {
+        "worktree": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baselineRevision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baselineTreeDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "workflowDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "configDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "schemaDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshot",
+        "contentDigest"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "prompt",
+            "file",
+            "issue"
+          ]
+        },
+        "snapshot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contentDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue",
+        "knowledge"
+      ],
+      "properties": {
+        "issue": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "provider",
+                "stableId",
+                "url"
+              ],
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "stableId": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        },
+        "knowledge": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "adapter",
+                "space",
+                "stableId"
+              ],
+              "properties": {
+                "adapter": {
+                  "type": "string"
+                },
+                "space": {
+                  "type": "string"
+                },
+                "stableId": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

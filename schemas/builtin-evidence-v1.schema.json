@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.evidence.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidenceId",
+    "level",
+    "gateId",
+    "codeRevision",
+    "baselineTreeDigest",
+    "workspaceTreeDigest",
+    "configDigest",
+    "attemptId",
+    "result",
+    "recordHash"
+  ],
+  "properties": {
+    "evidenceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "level": {
+      "enum": [
+        "trusted",
+        "attested",
+        "reported"
+      ]
+    },
+    "gateId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "codeRevision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baselineTreeDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "workspaceTreeDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "configDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-.+$"
+    },
+    "result": {
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "recordHash": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "wiesen-spec-kit",
+  "version": "0.1.0-alpha.1",
+  "description": "Agent-neutral engineering workflow protocol and CLI",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "wspec": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "schemas",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test:contract": "node --import tsx --test tests/contract/**/*.test.ts",
+    "test:e2e": "node --import tsx --test tests/e2e/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "schemas:generate": "tsx src/schemas/generate.ts schemas"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "canonicalize": "^2.1.0",
+    "ulid": "^3.0.2",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3"
+  }
+}

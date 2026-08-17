@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.stage-result.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "workItemId",
+    "stageId",
+    "attemptId",
+    "workflowDigest",
+    "contextDigest",
+    "baselineTreeDigest",
+    "inputWorkspaceTreeDigest",
+    "outputWorkspaceTreeDigest",
+    "status",
+    "summary",
+    "modifiedFiles",
+    "artifacts",
+    "commands",
+    "evidence",
+    "externalWrites",
+    "remainingRisks"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSK-[A-Za-z0-9-]+$"
+    },
+    "stageId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-.+$"
+    },
+    "workflowDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "contextDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "baselineTreeDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "inputWorkspaceTreeDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "outputWorkspaceTreeDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "failed"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "modifiedFiles": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifactType",
+          "schemaVersion"
+        ],
+        "properties": {
+          "artifactType": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "path": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "contentHash": {
+            "type": "string",
+            "pattern": "^sha256:.+$"
+          },
+          "mediaType": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "externalWrites": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "remainingRisks": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  }
+}
