@@ -1,4 +1,4 @@
-# WSSpecKit Workflow v2 设计规格
+# WSSpecKit Workflow 设计规格
 
 ## 1. 目标
 
@@ -26,10 +26,10 @@ WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定�
 | 仓库和 npm 包 | `ws-spec-kit` |
 | CLI | `wspec` |
 | 项目目录 | `.wsspec/` |
-| Work Item ID | `WSK-...` |
-| 错误码前缀 | `WSPEC_`，保持协议兼容 |
+| Work Item ID | `WSS-...` |
+| 错误码前缀 | `WSSPEC_` |
 
-仓库物理目录的重命名不属于代码迁移的一部分，由发布流程单独处理。npm 名称在发布前必须验证可用性。
+仓库物理目录由发布准备流程直接改名。npm 名称在发布前必须验证可用性。
 
 ## 4. 总体架构
 
@@ -206,7 +206,7 @@ skills:
 
 `manifest.yaml` 声明 Workflow 版本、所需 WSSpecKit 版本、能力、Connector 和入口文件。第三方 Workflow Package 首次使用时必须展示来源、文件清单、Skill 摘要和外部副作用能力，并由用户确认信任。
 
-## 9. Workflow Language v2
+## 9. Workflow Language v1
 
 ### 9.1 Step 类型
 
@@ -240,7 +240,7 @@ skills:
 ### 9.3 内置基础工作流
 
 ```yaml
-version: 2
+version: 1
 
 workflow:
   id: feature-delivery
@@ -396,9 +396,9 @@ Work Package 是执行契约，不是模型上下文。它只包含：
 
 ### 10.2 Acquire 与 Submit
 
-`acquire` 原子完成当前 M1 的 `next + claim + context`，内部仍可使用 Execution Lease 防止过期或重复提交。
+`acquire` 原子获取下一可执行 Step、创建 Attempt 和内部 Execution Lease，并返回 Work Package。
 
-`submit` 替代面向普通 Agent 的 `complete`，由引擎独立重算工作区摘要、修改文件、Artifact 内容和输出契约。旧命令保留一个兼容周期，仅作为高级调试接口。
+`submit` 接收结构化执行结果，由引擎独立重算工作区摘要、修改文件、Artifact 内容和输出契约。首版不公开 `next/claim/context/complete` 等内部细粒度命令。
 
 ## 11. Driver Skill
 
@@ -514,7 +514,7 @@ Git common-dir 保存共享运行控制面：
 
 ## 16. 当前实现改造
 
-### 16.1 保留
+### 16.1 复用的实现能力
 
 - `src/domain/digests.ts`
 - `src/domain/artifacts.ts`
@@ -528,12 +528,12 @@ Git common-dir 保存共享运行控制面：
 
 ### 16.2 重构
 
-- `src/engine/compiler.ts`：支持 Workflow v2、Step Manifest、Skill Binding 和有限控制结构。
+- `src/engine/compiler.ts`：重写为 Workflow Language v1 编译器，支持 Step Manifest、Skill Binding 和有限控制结构。
 - `src/engine/orchestrator.ts`：拆为 Application Protocol 用例。
 - `src/engine/claims.ts`：Claim 降为内部 Execution Lease。
 - `StageContext`：重命名并收敛为 Work Package。
 - `src/cli/commands/core.ts`：变为 Application Protocol 的 CLI Adapter。
-- `src/integrations/`：迁移为 Agent Skill Adapter 与安装器。
+- `src/integrations/`：替换为 Agent Skill Adapter 与安装器。
 
 ### 16.3 新增目录
 
@@ -555,18 +555,20 @@ src/
 
 `mcp` 是未来可选 Adapter，不是首版完成条件。
 
-## 17. 兼容与迁移
+## 17. 一次性替换策略
 
-- Workflow v1 和所有活动 v1 Work Item 继续按其快照执行。
-- 新项目和新 Work Item 默认使用 Workflow v2。
-- `wspec migrate --dry-run` 必须先展示 Workflow、命名和协议迁移影响。
-- v1 的 `next/claim/context/complete` 保留一个兼容周期。
-- v2 使用 `start/acquire/submit/decide/inspect`。
-- 产品展示名称改为 WSSpecKit；`wspec`、`.wsspec/`、`WSK-` 和 `WSPEC_` 保持兼容。
+当前项目尚未形成需要支持的正式发布版本，因此直接以本规格作为首个正式协议基线：
+
+- 删除旧 Workflow、Stage Context、Stage Result 和项目配置 Schema，不提供双版本读取。
+- 删除 `next/claim/context/complete` 公开命令，只提供 `start/acquire/submit/decide/inspect`。
+- 删除固定 `define/design/plan/implement/review/verify/publish/close` 类型约束，使用 Step Manifest 和安全类别。
+- 现有测试中仍然适用于摘要、事件、锁、审批、验证和恢复的场景按新协议改写；旧接口断言直接删除。
+- 不提供 `migrate` 命令、兼容别名、旧包转发层或活动 Work Item 迁移。
+- 产品、包、Work Item ID 和错误码直接采用 WSSpecKit 新命名。
 
 ## 18. 实施阶段
 
-1. **规格基线**：产品改名、Workflow v2、Skill URI、Manifest 和 Application Protocol Schema。
+1. **规格基线**：产品改名、Workflow Language v1、Skill URI、Manifest 和 Application Protocol Schema。
 2. **Application Facade**：在现有内核上实现 `start/acquire/submit/decide/inspect`。
 3. **Skill Catalog**：内置 Skills、三层 Resolver、fallback、摘要和 Skill Lock。
 4. **Workflow Package**：内置基础工作流、项目 Workflow、`list/show/eject/validate/use`。
@@ -574,9 +576,9 @@ src/
 6. **Driver Adapter**：Codex、Claude、Cursor 和 Generic 安装与恢复流程。
 7. **Source Connector**：Prompt、文件、GitLab Issue 和飞书文档快照。
 8. **Delivery Connector**：Git commit、Issue 更新、Wiki 发布、幂等和回读。
-9. **兼容发布**：v1 回归、迁移预览、文档、安装包和真实客户端验收。
+9. **发布验收**：完整文档、安装包、Driver Skill 和真实客户端验收。
 
-每个阶段必须保持现有 M1 测试通过，并为新协议先增加失败测试再实现。
+每个阶段必须先为新协议增加失败测试再实现。可复用的现有安全与恢复场景必须按新协议重写，不要求旧接口测试继续通过。
 
 ## 19. 验收标准
 
@@ -590,7 +592,7 @@ src/
 - Agent 自主管理上下文；Work Package 不默认内嵌工件正文或对话历史。
 - 会话中断后，新 Agent 会话可以从下一可执行 Step 恢复。
 - Git commit、Issue 更新和 Wiki 发布具备审批、幂等和回读证据。
-- v1 活动 Work Item 不受产品改名和 Workflow v2 影响。
+- 仓库中不残留旧产品名、旧公开命令、旧 Schema ID、`WSK-` 或 `WSPEC_` 对外协议。
 - 单元、契约、集成、E2E、构建、Schema 漂移和 `npm pack --dry-run` 全部通过。
 - 本地 Fixture、已登录客户端测试和真实 GitLab/飞书验收必须分别报告，不能互相替代。
 
