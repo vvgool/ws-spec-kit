@@ -3,7 +3,19 @@ profile:
   id: standard
   workflow: documentation-delivery
 steps:
+  clarify:
+    artifacts:
+      specification: { required: true, contentLevel: complete }
+  plan:
+    artifacts:
+      tasks: { required: true, contentLevel: complete }
   review-fix: { maxIterations: 5 }
   verify-document: { gates: [docs.integrity] }
-publishing: { issueRequired: false, knowledgeRequired: false }
-audit: { level: standard }
+publishing: { issueRequired: false, knowledgeRequired: false, readBackRequired: false }
+audit:
+  level: standard
+  retention: standard
+  recordDecisions: false
+  recordApprovals: false
+  recordActors: false
+  recordPublishing: false

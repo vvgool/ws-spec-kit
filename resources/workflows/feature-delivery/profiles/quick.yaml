@@ -3,10 +3,23 @@ profile:
   id: quick
   workflow: feature-delivery
 steps:
-  clarify: { approval: false, artifactLevel: compact }
+  clarify:
+    approval: false
+    artifactLevel: compact
+    artifacts:
+      specification: { required: true, contentLevel: compact }
   design: { enabled: false }
-  plan: { artifactLevel: compact }
+  plan:
+    artifactLevel: compact
+    artifacts:
+      tasks: { required: true, contentLevel: compact }
   review-fix: { maxIterations: 1 }
   verify-green: { gates: [test] }
-publishing: { issueRequired: false, knowledgeRequired: false }
-audit: { level: standard }
+publishing: { issueRequired: false, knowledgeRequired: false, readBackRequired: false }
+audit:
+  level: standard
+  retention: standard
+  recordDecisions: false
+  recordApprovals: false
+  recordActors: false
+  recordPublishing: false

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { loadWorkflowPackage } from "../../src/workflow-package/loader.js";
 import { lockWorkflowPackage } from "../../src/workflow-package/lock.js";
+import { invalidProfileV1Fixtures, invalidWorkflowV1Fixtures, profileV1Fixture, workflowV1Fixture } from "../helpers/workflow-v1-fixtures.js";
 
 async function packageFixture(root: string, id = "team-feature"): Promise<string> {
   const directory = path.join(root, ".wsspec", "workflows", id);
@@ -87,37 +88,155 @@ test("Skill 树的悬空链接必须 fail closed", async () => {
   await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /ENOENT|WSSPEC_WORKFLOW_PACKAGE_PATH_ESCAPE/);
 });
 
-test("按设计稿保真加载完整 Workflow v1 与 Profile overlay", async () => {
+test("按设计稿原始完整形态加载 Workflow v1，并规范化可选顶层策略", async () => {
   const root = await temporaryRoot();
-  const directory = await packageFixture(root);
-  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: { requirement: { accepts: [user.prompt, local.file] } }\nsteps:\n  - id: review-fix\n    uses: control.loop\n    needs: [intake]\n    when: '${bindings.issue.exists}'\n    retry: { maxAttempts: 2 }\n    loop: { until: '${review-result.approved}', maxIterations: 3 }\n    approval: required\n    inputs: [red-evidence, { artifact: specification, required: true }]\n    outputs: [review-result]\n    skills: [{ ref: package://skills/review, required: true, fallback: builtin://skills/code-review }]\n    action: quality.review\n    objective: 审查并修复实现\n    expectedOutcome: success\n    until: '${review-result.approved}'\n    maxIterations: 3\n    steps:\n      - id: review\n        uses: agent.execute\n        skills: [{ ref: package://skills/review, required: true }]\n        outputs: [review-result]\n      - id: verify\n        uses: command.execute\n        action: quality.verify\n        skills: []\ngates:\n  - id: test\n    evidence: trusted\n    command: [npm, test]\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
-  await writeFile(path.join(directory, "profiles", "standard.yaml"), "version: 1\nprofile: { id: standard, workflow: team-feature }\nsteps: { review-fix: { enabled: true, approval: false, artifactLevel: compact, gates: [test], maxIterations: 5 } }\npublishing: { issueRequired: false, knowledgeRequired: false }\naudit: { level: standard }\n");
-  const loaded = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
-  assert.deepEqual(loaded.workflow, {
-    version: 1,
-    workflow: { id: "team-feature", version: 1 },
-    inputs: { requirement: { accepts: ["user.prompt", "local.file"] } },
-    steps: [{
-      id: "review-fix", uses: "control.loop", needs: ["intake"], when: "${bindings.issue.exists}",
-      retry: { maxAttempts: 2 }, loop: { until: "${review-result.approved}", maxIterations: 3 }, approval: "required",
-      inputs: ["red-evidence", { artifact: "specification", required: true }], outputs: ["review-result"],
-      skills: [{ ref: "package://skills/review", required: true, fallback: "builtin://skills/code-review" }],
-      action: "quality.review", objective: "审查并修复实现", expectedOutcome: "success", until: "${review-result.approved}", maxIterations: 3,
-      steps: [
-        { id: "review", uses: "agent.execute", skills: [{ ref: "package://skills/review", required: true }], outputs: ["review-result"] },
-        { id: "verify", uses: "command.execute", action: "quality.verify", skills: [] },
-      ],
-    }],
-    gates: [{ id: "test", evidence: "trusted", command: ["npm", "test"] }],
-    changePolicy: { kind: "feature", allowedPaths: ["**"] },
+  const directory = await packageFixture(root, "feature-delivery");
+  await writeFile(path.join(directory, "manifest.yaml"), "version: 1\nid: feature-delivery\nentry: workflow.yaml\nprofiles: []\nskills: []\n");
+  await writeFile(path.join(directory, "workflow.yaml"), `version: 1
+workflow:
+  id: feature-delivery
+  version: 1
+inputs:
+  requirement:
+    accepts: [user.prompt, local.file, github.issue, gitlab.issue, feishu.document]
+steps:
+  - id: intake
+    uses: connector.execute
+    action: requirement.capture
+    outputs: [requirement-source]
+  - id: explore
+    uses: agent.execute
+    needs: [intake]
+    objective: 探索代码并提取需求相关约束
+    skills: [{ ref: builtin://skills/code-exploration, required: true }]
+    outputs: [exploration-report]
+  - id: clarify
+    uses: agent.execute
+    needs: [explore]
+    objective: 澄清需求并生成可验收规格
+    skills:
+      - { ref: builtin://skills/requirement-clarification, required: true }
+      - { ref: builtin://skills/specification, required: true }
+    outputs: [specification]
+    approval: required
+  - id: design
+    uses: agent.execute
+    needs: [clarify]
+    objective: 形成可实施的技术方案
+    skills: [{ ref: builtin://skills/technical-design, required: true }]
+    outputs: [design]
+    approval: required
+  - id: plan
+    uses: agent.execute
+    needs: [clarify, design]
+    objective: 将设计拆分为可验证任务
+    skills: [{ ref: builtin://skills/task-planning, required: true }]
+    outputs: [tasks]
+    inputs:
+      - { artifact: specification, required: true }
+      - { artifact: design, required: false }
+  - id: write-tests
+    uses: agent.execute
+    needs: [plan]
+    objective: 根据当前任务先编写能够因缺少功能而失败的测试
+    skills: [{ ref: builtin://skills/tdd-implementation, required: true }]
+    outputs: [red-test-result]
+  - id: verify-red
+    uses: command.execute
+    action: quality.test
+    expectedOutcome: test-failure
+    needs: [write-tests]
+    outputs: [red-evidence]
+  - id: implement
+    uses: agent.execute
+    needs: [verify-red]
+    objective: 在保留 Red 测试的前提下完成最小实现
+    skills: [{ ref: builtin://skills/tdd-implementation, required: true }]
+    outputs: [implementation-result]
+  - id: verify-green
+    uses: command.execute
+    action: quality.test
+    expectedOutcome: success
+    needs: [implement]
+    inputs: [red-evidence]
+    outputs: [tdd-evidence]
+  - id: review-fix
+    uses: control.loop
+    needs: [verify-green]
+    until: '\${review-result.approved}'
+    maxIterations: 5
+    steps:
+      - id: review
+        uses: agent.execute
+        skills: [{ ref: builtin://skills/code-review, required: true }]
+        outputs: [review-result]
+      - id: fix
+        uses: agent.execute
+        when: '\${review-result.approved == false}'
+        skills: [{ ref: builtin://skills/review-fix, required: true }]
+      - id: verify
+        uses: command.execute
+        action: quality.verify
+  - id: commit
+    uses: connector.execute
+    action: git.commit
+    needs: [review-fix]
+    approval: required
+  - id: update-issue
+    uses: connector.execute
+    action: issue.update
+    needs: [commit]
+    when: '\${bindings.issue.exists}'
+  - id: update-wiki
+    uses: connector.execute
+    action: knowledge.publish
+    needs: [update-issue]
+    when: '\${bindings.knowledge.exists}'
+  - id: close-issue
+    uses: connector.execute
+    action: issue.close
+    needs: [update-wiki]
+    when: '\${bindings.issue.exists}'
+    approval: required
+  - id: close
+    uses: control.close
+    needs: [close-issue]
+`);
+  const loaded = await loadWorkflowPackage({ root, ref: "project://workflows/feature-delivery" });
+  assert.equal(loaded.workflow.steps.length, 15);
+  assert.deepEqual(loaded.workflow.gates, []);
+  assert.equal(loaded.workflow.changePolicy, undefined);
+  assert.equal(loaded.workflow.steps.find((step) => step.id === "review-fix")?.steps?.length, 3);
+});
+
+test("Project loader 接受完整 Profile v1 策略并与 Catalog 共用严格负例矩阵", async () => {
+  const root = await temporaryRoot();
+  const directory = await packageFixture(root, "fixture-workflow");
+  await writeFile(path.join(directory, "workflow.yaml"), workflowV1Fixture);
+  await writeFile(path.join(directory, "profiles", "standard.yaml"), profileV1Fixture);
+  const loaded = await loadWorkflowPackage({ root, ref: "project://workflows/fixture-workflow" });
+  assert.deepEqual(loaded.profiles.get("standard")?.steps["review-fix"]?.artifacts, {
+    "review-result": { required: true, contentLevel: "complete" },
   });
-  assert.deepEqual(loaded.profiles.get("standard"), {
-    version: 1,
-    profile: { id: "standard", workflow: "team-feature" },
-    steps: { "review-fix": { enabled: true, approval: false, artifactLevel: "compact", gates: ["test"], maxIterations: 5 } },
-    publishing: { issueRequired: false, knowledgeRequired: false },
-    audit: { level: "standard" },
+  assert.equal(loaded.profiles.get("standard")?.steps["review-fix"]?.independentReviewActor, true);
+  assert.deepEqual(loaded.profiles.get("standard")?.audit, {
+    level: "complete",
+    retention: "extended",
+    recordDecisions: true,
+    recordApprovals: true,
+    recordActors: true,
+    recordPublishing: true,
   });
+
+  for (const [label, workflow] of invalidWorkflowV1Fixtures) {
+    await writeFile(path.join(directory, "workflow.yaml"), workflow);
+    await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/fixture-workflow" }), /WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID/, label);
+  }
+  await writeFile(path.join(directory, "workflow.yaml"), workflowV1Fixture);
+  for (const [label, profile] of invalidProfileV1Fixtures) {
+    await writeFile(path.join(directory, "profiles", "standard.yaml"), profile);
+    await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/fixture-workflow" }), /WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID/, label);
+  }
 });
 
 test("Manifest、Workflow、Profile、Schema 和 Template 的变化均改变 Package 摘要", async () => {
@@ -162,6 +281,35 @@ test("拒绝通过符号链接逃出项目工作流根目录", async (context) =
     loadWorkflowPackage({ root, ref: "project://workflows/escaped" }),
     /WSSPEC_WORKFLOW_PACKAGE_PATH_ESCAPE/,
   );
+});
+
+test("Project 根到 workflows 的每一级都拒绝现存和悬空的越界符号链接", async (context) => {
+  for (const boundary of [".wsspec", "workflows"] as const) {
+    for (const targetState of ["existing", "dangling"] as const) {
+      const root = await temporaryRoot();
+      const outside = await temporaryRoot();
+      await mkdir(root, { recursive: true });
+      const existingPackage = await packageFixture(outside, "escaped");
+      const link = boundary === ".wsspec"
+        ? path.join(root, ".wsspec")
+        : path.join(root, ".wsspec", "workflows");
+      const target = boundary === ".wsspec"
+        ? path.dirname(path.dirname(existingPackage))
+        : path.dirname(existingPackage);
+      if (boundary === "workflows") await mkdir(path.dirname(link), { recursive: true });
+      try {
+        await symlink(targetState === "existing" ? target : `${target}-missing`, link);
+      } catch (caught) {
+        if ((caught as NodeJS.ErrnoException).code === "EPERM") context.skip("当前文件系统不支持测试符号链接");
+        throw caught;
+      }
+      await assert.rejects(
+        loadWorkflowPackage({ root, ref: "project://workflows/escaped" }),
+        /WSSPEC_WORKFLOW_PACKAGE_PATH_ESCAPE/,
+        `${boundary}:${targetState}`,
+      );
+    }
+  }
 });
 
 test("拒绝 Schema、Template 和 Package Skill 内部的空目录符号链接逃逸", async (context) => {

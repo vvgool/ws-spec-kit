@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -213,13 +213,102 @@ test("externalSideEffects 独立变化使已有信任失效", async () => {
   assert.equal((await evaluateInteractive(root, changed)).status, "approval_required");
 });
 
-test("显式恢复仅清除本机已死亡拥有者的信任锁", async () => {
+async function writeTrustLock(root: string, content: string, ageMilliseconds = 0): Promise<string> {
+  const lockPath = `${await workflowTrustPath(root)}.lock`;
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  await writeFile(lockPath, content);
+  if (ageMilliseconds > 0) {
+    const old = new Date(Date.now() - ageMilliseconds);
+    await utimes(lockPath, old, old);
+  }
+  return lockPath;
+}
+
+test("fresh 空锁和半写 owner 锁拒绝恢复", async () => {
+  for (const content of ["", '{"version":1']) {
+    const root = await createGitRepository();
+    const lockPath = await writeTrustLock(root, content);
+    await assert.rejects(recoverStaleWorkflowTrustLock(root), /WSSPEC_WORKFLOW_TRUST_LOCKED/);
+    assert.equal((await stat(lockPath)).isFile(), true);
+  }
+});
+
+test("仅恢复 mtime 已过阈值且稳定的空锁和半写 owner 锁", async () => {
+  for (const content of ["", '{"version":1']) {
+    const root = await createGitRepository();
+    const lockPath = await writeTrustLock(root, content, 120_000);
+    assert.equal(await recoverStaleWorkflowTrustLock(root), true);
+    await assert.rejects(readFile(lockPath, "utf8"), /ENOENT/);
+  }
+});
+
+test("完整 owner 按 fresh、dead、远端不可验证和本机 live 状态恢复", async () => {
+  const localHostname = (await import("node:os")).hostname();
+  const owner = (pid: number, ownerHostname = localHostname) => `${JSON.stringify({
+    version: 1,
+    ownerToken: crypto.randomUUID(),
+    pid,
+    hostname: ownerHostname,
+    createdAt: new Date().toISOString(),
+  })}\n`;
+
+  const freshDeadRoot = await createGitRepository();
+  const freshDeadLock = await writeTrustLock(freshDeadRoot, owner(2147483647));
+  await assert.rejects(recoverStaleWorkflowTrustLock(freshDeadRoot), /WSSPEC_WORKFLOW_TRUST_LOCKED/);
+  assert.equal((await stat(freshDeadLock)).isFile(), true);
+
   const root = await createGitRepository();
-  const target = await workflowTrustPath(root);
-  await mkdir(path.dirname(target), { recursive: true });
-  await writeFile(`${target}.lock`, `${JSON.stringify({ version: 1, ownerToken: "dead-owner", pid: 2147483647, hostname: (await import("node:os")).hostname(), createdAt: new Date().toISOString() })}\n`);
+  const deadLock = await writeTrustLock(root, owner(2147483647), 120_000);
   assert.equal(await recoverStaleWorkflowTrustLock(root), true);
-  await assert.rejects(readFile(`${target}.lock`, "utf8"), /ENOENT/);
+  await assert.rejects(readFile(deadLock, "utf8"), /ENOENT/);
+
+  const remoteRoot = await createGitRepository();
+  const remoteLock = await writeTrustLock(remoteRoot, owner(process.pid, "remote.example.invalid"), 120_000);
+  assert.equal(await recoverStaleWorkflowTrustLock(remoteRoot), true);
+  await assert.rejects(readFile(remoteLock, "utf8"), /ENOENT/);
+
+  const liveRoot = await createGitRepository();
+  const liveLock = await writeTrustLock(liveRoot, owner(process.pid), 120_000);
+  await assert.rejects(recoverStaleWorkflowTrustLock(liveRoot), /WSSPEC_WORKFLOW_TRUST_LOCKED/);
+  assert.equal((await stat(liveLock)).isFile(), true);
+});
+
+test("正常信任写入不残留发布临时文件或 final lock", async () => {
+  const root = await createGitRepository();
+  await packageFixture(root);
+  const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
+  const pending = await evaluateInteractive(root, pkg);
+  assert.equal(pending.status, "approval_required");
+  const trustDirectory = path.dirname(await workflowTrustPath(root));
+  assert.deepEqual((await readdir(trustDirectory)).filter((name) => name.includes(".lock")), []);
+});
+
+test("并发信任请求期间可见的 final lock 始终包含完整 owner metadata", async () => {
+  const root = await createGitRepository();
+  await packageFixture(root);
+  const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
+  const trustPath = await workflowTrustPath(root);
+  const operations = Array.from({ length: 24 }, (_, index) => evaluateInteractive(root, pkg, `actor-${index}`));
+  let complete = false;
+  const settled = Promise.all(operations).finally(() => { complete = true; });
+  while (!complete) {
+    try {
+      const owner = JSON.parse(await readFile(`${trustPath}.lock`, "utf8")) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(owner).sort(), ["createdAt", "hostname", "ownerToken", "pid", "version"]);
+      assert.equal(owner.version, 1);
+      assert.equal(typeof owner.ownerToken, "string");
+      assert.equal(typeof owner.pid, "number");
+      assert.equal(typeof owner.hostname, "string");
+      assert.equal(typeof owner.createdAt, "string");
+    } catch (caught) {
+      if ((caught as NodeJS.ErrnoException).code !== "ENOENT") throw caught;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const results = await settled;
+  assert.equal(results.every((result) => result.status === "approval_required"), true);
+  assert.equal((await readFile(trustPath, "utf8")).trimEnd().split("\n").length, operations.length);
+  assert.deepEqual((await readdir(path.dirname(trustPath))).filter((name) => name.includes(".lock")), []);
 });
 
 test("伪造或篡改为 Builtin URI 的普通 Package 仍要求信任", async () => {

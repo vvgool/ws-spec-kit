@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
 
@@ -6,6 +6,7 @@ import type { WorkflowTrustRecord } from "../workflow-package/types.js";
 import { gitCommonDir } from "./git.js";
 
 const delay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+const TRUST_LOCK_STALE_MILLISECONDS = 30_000;
 
 export class WorkflowTrustStoreError extends Error {
   constructor(readonly code: `WSSPEC_${string}`, message: string) { super(`${code}: ${message}`); this.name = "WorkflowTrustStoreError"; }
@@ -152,9 +153,19 @@ async function readJournal(target: string): Promise<WorkflowTrustJournalState> {
 
 async function readTrustLock(lockPath: string): Promise<TrustLockOwner | undefined> {
   try {
-    const value = JSON.parse(await readFile(lockPath, "utf8")) as Partial<TrustLockOwner>;
-    if (value.version !== 1 || typeof value.ownerToken !== "string" || typeof value.pid !== "number" || typeof value.hostname !== "string" || typeof value.createdAt !== "string") return undefined;
-    return value as TrustLockOwner;
+    const content = await readFile(lockPath, "utf8");
+    if (!content.endsWith("\n")) return undefined;
+    const value = JSON.parse(content) as Partial<TrustLockOwner>;
+    if (!isRecord(value)
+      || !hasExactKeys(value, ["version", "ownerToken", "pid", "hostname", "createdAt"])
+      || value.version !== 1
+      || !isNonEmptyString(value.ownerToken)
+      || typeof value.pid !== "number"
+      || !Number.isSafeInteger(value.pid)
+      || value.pid < 1
+      || !isNonEmptyString(value.hostname)
+      || !isCanonicalIso(value.createdAt)) return undefined;
+    return value as unknown as TrustLockOwner;
   } catch { return undefined; }
 }
 
@@ -167,30 +178,47 @@ export async function workflowTrustPath(root: string): Promise<string> {
   return path.join(await gitCommonDir(root), "wsspec", "trust", "workflow-packages.ndjson");
 }
 
+async function publishTrustLock(lockPath: string, owner: TrustLockOwner): Promise<boolean> {
+  const temporaryPath = `${lockPath}.${owner.ownerToken}.tmp`;
+  const handle = await open(temporaryPath, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+    await handle.sync();
+    try {
+      await link(temporaryPath, lockPath);
+      return true;
+    } catch (caught) {
+      if ((caught as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw caught;
+    }
+  } finally {
+    await handle.close();
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
 async function withTrustLock<T>(target: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = `${target}.lock`;
   await mkdir(path.dirname(target), { recursive: true });
   const deadline = Date.now() + 5_000;
   const owner: TrustLockOwner = { version: 1, ownerToken: crypto.randomUUID(), pid: process.pid, hostname: hostname(), createdAt: new Date().toISOString() };
-  let handle;
   while (true) {
     try {
-      handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
-      await handle.sync();
-      break;
-    } catch (caught) {
-      if ((caught as NodeJS.ErrnoException).code === "EEXIST") {
-        const existing = await readTrustLock(lockPath);
-        if (existing?.hostname === hostname() && !processIsAlive(existing.pid)) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_STALE_LOCK", "检测到异常退出遗留的 Workflow 信任锁，请先恢复。");
+      if (await publishTrustLock(lockPath, owner)) break;
+      const existing = await readTrustLock(lockPath);
+      if (existing?.hostname === hostname() && !processIsAlive(existing.pid)) {
+        const lockStat = await stat(lockPath);
+        if (Date.now() - lockStat.mtimeMs >= TRUST_LOCK_STALE_MILLISECONDS) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_STALE_LOCK", "检测到异常退出遗留的 Workflow 信任锁，请先恢复。");
       }
-      if ((caught as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任记录当前被其他进程占用。");
-      await delay(10);
+    } catch (caught) {
+      if (caught instanceof WorkflowTrustStoreError) throw caught;
+      throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任记录当前被其他进程占用。");
     }
+    if (Date.now() >= deadline) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任记录当前被其他进程占用。");
+    await delay(10);
   }
   try { return await operation(); }
   finally {
-    await handle.close();
     const current = await readTrustLock(lockPath);
     if (current?.ownerToken === owner.ownerToken) await unlink(lockPath).catch(() => undefined);
   }
@@ -206,19 +234,31 @@ export async function readWorkflowTrustRecords(root: string): Promise<WorkflowTr
   return (await readJournal(await workflowTrustPath(root))).records;
 }
 
+interface TrustLockFileState { dev: bigint; ino: bigint; mtimeMs: bigint; mtimeNs: bigint; size: bigint }
+
+async function trustLockFileState(lockPath: string): Promise<TrustLockFileState | undefined> {
+  try {
+    const value = await stat(lockPath, { bigint: true });
+    return { dev: value.dev, ino: value.ino, mtimeMs: value.mtimeMs, mtimeNs: value.mtimeNs, size: value.size };
+  } catch (caught) {
+    if ((caught as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw caught;
+  }
+}
+
 export async function recoverStaleWorkflowTrustLock(root: string): Promise<boolean> {
   const target = await workflowTrustPath(root);
   const lockPath = `${target}.lock`;
+  const first = await trustLockFileState(lockPath);
+  if (first === undefined) return false;
+  if (Date.now() - Number(first.mtimeMs) < TRUST_LOCK_STALE_MILLISECONDS) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁尚未达到可恢复的 stale 阈值。");
   const owner = await readTrustLock(lockPath);
-  if (owner === undefined) {
-    try { const handle = await open(lockPath, "r"); await handle.close(); }
-    catch (caught) { if ((caught as NodeJS.ErrnoException).code === "ENOENT") return false; }
-    throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁缺少可验证的所有者信息，不能自动清理。");
-  }
-  if (owner.hostname !== hostname() || processIsAlive(owner.pid)) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁的所有者仍可能存活，不能抢占。");
-  const confirmed = await readTrustLock(lockPath);
-  if (confirmed?.ownerToken !== owner.ownerToken) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁在恢复期间已经变化。");
-  await unlink(lockPath);
+  await delay(10);
+  const second = await trustLockFileState(lockPath);
+  if (second === undefined || first.dev !== second.dev || first.ino !== second.ino || first.mtimeNs !== second.mtimeNs || first.size !== second.size) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁在恢复期间已经变化。");
+  if (owner?.hostname === hostname() && processIsAlive(owner.pid)) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁的本机所有者仍然存活，不能抢占。");
+  try { await unlink(lockPath); }
+  catch { throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任锁在恢复期间已经变化。"); }
   return true;
 }
 

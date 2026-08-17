@@ -3,9 +3,21 @@ profile:
   id: quick
   workflow: documentation-delivery
 steps:
-  clarify: { artifactLevel: compact }
-  plan: { artifactLevel: compact }
+  clarify:
+    artifactLevel: compact
+    artifacts:
+      specification: { required: true, contentLevel: compact }
+  plan:
+    artifactLevel: compact
+    artifacts:
+      tasks: { required: true, contentLevel: compact }
   review-fix: { maxIterations: 1 }
   verify-document: { gates: [docs.integrity] }
-publishing: { issueRequired: false, knowledgeRequired: false }
-audit: { level: standard }
+publishing: { issueRequired: false, knowledgeRequired: false, readBackRequired: false }
+audit:
+  level: standard
+  retention: standard
+  recordDecisions: false
+  recordApprovals: false
+  recordActors: false
+  recordPublishing: false

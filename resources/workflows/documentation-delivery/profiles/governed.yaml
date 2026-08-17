@@ -3,9 +3,21 @@ profile:
   id: governed
   workflow: documentation-delivery
 steps:
-  clarify: { approval: true }
-  plan: { approval: true }
-  review-fix: { maxIterations: 5 }
+  clarify:
+    approval: true
+    artifacts:
+      specification: { required: true, contentLevel: complete }
+  plan:
+    approval: true
+    artifacts:
+      tasks: { required: true, contentLevel: complete }
+  review-fix: { maxIterations: 5, independentReviewActor: true }
   verify-document: { gates: [docs.integrity] }
-publishing: { issueRequired: true, knowledgeRequired: true }
-audit: { level: complete }
+publishing: { issueRequired: true, knowledgeRequired: true, readBackRequired: true }
+audit:
+  level: complete
+  retention: extended
+  recordDecisions: true
+  recordApprovals: true
+  recordActors: true
+  recordPublishing: true

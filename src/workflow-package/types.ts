@@ -42,13 +42,29 @@ export interface WorkflowDefinition {
   inputs: Record<string, WorkflowInputDefinition>;
   steps: WorkflowStep[];
   gates: WorkflowGate[];
-  changePolicy: WorkflowChangePolicy;
+  changePolicy?: WorkflowChangePolicy;
 }
 
 export interface ProfileIdentity { id: string; workflow: string }
-export interface ProfileStepOverlay { enabled?: boolean; approval?: boolean; artifactLevel?: string; gates?: string[]; maxIterations?: number }
-export interface ProfilePublishing { issueRequired: boolean; knowledgeRequired: boolean }
-export interface ProfileAudit { level: "standard" | "complete" }
+export interface ProfileArtifactOverlay { required?: boolean; contentLevel?: string }
+export interface ProfileStepOverlay {
+  enabled?: boolean;
+  approval?: boolean;
+  artifactLevel?: string;
+  artifacts?: Record<string, ProfileArtifactOverlay>;
+  gates?: string[];
+  maxIterations?: number;
+  independentReviewActor?: boolean;
+}
+export interface ProfilePublishing { issueRequired: boolean; knowledgeRequired: boolean; readBackRequired?: boolean }
+export interface ProfileAudit {
+  level: "standard" | "complete";
+  retention?: "standard" | "extended";
+  recordDecisions?: boolean;
+  recordApprovals?: boolean;
+  recordActors?: boolean;
+  recordPublishing?: boolean;
+}
 export interface ProfileDefinition {
   version: 1;
   profile: ProfileIdentity;
