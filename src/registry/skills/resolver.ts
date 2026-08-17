@@ -273,8 +273,9 @@ export async function resolveSkill(binding: WorkflowSkillBinding, context: Skill
     locked = matches[0]!;
     assertLockIdentity(locked, binding, context, requested);
   }
+  const restoreLockedFallback = context.stepStatus === "started" && locked?.selection === "fallback";
   const [primary, fallback] = await Promise.all([
-    resolveReference(binding.ref, context),
+    restoreLockedFallback ? Promise.resolve(undefined) : resolveReference(binding.ref, context),
     binding.fallback === undefined ? Promise.resolve(undefined) : resolveReference(binding.fallback, context),
   ]);
   if (binding.fallback !== undefined && fallback === undefined) {

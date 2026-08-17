@@ -281,7 +281,8 @@ test("已锁主项消失后仅允许未开始 Step 切到完全匹配的已锁 f
 
 test("已锁 fallback 在主项恢复后仍按 selection 继续执行 fallback", async () => {
   const root = await temporaryRoot();
-  const globalRoot = path.join(root, "global");
+  const firstGlobalRoot = path.join(root, "global-first");
+  const secondGlobalRoot = path.join(root, "global-second");
   await packageFixture(root);
   const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/fixture" });
   const binding = { ref: "global://vendor/tdd", fallback: "builtin://skills/tdd-implementation", required: true } as const;
@@ -290,17 +291,76 @@ test("已锁 fallback 在主项恢复后仍按 selection 继续执行 fallback",
     projectRoot: root,
     home: path.join(root, "home"),
     package: pkg,
-    additionalGlobalRoots: [globalRoot],
+    additionalGlobalRoots: [firstGlobalRoot, secondGlobalRoot],
     stepStatus: "not_started",
   };
   const fallback = await resolveSkill(binding, resolverContext);
   const lock = createSkillLock(fallback!);
   assert.equal(lock.skills[0]?.selection, "fallback");
 
-  await writeSkill(globalRoot, "vendor/tdd", { "SKILL.md": "# Global\n" });
+  const resumedWithInvalidPrimaryRoot = await resolveSkill(binding, {
+    ...resolverContext,
+    additionalGlobalRoots: ["relative-root"],
+    lock,
+    stepStatus: "started",
+  });
+  assert.equal(resumedWithInvalidPrimaryRoot?.ref, binding.fallback);
+
+  await writeSkill(firstGlobalRoot, "vendor/tdd", { "SKILL.md": "# First Global\n" });
+  await writeSkill(secondGlobalRoot, "vendor/tdd", { "SKILL.md": "# Second Global\n" });
   const resumed = await resolveSkill(binding, { ...resolverContext, lock, stepStatus: "started" });
   assert.equal(resumed?.usedFallback, true);
   assert.equal(resumed?.ref, binding.fallback);
+
+  await assert.rejects(
+    resolveSkill(
+      { ...binding, fallback: "builtin://skills/code-review" },
+      { ...resolverContext, lock, stepStatus: "started" },
+    ),
+    /WSSPEC_SKILL_LOCK_CHANGED/,
+  );
+
+  const changedDigest = structuredClone(lock) as SkillLock;
+  assert.ok(changedDigest.skills[0]?.fallback);
+  const differentDigest = `sha256:${"0".repeat(64)}`;
+  changedDigest.skills[0]!.fallback!.digest = differentDigest;
+  changedDigest.skills[0]!.selected.digest = differentDigest;
+  await assert.rejects(
+    resolveSkill(binding, { ...resolverContext, lock: changedDigest, stepStatus: "started" }),
+    /WSSPEC_SKILL_LOCK_CHANGED/,
+  );
+});
+
+test("已锁 primary 在主项出现不同摘要歧义时仍拒绝恢复", async () => {
+  const root = await temporaryRoot();
+  const firstGlobalRoot = path.join(root, "global-first");
+  const secondGlobalRoot = path.join(root, "global-second");
+  await writeSkill(firstGlobalRoot, "vendor/tdd", { "SKILL.md": "# First Global\n" });
+  await packageFixture(root);
+  const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/fixture" });
+  const binding = { ref: "global://vendor/tdd", fallback: "builtin://skills/tdd-implementation", required: true } as const;
+  const resolverContext: SkillResolverContext = {
+    provider: "generic",
+    projectRoot: root,
+    home: path.join(root, "home"),
+    package: pkg,
+    additionalGlobalRoots: [firstGlobalRoot],
+    stepStatus: "not_started",
+  };
+  const primary = await resolveSkill(binding, resolverContext);
+  const lock = createSkillLock(primary!);
+  assert.equal(lock.skills[0]?.selection, "primary");
+
+  await writeSkill(secondGlobalRoot, "vendor/tdd", { "SKILL.md": "# Second Global\n" });
+  await assert.rejects(
+    resolveSkill(binding, {
+      ...resolverContext,
+      additionalGlobalRoots: [firstGlobalRoot, secondGlobalRoot],
+      lock,
+      stepStatus: "started",
+    }),
+    /WSSPEC_SKILL_AMBIGUOUS/,
+  );
 });
 
 test("主项命中时仍拒绝 fallback 声明或锁定摘要漂移", async () => {
