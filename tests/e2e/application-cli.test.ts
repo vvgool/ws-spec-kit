@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -55,4 +55,28 @@ test("公开 CLI 只暴露 Application 命令并将旧命令拒绝为未知命�
     assert.equal(result.code, 1, args.join(" "));
     assert.match(result.stdout, /WSSPEC_ARGUMENT_INVALID/, args.join(" "));
   }
+});
+
+test("核心 CLI 的 value option 拒绝缺值、相邻 option 与重复项，并保持 dry-run 无写入", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-cli-home-"));
+  const cases: Array<{ args: string[]; code: string }> = [
+    { args: ["start", "--prompt", "--provider"], code: "WSSPEC_ARGUMENT_REQUIRED" },
+    { args: ["start", "--prompt", ""], code: "WSSPEC_ARGUMENT_REQUIRED" },
+    { args: ["start", "--prompt", "需求", "--prompt", "重复"], code: "WSSPEC_ARGUMENT_INVALID" },
+    { args: ["submit", "WSS-CLI", "--step", "--attempt", "attempt-1", "--lease", "lease", "--result", "result.json", "--actor", "agent"], code: "WSSPEC_ARGUMENT_REQUIRED" },
+    { args: ["submit", "WSS-CLI", "--step", "step", "--step", "again", "--attempt", "attempt-1", "--lease", "lease", "--result", "result.json", "--actor", "agent"], code: "WSSPEC_ARGUMENT_INVALID" },
+    { args: ["decide", "--input", "--actor", "agent"], code: "WSSPEC_ARGUMENT_REQUIRED" },
+    { args: ["decide", "--input", "decision.json", "--actor", "agent", "--actor", "again"], code: "WSSPEC_ARGUMENT_INVALID" },
+    { args: ["agent", "install", "generic", "--target", "--dry-run"], code: "WSSPEC_ARGUMENT_REQUIRED" },
+    { args: ["agent", "install", "generic", "--target", "", "--dry-run"], code: "WSSPEC_ARGUMENT_REQUIRED" },
+    { args: ["agent", "install", "generic", "--target", "one", "--target", "two", "--dry-run"], code: "WSSPEC_ARGUMENT_INVALID" },
+  ];
+
+  for (const current of cases) {
+    const result = await runCli(root, current.args, home);
+    assert.equal(result.code, 1, current.args.join(" "));
+    assert.match(`${result.stdout}${result.stderr}`, new RegExp(current.code), current.args.join(" "));
+  }
+  await assert.rejects(access(path.join(root, "--dry-run", "SKILL.md")), /ENOENT/);
 });

@@ -41,6 +41,26 @@ test("真实 CLI 帮助中的未登记英文文案会阻断检查", async () => 
   assert.deepEqual(findings, [{ filename: "src/cli/main.ts", line: 1, text: "This public help is English." }]);
 });
 
+test("Driver front matter 与正文中的未登记英文都会被阻断", async () => {
+  const findings = await validateChineseContent({
+    files: [{ filename: "src/adapters/skills/install.ts", content: 'function skill() { return "This Driver description is English."; }\n' }],
+  });
+
+  assert.deepEqual(findings, [{ filename: "src/adapters/skills/install.ts", line: 1, text: "This Driver description is English." }]);
+});
+
+test("公开完成结果的英文参数在源码和构建产物中都会被阻断", async () => {
+  const source = await validateChineseContent({
+    files: [{ filename: "src/application/acquire.ts", content: 'return completed(workItemId, "closed", "Unexpected terminal result");\n' }],
+  });
+  const build = await validateChineseContent({
+    files: [{ filename: "dist/application/acquire.js", content: 'return completed(workItemId, "closed", "Unexpected built terminal result");\n' }],
+  });
+
+  assert.deepEqual(source, [{ filename: "src/application/acquire.ts", line: 1, text: "Unexpected terminal result" }]);
+  assert.deepEqual(build, [{ filename: "dist/application/acquire.js", line: 1, text: "Unexpected built terminal result" }]);
+});
+
 test("源码用户文案中的模板插值属于运行时代码而非英文文案", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-chinese-template-"));
   await mkdir(path.join(root, "src", "cli"), { recursive: true });

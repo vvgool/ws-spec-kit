@@ -5,8 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { runWorkflowCommand } from "../../src/adapters/cli/workflow.js";
+import { createApplication } from "../../src/application/application.js";
 import { initRepository } from "../../src/storage/repository.js";
-import { createGitRepository } from "../integration/helpers/git.js";
+import { createGitRepository, git } from "../integration/helpers/git.js";
 
 test("Workflow 命令列出、展示、校验内置 Package，并且拒绝不存在的 Package", async () => {
   const root = await createGitRepository();
@@ -85,4 +86,59 @@ test("workflow validate 按 Provider 从宿主 Global Skill 根解析绑定", as
     runWorkflowCommand({ root, home, argv: ["validate", "project://workflows/feature-delivery", "--provider", "generic"] }),
     (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SKILL_NOT_FOUND",
   );
+});
+
+test("workflow validate 复用 start 的严格 Project Config 校验", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  await writeFile(path.join(root, ".wsspec", "config.yaml"), "version: 1\nunknown: true\n", "utf8");
+
+  await assert.rejects(
+    runWorkflowCommand({ root, argv: ["validate", "builtin://workflows/feature-delivery"] }),
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SCHEMA_UNKNOWN_FIELD",
+  );
+});
+
+test("四类 Provider 在 validate、use 与 start 使用相同的 Project Skill 解析上下文", async (t) => {
+  const scenarios = [
+    { provider: "codex", root: (home: string) => path.join(home, ".agents", "skills"), additional: false },
+    { provider: "claude", root: (home: string) => path.join(home, ".claude", "skills"), additional: false },
+    { provider: "cursor", root: (home: string) => path.join(home, ".cursor", "skills"), additional: false },
+    { provider: "generic", root: (home: string) => path.join(home, "additional-skills"), additional: true },
+  ] as const;
+  for (const scenario of scenarios) {
+    await t.test(scenario.provider, async () => {
+      const root = await createGitRepository();
+      const home = await mkdtemp(path.join(os.tmpdir(), `wspec-${scenario.provider}-home-`));
+      await initRepository(root);
+      const target = path.join(root, ".wsspec", "workflows", "feature-delivery");
+      await runWorkflowCommand({ root, argv: ["eject", "builtin://workflows/feature-delivery", target] });
+      const workflow = path.join(target, "workflow.yaml");
+      await writeFile(workflow, (await readFile(workflow, "utf8")).replaceAll("builtin://skills/requirement-exploration", "global://vendor/test"), "utf8");
+      const globalRoot = scenario.root(home);
+      await mkdir(path.join(globalRoot, "vendor", "test"), { recursive: true });
+      await writeFile(path.join(globalRoot, "vendor", "test", "SKILL.md"), "# 测试 Skill\n", "utf8");
+      await writeFile(path.join(root, ".wsspec", "config.yaml"), scenario.additional === true
+        ? `version: 1\nskills:\n  additionalGlobalRoots:\n    - ${globalRoot}\n`
+        : "version: 1\n", "utf8");
+      await git(root, "add", ".wsspec");
+      await git(root, "commit", "-m", `test: ${scenario.provider} global Skill`);
+
+      const app = createApplication({ provider: scenario.provider, home, terminal: { isTTY: true }, workflowTrust: { interactive: true, actor: "reviewer" } });
+      let request: { requestId: string; packageDigest: string; capabilityDigest: string } | undefined;
+      await assert.rejects(
+        app.start({ root, source: { type: "prompt", text: "Global Skill" }, workflowRef: "project://workflows/feature-delivery" }),
+        (error: unknown) => {
+          if (!(error instanceof Error) || !("code" in error) || (error as Error & { code: string }).code !== "WSSPEC_WORKFLOW_TRUST_REQUIRED") return false;
+          request = (error as Error & { details?: typeof request }).details;
+          return request !== undefined;
+        },
+      );
+      await app.decide({ kind: "workflow_trust", root, requestId: request!.requestId, decision: "trusted", expectedPackageDigest: request!.packageDigest, expectedCapabilityDigest: request!.capabilityDigest, actor: "reviewer" });
+
+      assert.equal((await runWorkflowCommand({ root, home, argv: ["validate", "project://workflows/feature-delivery", "--provider", scenario.provider] }) as { valid: boolean }).valid, true);
+      assert.equal((await runWorkflowCommand({ root, home, interactive: true, actor: "reviewer", argv: ["use", "project://workflows/feature-delivery", "--provider", scenario.provider] }) as { status: string }).status, "selected");
+      assert.equal((await app.start({ root, source: { type: "prompt", text: "Global Skill" }, workflowRef: "project://workflows/feature-delivery" })).workflowRef, "project://workflows/feature-delivery");
+    });
+  }
 });

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { createDriverSkillInstaller, installDriverSkill } from "../../src/adapters/skills/install.js";
+import { createWriteFileAtomic } from "../../src/storage/files.js";
 
 test("Codex Driver 安装只写入临时 HOME 的官方目录，并包含中文执行循环", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "wspec-driver-home-"));
@@ -78,4 +79,50 @@ test("更新既有 Driver 写入失败时保留原有可发现入口", async () 
   );
 
   assert.equal(await readFile(target, "utf8"), before);
+});
+
+test("原子 Driver 写入在 write、fsync 与 rename 故障时保留发现入口并清理临时文件", async (t) => {
+  for (const phase of ["write", "file-sync", "rename"] as const) {
+    await t.test(phase, async () => {
+      const home = await mkdtemp(path.join(os.tmpdir(), "wspec-driver-home-"));
+      const target = path.join(home, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
+      await installDriverSkill({ agent: "codex", home });
+      const before = await readFile(target, "utf8");
+      const writer = createWriteFileAtomic({
+        open: async (filename, flags, mode) => {
+          const handle = await open(filename, flags, mode);
+          if (filename === path.dirname(target)) return handle;
+          if (phase === "write") return { writeFile: async () => { throw new Error("injected write failure"); }, sync: handle.sync.bind(handle), close: handle.close.bind(handle) };
+          if (phase === "file-sync") return { writeFile: handle.writeFile.bind(handle), sync: async () => { throw new Error("injected file sync failure"); }, close: handle.close.bind(handle) };
+          return handle;
+        },
+        rename: async (source, destination) => {
+          if (phase === "rename") throw new Error("injected rename failure");
+          await rename(source, destination);
+        },
+      });
+      const install = createDriverSkillInstaller({ writeSkill: writer });
+
+      await assert.rejects(install({ agent: "codex", home }), /injected/);
+      assert.equal(await readFile(target, "utf8"), before);
+      assert.deepEqual((await readdir(path.dirname(target))).filter((name) => name.endsWith(".tmp")), []);
+    });
+  }
+});
+
+test("目录 fsync 故障后仍保留可发现 Driver 并清理临时文件", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-driver-home-"));
+  const target = path.join(home, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
+  const writer = createWriteFileAtomic({
+    open: async (filename, flags, mode) => {
+      const handle = await open(filename, flags, mode);
+      if (filename !== path.dirname(target)) return handle;
+      return { writeFile: handle.writeFile.bind(handle), sync: async () => { throw new Error("injected directory sync failure"); }, close: handle.close.bind(handle) };
+    },
+  });
+  const install = createDriverSkillInstaller({ writeSkill: writer });
+
+  await assert.rejects(install({ agent: "codex", home }), /injected directory sync failure/);
+  assert.match(await readFile(target, "utf8"), /name: wsspeckit-driver/);
+  assert.deepEqual((await readdir(path.dirname(target))).filter((name) => name.endsWith(".tmp")), []);
 });

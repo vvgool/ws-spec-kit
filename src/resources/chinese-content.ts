@@ -1,5 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import ts from "typescript";
 
 export interface ChineseContentFinding { filename: string; line: number; text: string }
 export interface ChineseContentInput { files?: Array<{ filename: string; content: string }>; root?: string; includeBuild?: boolean }
@@ -31,22 +32,41 @@ function inspect(filename: string, content: string): ChineseContentFinding[] {
   return findings;
 }
 
+function literalText(node: ts.Expression): string | undefined {
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isTemplateExpression(node)) return `${node.head.text}${node.templateSpans.map((span) => span.literal.text).join("")}`;
+  return undefined;
+}
+
 function sourceUserText(filename: string, content: string): ChineseContentFinding[] {
   const findings: ChineseContentFinding[] = [];
-  const lines = content.split(/\r?\n/u);
-  const driverStart = /(?:src|dist)\/adapters\/skills\/install\.(?:ts|js)$/u.test(filename) ? lines.findIndex((line) => line.startsWith("function body(")) : -1;
-  const driverEnd = driverStart < 0 ? -1 : lines.findIndex((line, index) => index > driverStart && line.startsWith("function skill("));
+  const source = ts.createSourceFile(filename, content, ts.ScriptTarget.Latest, true, filename.endsWith(".js") ? ts.ScriptKind.JS : ts.ScriptKind.TS);
+  const candidates = new Set<ts.Expression>();
+  const add = (node: ts.Expression): void => { if (literalText(node) !== undefined) candidates.add(node); };
+  const addStringsBelow = (node: ts.Node): void => {
+    if (ts.isExpression(node)) add(node);
+    ts.forEachChild(node, addStringsBelow);
+  };
+  const driverFile = /(?:src|dist)\/adapters\/skills\/install\.(?:ts|js)$/u.test(filename);
   const cliHelp = /(?:src|dist)\/cli\/main\.(?:ts|js)$/u.test(filename);
-  for (const [index, line] of lines.entries()) {
-    const driverBody = driverStart >= 0 && index > driverStart && (driverEnd < 0 || index < driverEnd);
-    if (!driverBody && !cliHelp && !/(?:new\s+\w*Error\(|\b(?:message|title)\s*:\s*["`])/u.test(line)) continue;
-    for (const match of line.matchAll(/(["'`])((?:\\.|(?!\1).)*)\1/gu)) {
-      const text = match[2]!
-        .replace(/\\(["'`\\])/gu, "$1")
-        .replace(/\$\{[^}]*\}/gu, "");
-      if (/^WSSPEC_[A-Z_]+$/u.test(text)) continue;
-      for (const fragment of proseFragments(text)) if (!isAllowed(fragment)) findings.push({ filename, line: index + 1, text: fragment.trim() });
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node) && node.expression.getText(source).endsWith("Error")) {
+      for (const argument of node.arguments ?? []) add(argument);
     }
+    if (ts.isCallExpression(node) && node.expression.getText(source) === "completed") {
+      for (const argument of node.arguments) add(argument);
+    }
+    if (ts.isPropertyAssignment(node) && ["message", "title", "summary"].includes(node.name.getText(source))) add(node.initializer);
+    if (driverFile && ts.isFunctionDeclaration(node) && (node.name?.text === "body" || node.name?.text === "skill") && node.body !== undefined) addStringsBelow(node.body);
+    if (cliHelp && ts.isVariableDeclaration(node) && node.name.getText(source) === "help" && node.initializer !== undefined) addStringsBelow(node.initializer);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  for (const candidate of candidates) {
+    const text = literalText(candidate)!;
+    if (/^WSSPEC_[A-Z_]+$/u.test(text)) continue;
+    const line = source.getLineAndCharacterOfPosition(candidate.getStart(source)).line + 1;
+    for (const fragment of proseFragments(text)) if (!isAllowed(fragment)) findings.push({ filename, line, text: fragment.trim() });
   }
   return findings;
 }

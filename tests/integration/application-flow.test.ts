@@ -266,6 +266,20 @@ test("start resolves explicit or active Workflow and persists a complete immutab
   assert.equal(inspected.status, "active");
 });
 
+test("再次 acquire 已结束 Work Item 返回中文完成摘要", async () => {
+  const current = await fixture();
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "关闭后的查询" }, profile: "standard" });
+  const projection = await readControlPlane(current.root, started.workItemId);
+  await writeProjection({ ...projection, workItem: { status: "closed" }, readOnly: true });
+
+  const action = await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" });
+
+  assert.deepEqual(action, {
+    action: "completed",
+    summary: { workItemId: started.workItemId, status: "closed", message: "Workflow 已结束。" },
+  });
+});
+
 test("snapshot and recovery preserve recursive compiled semantics and output content levels", async () => {
   const current = await fixture({ workflowTrust: { interactive: true, actor: "reviewer" } });
   await installRetryWorkflow(current);

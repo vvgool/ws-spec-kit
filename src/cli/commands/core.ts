@@ -11,7 +11,7 @@ import type { SkillProvider } from "../../registry/skills/types.js";
 import { initRepository } from "../../storage/repository.js";
 
 function required(value: string | undefined, name: string): string {
-  if (value === undefined || value === "") throw new CliAdapterError("WSSPEC_ARGUMENT_REQUIRED", `缺少参数 ${name}。`);
+  if (value === undefined || value === "" || value.startsWith("--")) throw new CliAdapterError("WSSPEC_ARGUMENT_REQUIRED", `缺少参数 ${name}。`);
   return value;
 }
 

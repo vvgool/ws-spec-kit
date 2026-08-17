@@ -242,7 +242,7 @@ export async function acquireApplication(input: AcquireInput, dependencies: Acqu
   validate("builtin.application-acquire-input.v1", input);
   const state = await loadApplicationState(input.root, input.workItemId);
   if (state.projection.workItem.status === "closed" || state.projection.workItem.status === "cancelled") {
-    return completed(state.item.workItemId, state.projection.workItem.status, "Workflow is terminal");
+    return completed(state.item.workItemId, state.projection.workItem.status, "Workflow 已结束。");
   }
   const action = await mutateControlPlane({
     cwd: input.root,

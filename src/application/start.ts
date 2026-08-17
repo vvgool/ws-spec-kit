@@ -39,7 +39,7 @@ export class ApplicationStartError extends Error {
   }
 }
 
-interface ProjectConfiguration {
+export interface ProjectConfiguration {
   leaseTtlSeconds: number;
   maxStageRetries: number;
   gatePolicy: ProjectGatePolicy;
@@ -61,7 +61,7 @@ function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string" && item !== "") ? [...new Set(value)] : undefined;
 }
 
-function projectConfiguration(raw: unknown, pkg: WorkflowPackage): ProjectConfiguration {
+export function projectConfiguration(raw: unknown, pkg: WorkflowPackage): ProjectConfiguration {
   const source = validate<Record<string, unknown>>("builtin.application-project-config.v1", raw);
   const quality = record(source.quality);
   const gates = quality === undefined ? undefined : record(quality.gates);
@@ -98,6 +98,35 @@ function workflowSelection(value: unknown): { ref: string; profile: WorkflowProf
   const source = validate<Record<string, unknown>>("builtin.workflow-selection.v1", value);
   const active = record(source.activeWorkflow)!;
   return { ref: active.ref as string, profile: (source.profile ?? "auto") as WorkflowProfile };
+}
+
+export async function resolveProjectWorkflowContext(input: {
+  root: string;
+  pkg: WorkflowPackage;
+  provider: SkillProvider;
+  home: string;
+  config?: unknown;
+}): Promise<{ configuration: ProjectConfiguration; skills: ResolvedSkill[] }> {
+  let rawConfig = input.config;
+  if (rawConfig === undefined) {
+    try {
+      rawConfig = parse(await readFile(path.join(input.root, ".wsspec", "config.yaml"), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      rawConfig = { version: 1 };
+    }
+  }
+  const configuration = projectConfiguration(rawConfig, input.pkg);
+  const bindings = new Map(allWorkflowSteps(input.pkg.workflow.steps).flatMap((step) => (step.skills ?? []).map((binding) => [binding.ref, binding])));
+  const skills = (await Promise.all([...bindings.values()].map((binding) => resolveSkill(binding, {
+    provider: input.provider,
+    projectRoot: input.root,
+    home: input.home,
+    package: input.pkg,
+    stepStatus: "not_started",
+    ...(configuration.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: configuration.additionalGlobalRoots }),
+  })))).filter((skill): skill is ResolvedSkill => skill !== undefined);
+  return { configuration, skills };
 }
 
 function portableSkill(skill: ResolvedSkill, catalog: Awaited<ReturnType<typeof loadBuiltinCatalog>>): ResolvedSkillDescriptor {
@@ -162,16 +191,13 @@ export async function startApplication(input: StartInput, dependencies: StartDep
   if (trust.status === "approval_required") throw new ApplicationStartError("WSSPEC_WORKFLOW_TRUST_REQUIRED", "Workflow Package 需要交互信任决定。 ", trust.summary);
   if (trust.status === "rejected") throw new ApplicationStartError("WSSPEC_WORKFLOW_TRUST_REJECTED", "Workflow Package 已被拒绝。 ");
 
-  const configuration = projectConfiguration(parse(configText), pkg);
-  const bindings = new Map(allWorkflowSteps(pkg.workflow.steps).flatMap((step) => (step.skills ?? []).map((binding) => [binding.ref, binding])));
-  const resolved = (await Promise.all([...bindings.values()].map((binding) => resolveSkill(binding, {
+  const { configuration, skills: resolved } = await resolveProjectWorkflowContext({
+    root: identity.repositoryRoot,
+    pkg,
     provider: dependencies.provider,
-    projectRoot: identity.repositoryRoot,
     home: dependencies.home,
-    package: pkg,
-    stepStatus: "not_started",
-    ...(configuration.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: configuration.additionalGlobalRoots }),
-  })))).filter((skill): skill is ResolvedSkill => skill !== undefined);
+    config: parse(configText),
+  });
   const catalog = await loadBuiltinCatalog();
   const descriptors = new Map<string, ResolvedSkillDescriptor>();
   for (const skill of resolved) {

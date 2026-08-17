@@ -3,7 +3,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 
 import { compileWorkflow } from "../../engine/compiler.js";
-import { resolveSkill } from "../../registry/skills/resolver.js";
+import { resolveProjectWorkflowContext } from "../../application/start.js";
 import type { SkillProvider } from "../../registry/skills/types.js";
 import { loadBuiltinCatalog } from "../../resources/catalog.js";
 import { validate } from "../../schemas/index.js";
@@ -11,7 +11,7 @@ import { writeFileAtomic } from "../../storage/files.js";
 import { loadRepository } from "../../storage/repository.js";
 import { loadWorkflowPackage } from "../../workflow-package/loader.js";
 import { evaluateWorkflowTrust } from "../../workflow-package/trust.js";
-import type { WorkflowPackage, WorkflowStep } from "../../workflow-package/types.js";
+import type { WorkflowPackage } from "../../workflow-package/types.js";
 import { CliAdapterError } from "./output.js";
 
 export interface WorkflowCommandInput { root: string; argv: string[]; home?: string; provider?: SkillProvider; interactive?: boolean; actor?: string }
@@ -38,14 +38,17 @@ function parseArgs(argv: string[], positions: number, options: readonly string[]
   return { positional, options: found };
 }
 async function exists(filename: string): Promise<boolean> { try { await access(filename); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
-function allSteps(steps: readonly WorkflowStep[]): WorkflowStep[] { return steps.flatMap((step) => [step, ...allSteps(step.steps ?? [])]); }
 
 async function validatePackage(root: string, ref: string, home: string, selectedProvider: SkillProvider): Promise<WorkflowPackage> {
   const pkg = await loadWorkflowPackage({ root, ref });
-  const bindings = new Map(allSteps(pkg.workflow.steps).flatMap((step) => (step.skills ?? []).map((binding) => [binding.ref, binding])));
-  const skills = (await Promise.all([...bindings.values()].map((binding) => resolveSkill(binding, { provider: selectedProvider, projectRoot: root, home, package: pkg, stepStatus: "not_started" })))).filter((skill): skill is NonNullable<typeof skill> => skill !== undefined);
-  const defaultGate = pkg.workflow.workflow.id === "documentation-delivery" ? "docs.integrity" : "test";
-  for (const id of ["quick", "standard", "governed"]) compileWorkflow(pkg, { id, skills }, { requiredGateIds: [defaultGate], configuredGateIds: [defaultGate] });
+  const { configuration, skills } = await resolveProjectWorkflowContext({ root, pkg, provider: selectedProvider, home });
+  for (const id of ["quick", "standard", "governed"] as const) {
+    compileWorkflow(pkg, {
+      id,
+      skills,
+      ...(configuration.documentationAllowedPaths === undefined ? {} : { documentationAllowedPaths: configuration.documentationAllowedPaths }),
+    }, configuration.gatePolicy);
+  }
   return pkg;
 }
 function packageView(pkg: WorkflowPackage): WorkflowPackageResult { return { workflow: { ref: pkg.ref, id: pkg.workflow.workflow.id, digest: pkg.contentDigest, profiles: [...pkg.profiles.keys()].sort(), capabilities: [...new Set([...pkg.manifest.capabilities, ...pkg.manifest.externalSideEffects])].sort() } }; }
