@@ -611,3 +611,15 @@ test("legacy preflight preserves strict v1 Schema codes and paths before semanti
 
   expectSchemaError(legacyWorkflow(), { ...legacyConfig, rogue: true }, "WSSPEC_SCHEMA_UNKNOWN_FIELD", "/rogue");
 });
+
+test("legacy preflight rejects incomplete project config at the Schema boundary without TypeError", () => {
+  assert.throws(
+    () => validateLegacyWorkflowSnapshot(legacyWorkflow(), { version: 1 }),
+    (error: unknown) => error instanceof Error
+      && error.name === "SchemaValidationError"
+      && "code" in error
+      && "path" in error
+      && error.code === "WSSPEC_SCHEMA_REQUIRED_FIELD"
+      && error.path === "/trigger",
+  );
+});

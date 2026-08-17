@@ -11,6 +11,7 @@ import { sha256 } from "../../src/domain/digests.js";
 import type { AgentAction, SubmitResult } from "../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
 import { captureLocalRequirement } from "../../src/registry/connectors/local-requirement.js";
+import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
 import { withControlPlaneLock } from "../../src/storage/events.js";
 import { initRepository } from "../../src/storage/repository.js";
@@ -1077,6 +1078,76 @@ test("inspect from a second Git worktree leaves a pending approval and event his
   assert.deepEqual(after, before);
   assert.deepEqual(await readFile(runtimePath), runtimeBytes);
   assert.deepEqual(await readFile(eventsPath), eventBytes);
+});
+
+test("recovery preserves a durable pending approval across projection damage, worktrees, and retries", async () => {
+  const current = await fixture();
+  const { started, awaiting, clarify } = await prepareApproval(current);
+  const before = await readControlPlane(current.root, started.workItemId);
+  const runtimePath = path.join(before.controlPlane, "runtime.json");
+  const eventsPath = path.join(before.controlPlane, "events.jsonl");
+  const eventBytes = await readFile(eventsPath);
+  await writeFile(runtimePath, "not-json\n", "utf8");
+  const secondRoot = path.join(os.tmpdir(), `wsspec-recover-host-${crypto.randomUUID()}`);
+  await git(current.root, "worktree", "add", "-b", `recover-${crypto.randomUUID()}`, secondRoot);
+
+  const first = await recoverControlPlane({ cwd: secondRoot, workItemId: started.workItemId });
+
+  assert.deepEqual(first, before);
+  assert.equal(first.workItem.status, "awaiting_approval");
+  assert.equal(first.stages[clarify.stepId]?.status, "awaiting_approval");
+  assert.equal(first.approvals[awaiting.approval.requestId]?.status, "pending");
+  assert.deepEqual(await readFile(eventsPath), eventBytes);
+  const recoveredRuntimeBytes = await readFile(runtimePath);
+
+  const repeated = await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+
+  assert.deepEqual(repeated, before);
+  assert.deepEqual(await readFile(runtimePath), recoveredRuntimeBytes);
+  assert.deepEqual(await readFile(eventsPath), eventBytes);
+});
+
+test("recovery of an unrelated stale claim does not expire a durable pending approval", async () => {
+  const current = await fixture();
+  const { started, awaiting, clarify } = await prepareApproval(current);
+  const staleClaim = {
+    stageId: "design",
+    attemptId: "attempt-stale",
+    claimToken: "stale-token",
+    actor: "interrupted-agent",
+    claimedAt: "2026-08-17T00:00:00.000Z",
+    expiresAt: "2026-08-17T00:01:00.000Z",
+    inputWorkspaceTreeDigest: "sha256:stale",
+    allowedPaths: ["**"],
+    workspaceSnapshot: [],
+  };
+  await mutateControlPlane({
+    cwd: current.root,
+    workItemId: started.workItemId,
+    eventType: "claim.created",
+    idempotencyKey: "test-stale-claim",
+    stageId: staleClaim.stageId,
+    attemptId: staleClaim.attemptId,
+    operationInput: staleClaim,
+    mutate: (projection) => ({
+      projection: {
+        ...projection,
+        stages: { ...projection.stages, [staleClaim.stageId]: { status: "claimed" } },
+        claims: { ...projection.claims, [staleClaim.stageId]: staleClaim },
+      },
+      value: null,
+    }),
+  });
+  const before = await readControlPlane(current.root, started.workItemId);
+
+  const recovered = await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+
+  assert.equal(recovered.lastSequence, before.lastSequence + 1);
+  assert.equal(recovered.workItem.status, "awaiting_approval");
+  assert.equal(recovered.stages[clarify.stepId]?.status, "awaiting_approval");
+  assert.equal(recovered.approvals[awaiting.approval.requestId]?.status, "pending");
+  assert.equal(recovered.stages[staleClaim.stageId]?.status, "ready");
+  assert.equal(recovered.claims[staleClaim.stageId], undefined);
 });
 
 test("start assembles Task 6 ProjectGatePolicy from project configuration", async () => {

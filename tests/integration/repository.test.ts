@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
+import { validate } from "../../src/schemas/index.js";
 import { RepositoryError, initRepository, loadRepository } from "../../src/storage/repository.js";
 import { createGitRepository, git } from "./helpers/git.js";
 import { parse } from "yaml";
@@ -26,12 +27,13 @@ test("repository initialization creates a stable committed identity and common-d
   assert.equal(cache.repositoryId, initialized.repositoryId);
 });
 
-test("repository initialization creates complete project workflow configuration", async () => {
+test("repository initialization creates a versioned Application selection config", async () => {
   const root = await createGitRepository();
   await initRepository(root);
   const config = parse(await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8"));
   const workflow = parse(await readFile(path.join(root, ".wsspec", "workflow.yaml"), "utf8"));
-  assert.equal(config.version, 1);
+  assert.deepEqual(config, { version: 1 });
+  assert.deepEqual(validate("builtin.application-project-config.v1", config), config);
   assert.deepEqual(workflow, {
     version: 1,
     activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },

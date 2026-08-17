@@ -1,14 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "builtin.project-config.v1",
+  "$id": "builtin.application-project-config.v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "version",
-    "trigger",
-    "git",
-    "runtime",
-    "quality"
+    "version"
   ],
   "properties": {
     "version": {

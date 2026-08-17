@@ -62,7 +62,7 @@ function stringArray(value: unknown): string[] | undefined {
 }
 
 function projectConfiguration(raw: unknown, pkg: WorkflowPackage): ProjectConfiguration {
-  const source = validate<Record<string, unknown>>("builtin.project-config.v1", raw);
+  const source = validate<Record<string, unknown>>("builtin.application-project-config.v1", raw);
   const quality = record(source.quality);
   const gates = quality === undefined ? undefined : record(quality.gates);
   const defaultGate = pkg.workflow.workflow.id === "documentation-delivery" ? "docs.integrity" : "test";

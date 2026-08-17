@@ -366,18 +366,31 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     const expiresAt = Date.parse(recovered.claims[stageId]?.expiresAt ?? "");
     return !Number.isFinite(expiresAt) || expiresAt <= recoveryTime.getTime();
   }).map(([stageId]) => stageId);
-  const approvalStages = Object.entries(recovered.stages).filter(([, stage]) => stage.status === "awaiting_approval").map(([stageId]) => stageId);
+  const durableApprovalIds = new Set(Object.entries(recovered.approvals)
+    .filter(([, approval]) => approval.status === "pending"
+      && recovered.workItem.status === "awaiting_approval"
+      && recovered.stages[approval.stageId]?.status === "awaiting_approval")
+    .map(([requestId]) => requestId));
+  const durableApprovalStages = new Set([...durableApprovalIds].map((requestId) => recovered.approvals[requestId]!.stageId));
+  const invalidPendingApprovalIds = new Set(Object.entries(recovered.approvals)
+    .filter(([requestId, approval]) => approval.status === "pending" && !durableApprovalIds.has(requestId))
+    .map(([requestId]) => requestId));
+  const approvalStages = Object.entries(recovered.stages)
+    .filter(([stageId, stage]) => stage.status === "awaiting_approval" && !durableApprovalStages.has(stageId))
+    .map(([stageId]) => stageId);
   const recoveryStages = [...new Set([...abandonedStages, ...approvalStages])];
-  if (recoveryStages.length > 0 || recovered.workItem.status === "awaiting_approval") {
+  const recoverWorkItem = recovered.workItem.status === "awaiting_approval" && durableApprovalIds.size === 0;
+  if (recoveryStages.length > 0 || recoverWorkItem || invalidPendingApprovalIds.size > 0) {
     const recoveredAt = recoveryTime.toISOString();
-    const next = { ...recovered, workItem: recovered.workItem.status === "awaiting_approval" ? { status: "active" as const } : recovered.workItem, stages: { ...recovered.stages }, claims: { ...recovered.claims }, contexts: { ...recovered.contexts }, approvals: { ...recovered.approvals } };
+    const next = { ...recovered, workItem: recoverWorkItem ? { status: "active" as const } : recovered.workItem, stages: { ...recovered.stages }, claims: { ...recovered.claims }, contexts: { ...recovered.contexts }, approvals: { ...recovered.approvals } };
     for (const stageId of recoveryStages) {
       next.stages[stageId] = { status: "ready" };
       delete next.claims[stageId];
       delete next.contexts[stageId];
     }
-    for (const [requestId, approval] of Object.entries(next.approvals)) {
-      if (approval.status === "pending") next.approvals[requestId] = { ...approval, status: "expired", decidedAt: recoveredAt };
+    for (const requestId of invalidPendingApprovalIds) {
+      const approval = next.approvals[requestId]!;
+      next.approvals[requestId] = { ...approval, status: "expired", decidedAt: recoveredAt };
     }
     const previous = events.at(-1);
     if (previous === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "活动 Claim 缺少对应事件历史。");

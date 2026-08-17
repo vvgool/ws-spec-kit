@@ -1,6 +1,7 @@
 export const schemaIds = [
   "builtin.workflow.v1",
   "builtin.workflow-selection.v1",
+  "builtin.application-project-config.v1",
   "builtin.project-config.v1",
   "builtin.work-item.v1",
   "builtin.application-start-input.v1",
@@ -232,12 +233,99 @@ export const schemas: Record<SchemaId, JsonSchema> = {
       profile: { enum: ["auto", "quick", "standard", "governed"] },
     },
   },
+  "builtin.application-project-config.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "builtin.application-project-config.v1",
+    type: "object",
+    additionalProperties: false,
+    required: ["version"],
+    properties: {
+      version: { const: 1 },
+      trigger: {
+        type: "object",
+        additionalProperties: false,
+        required: ["mode"],
+        properties: { mode: { enum: ["off", "suggest", "active-only"] } },
+      },
+      git: {
+        type: "object",
+        additionalProperties: false,
+        required: ["worktrees"],
+        properties: {
+          worktrees: {
+            type: "object",
+            additionalProperties: false,
+            required: ["enabled", "root", "branchPrefix"],
+            properties: {
+              enabled: { const: true },
+              root: { type: "string", minLength: 1 },
+              branchPrefix: { type: "string", minLength: 1 },
+            },
+          },
+        },
+      },
+      runtime: {
+        type: "object",
+        additionalProperties: false,
+        required: ["claimTtlSeconds", "maxStageRetries"],
+        properties: {
+          claimTtlSeconds: { type: "integer", minimum: 60, maximum: 86400 },
+          maxStageRetries: { type: "integer", minimum: 0, maximum: 10 },
+        },
+      },
+      quality: {
+        type: "object",
+        additionalProperties: false,
+        required: ["gates"],
+        properties: {
+          gates: {
+            type: "object",
+            minProperties: 1,
+            propertyNames: { pattern: idPattern },
+            additionalProperties: gateSchema,
+          },
+        },
+      },
+      publishing: {
+        type: "object",
+        additionalProperties: false,
+        required: ["targets"],
+        properties: { targets: { type: "object", additionalProperties: false } },
+      },
+      documentation: {
+        type: "object",
+        additionalProperties: false,
+        required: ["allowedPaths"],
+        properties: {
+          allowedPaths: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 },
+          },
+        },
+      },
+      skills: {
+        type: "object",
+        additionalProperties: false,
+        required: ["additionalGlobalRoots"],
+        properties: {
+          additionalGlobalRoots: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 },
+          },
+        },
+      },
+    },
+  },
   "builtin.project-config.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "builtin.project-config.v1",
     type: "object",
     additionalProperties: false,
-    required: ["version"],
+    required: ["version", "trigger", "git", "runtime", "quality"],
     properties: {
       version: { const: 1 },
       trigger: {

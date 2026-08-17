@@ -113,7 +113,7 @@ test("recovery preserves completed approval history after projection corruption"
   assert.equal(recovered.stages.define?.status, "succeeded");
 });
 
-test("recovery expires a pending approval and preserves its audit record", async () => {
+test("recovery preserves a durable pending approval and its audit record", async () => {
   const fixture = await prepare();
   const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "define", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   const projection = await readControlPlane(fixture.root, fixture.workItemId);
@@ -121,7 +121,7 @@ test("recovery expires a pending approval and preserves its audit record", async
 
   const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId });
 
-  assert.equal(recovered.approvals[request.requestId]?.status, "expired");
-  assert.equal(recovered.workItem.status, "active");
-  assert.equal(recovered.stages.define?.status, "ready");
+  assert.equal(recovered.approvals[request.requestId]?.status, "pending");
+  assert.equal(recovered.workItem.status, "awaiting_approval");
+  assert.equal(recovered.stages.define?.status, "awaiting_approval");
 });

@@ -36,6 +36,7 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
     activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },
     profile: "auto",
   },
+  "builtin.application-project-config.v1": { version: 1 },
   "builtin.project-config.v1": {
     version: 1,
     trigger: { mode: "suggest" },
@@ -192,6 +193,44 @@ test("public schemas reject missing required fields with a field path", () => {
       return true;
     },
   );
+});
+
+test("project config v1 preserves every normative top-level and nested required field", () => {
+  const cases: Array<[string, (value: Record<string, unknown>) => void]> = [
+    ["/version", (value) => { delete value.version; }],
+    ["/trigger", (value) => { delete value.trigger; }],
+    ["/git", (value) => { delete value.git; }],
+    ["/runtime", (value) => { delete value.runtime; }],
+    ["/quality", (value) => { delete value.quality; }],
+    ["/trigger/mode", (value) => { delete (value.trigger as Record<string, unknown>).mode; }],
+    ["/git/worktrees", (value) => { delete (value.git as Record<string, unknown>).worktrees; }],
+    ["/git/worktrees/enabled", (value) => { delete ((value.git as Record<string, unknown>).worktrees as Record<string, unknown>).enabled; }],
+    ["/git/worktrees/root", (value) => { delete ((value.git as Record<string, unknown>).worktrees as Record<string, unknown>).root; }],
+    ["/git/worktrees/branchPrefix", (value) => { delete ((value.git as Record<string, unknown>).worktrees as Record<string, unknown>).branchPrefix; }],
+    ["/runtime/claimTtlSeconds", (value) => { delete (value.runtime as Record<string, unknown>).claimTtlSeconds; }],
+    ["/runtime/maxStageRetries", (value) => { delete (value.runtime as Record<string, unknown>).maxStageRetries; }],
+    ["/quality/gates", (value) => { delete (value.quality as Record<string, unknown>).gates; }],
+    ["/quality/gates/test/command", (value) => { delete (((value.quality as Record<string, unknown>).gates as Record<string, unknown>).test as Record<string, unknown>).command; }],
+    ["/quality/gates/test/cwd", (value) => { delete (((value.quality as Record<string, unknown>).gates as Record<string, unknown>).test as Record<string, unknown>).cwd; }],
+    ["/quality/gates/test/timeoutSeconds", (value) => { delete (((value.quality as Record<string, unknown>).gates as Record<string, unknown>).test as Record<string, unknown>).timeoutSeconds; }],
+    ["/quality/gates/test/required", (value) => { delete (((value.quality as Record<string, unknown>).gates as Record<string, unknown>).test as Record<string, unknown>).required; }],
+    ["/quality/gates/test/evidence", (value) => { delete (((value.quality as Record<string, unknown>).gates as Record<string, unknown>).test as Record<string, unknown>).evidence; }],
+    ["/publishing/targets", (value) => { delete (value.publishing as Record<string, unknown>).targets; }],
+    ["/documentation/allowedPaths", (value) => { delete (value.documentation as Record<string, unknown>).allowedPaths; }],
+    ["/skills/additionalGlobalRoots", (value) => { delete (value.skills as Record<string, unknown>).additionalGlobalRoots; }],
+  ];
+
+  for (const [expectedPath, remove] of cases) {
+    const value = structuredClone(validValues["builtin.project-config.v1"]);
+    remove(value);
+    assert.throws(
+      () => validate("builtin.project-config.v1", value),
+      (error: unknown) => error instanceof SchemaValidationError
+        && error.code === "WSSPEC_SCHEMA_REQUIRED_FIELD"
+        && error.path === expectedPath,
+      expectedPath,
+    );
+  }
 });
 
 test("unsupported schema IDs fail closed", () => {
