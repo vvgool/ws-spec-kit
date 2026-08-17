@@ -39,25 +39,86 @@ function literalText(node: ts.Expression): string | undefined {
 }
 
 const publicTextFields = new Set(["description", "message", "summary", "title"]);
+const nativeErrorMessageArguments = new Map([
+  ["Error", 0],
+  ["EvalError", 0],
+  ["RangeError", 0],
+  ["ReferenceError", 0],
+  ["SyntaxError", 0],
+  ["TypeError", 0],
+  ["URIError", 0],
+  ["AggregateError", 1],
+]);
+const runtimeTextTransformMethods = new Set(["at", "entries", "filter", "find", "keys", "slice", "split", "substring", "trim", "trimEnd", "trimStart", "values"]);
+const runtimeCollectionFunctions = new Set(["entries", "keys", "values"]);
+const runtimeImports = new Map([
+  ["node:fs/promises", new Set(["readFile"])],
+  ["./state.js", new Set(["selectedProfile"])],
+]);
 
 function propertyName(node: ts.PropertyName): string | undefined {
   if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNumericLiteral(node)) return node.text;
   return undefined;
 }
 
+function constructedErrorMessage(node: ts.NewExpression): ts.Expression | undefined {
+  const name = ts.isIdentifier(node.expression)
+    ? node.expression.text
+    : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : undefined;
+  if (name === undefined || !name.endsWith("Error")) return undefined;
+  const arguments_ = node.arguments ?? [];
+  const index = nativeErrorMessageArguments.get(name) ?? (arguments_.length > 1 ? 1 : 0);
+  return arguments_[index];
+}
+
+function definitelyStructured(node: ts.Expression): boolean {
+  if (ts.isObjectLiteralExpression(node) || ts.isArrayLiteralExpression(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isClassExpression(node)) return true;
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) return definitelyStructured(node.expression);
+  return false;
+}
+
+function definitelyTerminates(node: ts.Statement): boolean {
+  if (ts.isReturnStatement(node) || ts.isThrowStatement(node)) return true;
+  if (ts.isBlock(node)) return node.statements.some(definitelyTerminates);
+  if (ts.isIfStatement(node)) return node.elseStatement !== undefined
+    && definitelyTerminates(node.thenStatement)
+    && definitelyTerminates(node.elseStatement);
+  if (ts.isTryStatement(node)) {
+    if (node.finallyBlock !== undefined && definitelyTerminates(node.finallyBlock)) return true;
+    return definitelyTerminates(node.tryBlock)
+      && node.catchClause !== undefined
+      && definitelyTerminates(node.catchClause.block);
+  }
+  return false;
+}
+
 interface ResolvedText {
   literals: Set<ts.Expression>;
   unresolved: boolean;
+  externalRuntime: boolean;
+  structured: boolean;
 }
 
 type TextEnvironment = Map<ts.Symbol, ResolvedText>;
 
-function emptyText(unresolved = false): ResolvedText {
-  return { literals: new Set(), unresolved };
+function noAuthoredText(): ResolvedText {
+  return { literals: new Set(), unresolved: false, externalRuntime: false, structured: false };
+}
+
+function unresolvedText(): ResolvedText {
+  return { literals: new Set(), unresolved: true, externalRuntime: false, structured: false };
+}
+
+function externalRuntimeText(): ResolvedText {
+  return { literals: new Set(), unresolved: false, externalRuntime: true, structured: false };
+}
+
+function structuredValue(externalRuntime = false): ResolvedText {
+  return { literals: new Set(), unresolved: false, externalRuntime, structured: true };
 }
 
 function cloneText(value: ResolvedText): ResolvedText {
-  return { literals: new Set(value.literals), unresolved: value.unresolved };
+  return { literals: new Set(value.literals), unresolved: value.unresolved, externalRuntime: value.externalRuntime, structured: value.structured };
 }
 
 function cloneEnvironment(environment: TextEnvironment): TextEnvironment {
@@ -68,6 +129,8 @@ function mergeText(values: ResolvedText[]): ResolvedText {
   return {
     literals: new Set(values.flatMap((value) => [...value.literals])),
     unresolved: values.some((value) => value.unresolved),
+    externalRuntime: values.some((value) => value.externalRuntime),
+    structured: values.some((value) => value.structured),
   };
 }
 
@@ -75,7 +138,7 @@ function mergeEnvironments(environments: TextEnvironment[]): TextEnvironment {
   const symbols = new Set(environments.flatMap((environment) => [...environment.keys()]));
   return new Map([...symbols].map((symbol) => [
     symbol,
-    mergeText(environments.map((environment) => environment.get(symbol) ?? emptyText(true))),
+    mergeText(environments.map((environment) => environment.get(symbol) ?? unresolvedText())),
   ]));
 }
 
@@ -88,7 +151,7 @@ function sameEnvironment(left: TextEnvironment, right: TextEnvironment): boolean
   if (left.size !== right.size) return false;
   for (const [symbol, leftValue] of left) {
     const rightValue = right.get(symbol);
-    if (rightValue === undefined || leftValue.unresolved !== rightValue.unresolved || leftValue.literals.size !== rightValue.literals.size) return false;
+    if (rightValue === undefined || leftValue.unresolved !== rightValue.unresolved || leftValue.externalRuntime !== rightValue.externalRuntime || leftValue.structured !== rightValue.structured || leftValue.literals.size !== rightValue.literals.size) return false;
     for (const literal of leftValue.literals) if (!rightValue.literals.has(literal)) return false;
   }
   return true;
@@ -121,6 +184,9 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
   const unresolved = new Set<ts.Expression>();
   const driverFile = /(?:src|dist)\/adapters\/skills\/install\.(?:ts|js)$/u.test(filename);
   const cliHelp = /(?:src|dist)\/cli\/main\.(?:ts|js)$/u.test(filename);
+  const functionReturns = new Map<ts.Symbol, ResolvedText>();
+  const returnCollectors: ResolvedText[][] = [];
+  const externalRuntimeFunctions = new Set<ts.Symbol>();
 
   const symbolFor = (identifier: ts.Identifier): ts.Symbol | undefined => {
     if (ts.isShorthandPropertyAssignment(identifier.parent) && identifier.parent.name === identifier) {
@@ -128,18 +194,97 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     }
     return checker.getSymbolAtLocation(identifier);
   };
-  const resolve = (node: ts.Expression, environment: TextEnvironment): ResolvedText => {
-    if (literalText(node) !== undefined) return { literals: new Set([node]), unresolved: false };
-    if (ts.isIdentifier(node)) {
-      if (node.text === "undefined") return emptyText(false);
-      const symbol = symbolFor(node);
-      return symbol === undefined ? emptyText(true) : cloneText(environment.get(symbol) ?? emptyText(true));
+  for (const statement of source.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    const allowed = runtimeImports.get(statement.moduleSpecifier.text);
+    if (allowed === undefined || statement.importClause?.namedBindings === undefined || !ts.isNamedImports(statement.importClause.namedBindings)) continue;
+    for (const element of statement.importClause.namedBindings.elements) {
+      if (!allowed.has(element.propertyName?.text ?? element.name.text)) continue;
+      const symbol = symbolFor(element.name);
+      if (symbol !== undefined) externalRuntimeFunctions.add(symbol);
     }
-    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) {
+  }
+  const resolve = (node: ts.Expression, environment: TextEnvironment): ResolvedText => {
+    if (ts.isTemplateExpression(node)) {
+      return mergeText([
+        { literals: new Set([node]), unresolved: false, externalRuntime: false, structured: false },
+        ...node.templateSpans.map((span) => resolve(span.expression, environment)),
+      ]);
+    }
+    if (literalText(node) !== undefined) return { literals: new Set([node]), unresolved: false, externalRuntime: false, structured: false };
+    if (ts.isNumericLiteral(node) || node.kind === ts.SyntaxKind.TrueKeyword || node.kind === ts.SyntaxKind.FalseKeyword || node.kind === ts.SyntaxKind.NullKeyword) return noAuthoredText();
+    if (ts.isObjectLiteralExpression(node)) {
+      const values = node.properties.flatMap((property): ResolvedText[] => {
+        if (ts.isPropertyAssignment(property)) return [resolve(property.initializer, environment)];
+        if (ts.isShorthandPropertyAssignment(property)) return [resolve(property.name, environment)];
+        if (ts.isSpreadAssignment(property)) return [resolve(property.expression, environment)];
+        return [structuredValue()];
+      });
+      const external = values.some((value) => value.externalRuntime)
+        && values.every((value) => !value.unresolved && value.literals.size === 0 && (value.externalRuntime || !value.structured));
+      return structuredValue(external);
+    }
+    if (ts.isArrayLiteralExpression(node)) {
+      const values = node.elements.filter(ts.isExpression).map((element) => resolve(element, environment));
+      const external = values.some((value) => value.externalRuntime)
+        && values.every((value) => !value.unresolved && value.literals.size === 0 && (value.externalRuntime || !value.structured));
+      return structuredValue(external);
+    }
+    if (ts.isFunctionExpression(node) || ts.isArrowFunction(node) || ts.isClassExpression(node)) return structuredValue();
+    if (ts.isIdentifier(node)) {
+      if (node.text === "undefined") return noAuthoredText();
+      const symbol = symbolFor(node);
+      return symbol === undefined ? unresolvedText() : cloneText(environment.get(symbol) ?? unresolvedText());
+    }
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node) || ts.isAwaitExpression(node)) {
       return resolve(node.expression, environment);
     }
     if (ts.isConditionalExpression(node)) return mergeText([resolve(node.whenTrue, environment), resolve(node.whenFalse, environment)]);
-    return emptyText(false);
+    if (ts.isBinaryExpression(node)) {
+      if (node.operatorToken.kind === ts.SyntaxKind.EqualsToken) return resolve(node.right, environment);
+      return mergeText([resolve(node.left, environment), resolve(node.right, environment)]);
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const owner = resolve(node.expression, environment);
+      if (owner.unresolved) return owner;
+      if (owner.structured) return owner.externalRuntime && owner.literals.size === 0 ? externalRuntimeText() : mergeText([owner, unresolvedText()]);
+      return owner.externalRuntime ? externalRuntimeText() : noAuthoredText();
+    }
+    if (ts.isCallExpression(node)) {
+      if (ts.isIdentifier(node.expression)) {
+        const symbol = symbolFor(node.expression);
+        if (node.expression.text === "String" && symbol === undefined) return node.arguments[0] === undefined ? noAuthoredText() : resolve(node.arguments[0], environment);
+        if (symbol !== undefined) {
+          if (externalRuntimeFunctions.has(symbol)) return externalRuntimeText();
+          const returned = functionReturns.get(symbol);
+          if (returned !== undefined) return cloneText(returned);
+        }
+      }
+      if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
+        const owner = node.expression.expression;
+        const ownerSymbol = symbolFor(owner);
+        if (ownerSymbol === undefined && owner.text === "Object" && runtimeCollectionFunctions.has(node.expression.name.text)) {
+          const input = node.arguments[0] === undefined ? noAuthoredText() : resolve(node.arguments[0], environment);
+          if (input.unresolved) return input;
+          return input.externalRuntime && input.literals.size === 0 ? externalRuntimeText() : mergeText([input, unresolvedText()]);
+        }
+        if (ownerSymbol === undefined && owner.text === "JSON" && node.expression.name.text === "parse") {
+          const input = node.arguments[0] === undefined ? noAuthoredText() : resolve(node.arguments[0], environment);
+          if (input.unresolved) return input;
+          return input.externalRuntime && input.literals.size === 0 ? externalRuntimeText() : mergeText([input, unresolvedText()]);
+        }
+      }
+      if (ts.isPropertyAccessExpression(node.expression) && runtimeTextTransformMethods.has(node.expression.name.text)) {
+        const owner = resolve(node.expression.expression, environment);
+        if (!owner.unresolved) {
+          if (owner.externalRuntime && owner.literals.size === 0) return externalRuntimeText();
+          if (!owner.structured && owner.literals.size > 0) return cloneText(owner);
+          return mergeText([owner, unresolvedText()]);
+        }
+      }
+      return unresolvedText();
+    }
+    return unresolvedText();
   };
 
   const add = (node: ts.Expression, environment: TextEnvironment): void => {
@@ -160,7 +305,7 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     }
     for (const element of name.elements) {
       if (ts.isOmittedExpression(element)) continue;
-      bind(element.name, emptyText(false), environment);
+      bind(element.name, value, environment);
     }
   };
 
@@ -171,11 +316,23 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     const functionEnvironment = cloneEnvironment(environment);
     for (const parameter of node.parameters) {
       if (parameter.initializer !== undefined) analyzeExpression(parameter.initializer, functionEnvironment);
-      bind(parameter.name, parameter.initializer === undefined ? emptyText(false) : resolve(parameter.initializer, functionEnvironment), functionEnvironment);
+      bind(parameter.name, parameter.initializer === undefined
+        ? externalRuntimeText()
+        : mergeText([externalRuntimeText(), resolve(parameter.initializer, functionEnvironment)]), functionEnvironment);
     }
     if (node.body === undefined) return;
+    const returns: ResolvedText[] = [];
+    returnCollectors.push(returns);
     if (ts.isBlock(node.body)) for (const statement of node.body.statements) analyzeStatement(statement, functionEnvironment);
-    else analyzeExpression(node.body, functionEnvironment);
+    else {
+      analyzeExpression(node.body, functionEnvironment);
+      returns.push(resolve(node.body, functionEnvironment));
+    }
+    returnCollectors.pop();
+    if (node.name !== undefined && ts.isIdentifier(node.name)) {
+      const symbol = symbolFor(node.name);
+      if (symbol !== undefined) functionReturns.set(symbol, returns.length === 0 ? noAuthoredText() : mergeText(returns));
+    }
   };
 
   const analyzeLoop = (body: ts.Statement, environment: TextEnvironment, afterBody?: (loopEnvironment: TextEnvironment) => void): void => {
@@ -192,7 +349,7 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
       }
       loopEnvironment = next;
     }
-    for (const [symbol, value] of loopEnvironment) loopEnvironment.set(symbol, { literals: value.literals, unresolved: true });
+    for (const [symbol, value] of loopEnvironment) loopEnvironment.set(symbol, { literals: value.literals, unresolved: true, externalRuntime: value.externalRuntime, structured: value.structured });
     replaceEnvironment(environment, loopEnvironment);
   };
 
@@ -215,7 +372,7 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
       for (const property of node.properties) {
         if (ts.isPropertyAssignment(property)) {
           const name = propertyName(property.name);
-          if (name !== undefined && publicTextFields.has(name)) add(property.initializer, environment);
+          if (name !== undefined && publicTextFields.has(name) && !definitelyStructured(property.initializer)) add(property.initializer, environment);
           analyzeExpression(property.initializer, environment);
         } else if (ts.isShorthandPropertyAssignment(property)) {
           if (publicTextFields.has(property.name.text)) add(property.name, environment);
@@ -235,11 +392,8 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     }
     if (ts.isNewExpression(node)) {
       const args = node.arguments ?? [];
-      if (node.expression.getText(source).endsWith("Error")) {
-        for (const argument of args) if (literalText(argument) !== undefined) add(argument, environment);
-        const message = args.length === 1 ? args[0] : args[1];
-        if (message !== undefined && literalText(message) === undefined) add(message, environment);
-      }
+      const message = constructedErrorMessage(node);
+      if (message !== undefined) add(message, environment);
       analyzeExpression(node.expression, environment);
       for (const argument of args) analyzeExpression(argument, environment);
       return;
@@ -254,7 +408,7 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     if (ts.isVariableStatement(node)) {
       for (const declaration of node.declarationList.declarations) {
         if (declaration.initializer !== undefined) analyzeExpression(declaration.initializer, environment);
-        bind(declaration.name, declaration.initializer === undefined ? emptyText(true) : resolve(declaration.initializer, environment), environment);
+        bind(declaration.name, declaration.initializer === undefined ? unresolvedText() : resolve(declaration.initializer, environment), environment);
         if (cliHelp && declaration.name.getText(source) === "help" && declaration.initializer !== undefined) addStringsBelow(declaration.initializer);
       }
       return;
@@ -272,7 +426,14 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
       analyzeExpression(node.expression, environment);
       return;
     }
-    if (ts.isReturnStatement(node) || ts.isThrowStatement(node)) {
+    if (ts.isReturnStatement(node)) {
+      if (node.expression !== undefined) {
+        analyzeExpression(node.expression, environment);
+        returnCollectors.at(-1)?.push(resolve(node.expression, environment));
+      }
+      return;
+    }
+    if (ts.isThrowStatement(node)) {
       if (node.expression !== undefined) analyzeExpression(node.expression, environment);
       return;
     }
@@ -285,6 +446,26 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
       replaceEnvironment(environment, mergeEnvironments([thenEnvironment, elseEnvironment]));
       return;
     }
+    if (ts.isSwitchStatement(node)) {
+      analyzeExpression(node.expression, environment);
+      const entry = cloneEnvironment(environment);
+      const exits: TextEnvironment[] = [];
+      let fallthrough: TextEnvironment | undefined;
+      let hasDefault = false;
+      for (const clause of node.caseBlock.clauses) {
+        const clauseEnvironment = fallthrough === undefined
+          ? cloneEnvironment(entry)
+          : mergeEnvironments([entry, fallthrough]);
+        if (ts.isCaseClause(clause)) analyzeExpression(clause.expression, clauseEnvironment);
+        else hasDefault = true;
+        for (const statement of clause.statements) analyzeStatement(statement, clauseEnvironment);
+        exits.push(clauseEnvironment);
+        fallthrough = clauseEnvironment;
+      }
+      if (!hasDefault || exits.length === 0) exits.push(entry);
+      replaceEnvironment(environment, mergeEnvironments(exits));
+      return;
+    }
     if (ts.isWhileStatement(node) || ts.isDoStatement(node)) {
       analyzeExpression(node.expression, environment);
       analyzeLoop(node.statement, environment);
@@ -293,7 +474,7 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     if (ts.isForStatement(node)) {
       if (node.initializer !== undefined) {
         if (ts.isVariableDeclarationList(node.initializer)) {
-          for (const declaration of node.initializer.declarations) bind(declaration.name, declaration.initializer === undefined ? emptyText(true) : resolve(declaration.initializer, environment), environment);
+          for (const declaration of node.initializer.declarations) bind(declaration.name, declaration.initializer === undefined ? unresolvedText() : resolve(declaration.initializer, environment), environment);
         } else analyzeExpression(node.initializer, environment);
       }
       if (node.condition !== undefined) analyzeExpression(node.condition, environment);
@@ -302,25 +483,28 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     }
     if (ts.isForInStatement(node) || ts.isForOfStatement(node)) {
       analyzeExpression(node.expression, environment);
+      const iterationValue = resolve(node.expression, environment);
       if (ts.isVariableDeclarationList(node.initializer)) {
-        for (const declaration of node.initializer.declarations) bind(declaration.name, emptyText(false), environment);
+        for (const declaration of node.initializer.declarations) bind(declaration.name, iterationValue, environment);
       } else if (ts.isIdentifier(node.initializer)) {
         const symbol = symbolFor(node.initializer);
-        if (symbol !== undefined) environment.set(symbol, emptyText(false));
+        if (symbol !== undefined) environment.set(symbol, cloneText(iterationValue));
       }
       analyzeLoop(node.statement, environment);
       return;
     }
     if (ts.isTryStatement(node)) {
-      const branches = [cloneEnvironment(environment)];
-      analyzeStatement(node.tryBlock, branches[0]!);
+      const branches: TextEnvironment[] = [];
+      const tryEnvironment = cloneEnvironment(environment);
+      analyzeStatement(node.tryBlock, tryEnvironment);
+      if (!definitelyTerminates(node.tryBlock)) branches.push(tryEnvironment);
       if (node.catchClause !== undefined) {
         const catchEnvironment = cloneEnvironment(environment);
-        if (node.catchClause.variableDeclaration !== undefined) bind(node.catchClause.variableDeclaration.name, emptyText(false), catchEnvironment);
+        if (node.catchClause.variableDeclaration !== undefined) bind(node.catchClause.variableDeclaration.name, externalRuntimeText(), catchEnvironment);
         analyzeStatement(node.catchClause.block, catchEnvironment);
-        branches.push(catchEnvironment);
+        if (!definitelyTerminates(node.catchClause.block)) branches.push(catchEnvironment);
       }
-      replaceEnvironment(environment, mergeEnvironments(branches));
+      if (branches.length > 0) replaceEnvironment(environment, mergeEnvironments(branches));
       if (node.finallyBlock !== undefined) analyzeStatement(node.finallyBlock, environment);
       return;
     }

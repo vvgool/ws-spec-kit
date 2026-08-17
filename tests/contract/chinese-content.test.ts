@@ -61,6 +61,220 @@ test("公开完成结果的英文参数在源码和构建产物中都会被阻�
   assert.deepEqual(build, [{ filename: "dist/application/acquire.js", line: 1, text: "Unexpected built terminal result" }]);
 });
 
+test("调用表达式流入公开文案时在源码和构建产物中 fail closed", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/call-expression.ts",
+      content: [
+        'const message = compose("Unexpected call source message");',
+        "completed(workItemId, status, message);",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/call-expression.js",
+      content: [
+        'const message = compose("Unexpected call built message");',
+        "completed(workItemId, status, message);",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/call-expression.ts", line: 2, text: "无法安全解析公开文案：message" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/call-expression.js", line: 2, text: "无法安全解析公开文案：message" },
+  ]);
+});
+
+test("二元与模板拼接在源码和构建产物中保守解析", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/concatenation.ts",
+      content: [
+        'const binaryMessage = "Unexpected binary source message" + "中文";',
+        "completed(workItemId, status, binaryMessage);",
+        'const templateMessage = `中文：${compose("Unexpected template source message")}`;',
+        "completed(workItemId, status, templateMessage);",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/concatenation.js",
+      content: [
+        'const binaryMessage = "Unexpected binary built message" + "中文";',
+        "completed(workItemId, status, binaryMessage);",
+        'const templateMessage = `中文：${compose("Unexpected template built message")}`;',
+        "completed(workItemId, status, templateMessage);",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/concatenation.ts", line: 1, text: "Unexpected binary source message" },
+    { filename: "src/application/concatenation.ts", line: 4, text: "无法安全解析公开文案：templateMessage" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/concatenation.js", line: 1, text: "Unexpected binary built message" },
+    { filename: "dist/application/concatenation.js", line: 4, text: "无法安全解析公开文案：templateMessage" },
+  ]);
+});
+
+test("运行时数据边界不掩盖未知调用或本地 helper 中的英文文案", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/runtime-copy.ts",
+      content: [
+        "function authoredCopy() {",
+        '  return "Unexpected authored helper source message";',
+        "}",
+        "function publish(input) {",
+        "  completed(workItemId, status, `任务 ${input.workItemId} 完成。`);",
+        "  completed(workItemId, status, String(input.detail));",
+        "  completed(workItemId, status, compose(input.detail));",
+        "  completed(workItemId, status, authoredCopy());",
+        "}",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/runtime-copy.js",
+      content: [
+        "function authoredCopy() {",
+        '  return "Unexpected authored helper built message";',
+        "}",
+        "function publish(input) {",
+        "  completed(workItemId, status, `任务 ${input.workItemId} 完成。`);",
+        "  completed(workItemId, status, String(input.detail));",
+        "  completed(workItemId, status, compose(input.detail));",
+        "  completed(workItemId, status, authoredCopy());",
+        "}",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/runtime-copy.ts", line: 2, text: "Unexpected authored helper source message" },
+    { filename: "src/application/runtime-copy.ts", line: 7, text: "无法安全解析公开文案：compose(input.detail)" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/runtime-copy.js", line: 2, text: "Unexpected authored helper built message" },
+    { filename: "dist/application/runtime-copy.js", line: 7, text: "无法安全解析公开文案：compose(input.detail)" },
+  ]);
+});
+
+test("运行时数据模型不会把本地结构化文案误标为 external", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/local-structure.ts",
+      content: [
+        'const local = { value: "Unexpected local collection source message" };',
+        "completed(workItemId, status, Object.values(local)[0]);",
+        "function localResult() {",
+        '  return { value: "Unexpected local helper source message" };',
+        "}",
+        "completed(workItemId, status, localResult().value);",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/local-structure.js",
+      content: [
+        'const local = { value: "Unexpected local collection built message" };',
+        "completed(workItemId, status, Object.values(local)[0]);",
+        "function localResult() {",
+        '  return { value: "Unexpected local helper built message" };',
+        "}",
+        "completed(workItemId, status, localResult().value);",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/local-structure.ts", line: 2, text: "无法安全解析公开文案：Object.values(local)[0]" },
+    { filename: "src/application/local-structure.ts", line: 6, text: "无法安全解析公开文案：localResult().value" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/local-structure.js", line: 2, text: "无法安全解析公开文案：Object.values(local)[0]" },
+    { filename: "dist/application/local-structure.js", line: 6, text: "无法安全解析公开文案：localResult().value" },
+  ]);
+});
+
+test("结构化 summary 容器不是文案 sink，但内部字符串字段仍会检查", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/structured-summary.ts",
+      content: [
+        "function complete(input) {",
+        '  return { action: "completed", summary: { workItemId: input.workItemId, status: "closed", message: "中文" } };',
+        "}",
+        "function submit() {",
+        '  return { result: { summary: "Unexpected nested source summary" } };',
+        "}",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/structured-summary.js",
+      content: [
+        "function complete(input) {",
+        '  return { action: "completed", summary: { workItemId: input.workItemId, status: "closed", message: "中文" } };',
+        "}",
+        "function submit() {",
+        '  return { result: { summary: "Unexpected nested built summary" } };',
+        "}",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/structured-summary.ts", line: 5, text: "Unexpected nested source summary" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/structured-summary.js", line: 5, text: "Unexpected nested built summary" },
+  ]);
+});
+
+test("Error sink 按构造器语义检查 message 参数而不检查 options", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/errors.ts",
+      content: [
+        'const nativeMessage = "Unexpected variable error source message";',
+        "new Error(nativeMessage, { cause });",
+        'const adapterMessage = "Unexpected adapter error source message";',
+        'new CliAdapterError("WSSPEC_TEST", adapterMessage);',
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/errors.js",
+      content: [
+        'const nativeMessage = "Unexpected variable error built message";',
+        "new Error(nativeMessage, { cause });",
+        'const adapterMessage = "Unexpected adapter error built message";',
+        'new CliAdapterError("WSSPEC_TEST", adapterMessage);',
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/errors.ts", line: 1, text: "Unexpected variable error source message" },
+    { filename: "src/application/errors.ts", line: 3, text: "Unexpected adapter error source message" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/errors.js", line: 1, text: "Unexpected variable error built message" },
+    { filename: "dist/application/errors.js", line: 3, text: "Unexpected adapter error built message" },
+  ]);
+});
+
 test("公开协议文案 sink 覆盖 description、引号属性和变量结果，且忽略协议标识", async () => {
   const source = await validateChineseContent({
     files: [{
@@ -238,14 +452,66 @@ test("公开文案保守合并循环中可能到达的赋值", async () => {
   ]);
 });
 
-test("源码用户文案中的模板插值属于运行时代码而非英文文案", async () => {
+test("公开文案保守合并 switch 分支和 fallthrough 赋值", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/switch.ts",
+      content: [
+        'let selected = "中文";',
+        'let message = "中文";',
+        "switch (kind) {",
+        '  case "a":',
+        '    selected = "Unexpected switch source message";',
+        '  case "b":',
+        "    message = selected;",
+        "    break;",
+        "  default:",
+        '    message = "中文";',
+        "}",
+        "completed(workItemId, status, message);",
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/switch.js",
+      content: [
+        'let selected = "中文";',
+        'let message = "中文";',
+        "switch (kind) {",
+        '  case "a":',
+        '    selected = "Unexpected switch built message";',
+        '  case "b":',
+        "    message = selected;",
+        "    break;",
+        "  default:",
+        '    message = "中文";',
+        "}",
+        "completed(workItemId, status, message);",
+      ].join("\n"),
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/switch.ts", line: 5, text: "Unexpected switch source message" },
+  ]);
+  assert.deepEqual(build, [
+    { filename: "dist/application/switch.js", line: 5, text: "Unexpected switch built message" },
+  ]);
+});
+
+test("Error message 中无法证明安全的模板插值会 fail closed", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-chinese-template-"));
   await mkdir(path.join(root, "src", "cli"), { recursive: true });
   await writeFile(path.join(root, "src", "cli", "core.ts"), "throw new CliAdapterError(\"WSSPEC_TEST\", `执行失败：${String(rollbackError)}`);\n", "utf8");
 
   const findings = await validateChineseContent({ root });
 
-  assert.deepEqual(findings, []);
+  assert.deepEqual(findings, [{
+    filename: "src/cli/core.ts",
+    line: 1,
+    text: "无法安全解析公开文案：`执行失败：${String(rollbackError)}`",
+  }]);
 });
 
 test("构建产物中的未登记英文用户文案会阻断检查", async () => {
