@@ -1,0 +1,76 @@
+export interface WorkflowManifest {
+  version: 1;
+  id: string;
+  entry: string;
+  profiles: string[];
+  skills?: string[];
+  capabilities?: string[];
+  externalSideEffects?: string[];
+  [key: string]: unknown;
+}
+
+export interface WorkflowDefinition {
+  version: 1;
+  id: string;
+  [key: string]: unknown;
+}
+
+export interface ProfileDefinition {
+  version: 1;
+  id: string;
+  workflow: string;
+  [key: string]: unknown;
+}
+
+export interface WorkflowPackageFile {
+  path: string;
+  digest: string;
+}
+
+export interface WorkflowPackage {
+  ref: string;
+  root: string;
+  manifest: WorkflowManifest;
+  workflow: WorkflowDefinition;
+  profiles: Map<string, ProfileDefinition>;
+  packageSkills: Map<string, { entrypoint: string; digest: string }>;
+  files: WorkflowPackageFile[];
+  contentDigest: string;
+}
+
+export interface WorkflowPackageLock {
+  version: 1;
+  contentDigest: string;
+  files: WorkflowPackageFile[];
+  packageSkills: Array<{ ref: string; digest: string }>;
+}
+
+export interface WorkflowTrustRecord {
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  decision: "trusted" | "rejected";
+  actor: string;
+  decidedAt: string;
+}
+
+export interface WorkflowTrustSummary {
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  fileDigests: Array<{ path: string; digest: string }>;
+  skillDigests: Array<{ ref: string; digest: string }>;
+  capabilities: string[];
+}
+
+export type WorkflowTrustDecision =
+  | { status: "trusted"; record: WorkflowTrustRecord }
+  | { status: "approval_required"; summary: WorkflowTrustSummary }
+  | { status: "rejected"; record: WorkflowTrustRecord };
+
+export class WorkflowPackageError extends Error {
+  constructor(readonly code: `WSSPEC_${string}`, message: string) {
+    super(`${code}: ${message}`);
+    this.name = "WorkflowPackageError";
+  }
+}
