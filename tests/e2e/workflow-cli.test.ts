@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -71,6 +71,7 @@ test("workflow use 未指定 Profile 时保留当前项目选择", async () => {
 
 test("workflow validate 按 Provider 从宿主 Global Skill 根解析绑定", async () => {
   const root = await createGitRepository();
+  await initRepository(root);
   const home = await mkdtemp(path.join(os.tmpdir(), "wspec-provider-home-"));
   const target = path.join(root, ".wsspec", "workflows", "feature-delivery");
   await runWorkflowCommand({ root, argv: ["eject", "builtin://workflows/feature-delivery", target] });
@@ -97,6 +98,22 @@ test("workflow validate 复用 start 的严格 Project Config 校验", async () 
     runWorkflowCommand({ root, argv: ["validate", "builtin://workflows/feature-delivery"] }),
     (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SCHEMA_UNKNOWN_FIELD",
   );
+});
+
+test("已初始化项目缺少 Config 时 validate、use 与 start 同样 fail closed，且 use 不修改选择", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-missing-config-home-"));
+  const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
+  const workflowPath = path.join(root, ".wsspec", "workflow.yaml");
+  const before = await readFile(workflowPath, "utf8");
+  await unlink(path.join(root, ".wsspec", "config.yaml"));
+  const missingConfig = (error: unknown): boolean => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_PROJECT_CONFIG_MISSING";
+
+  await assert.rejects(runWorkflowCommand({ root, home, argv: ["validate", "builtin://workflows/feature-delivery"] }), missingConfig);
+  await assert.rejects(runWorkflowCommand({ root, home, argv: ["use", "builtin://workflows/documentation-delivery"] }), missingConfig);
+  assert.equal(await readFile(workflowPath, "utf8"), before);
+  await assert.rejects(app.start({ root, source: { type: "prompt", text: "缺失配置" } }), missingConfig);
 });
 
 test("四类 Provider 在 validate、use 与 start 使用相同的 Project Skill 解析上下文", async (t) => {

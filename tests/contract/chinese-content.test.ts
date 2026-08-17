@@ -61,6 +61,32 @@ test("公开完成结果的英文参数在源码和构建产物中都会被阻�
   assert.deepEqual(build, [{ filename: "dist/application/acquire.js", line: 1, text: "Unexpected built terminal result" }]);
 });
 
+test("公开协议文案 sink 覆盖 description、引号属性和变量结果，且忽略协议标识", async () => {
+  const source = await validateChineseContent({
+    files: [{
+      filename: "src/application/example.ts",
+      content: [
+        'const message = "Unexpected public result";',
+        'const descriptor = { description: "Unexpected public description", "message": "Unexpected quoted message", ref: "builtin://skills/example", code: "WSSPEC_SAMPLE" };',
+        'return completed(workItemId, "closed", message);',
+      ].join("\n"),
+    }],
+  });
+  const build = await validateChineseContent({
+    files: [{
+      filename: "dist/application/example.js",
+      content: 'const description = "Unexpected built description"; return { description, ref: "global://vendor/test" };\n',
+    }],
+  });
+
+  assert.deepEqual(source, [
+    { filename: "src/application/example.ts", line: 1, text: "Unexpected public result" },
+    { filename: "src/application/example.ts", line: 2, text: "Unexpected public description" },
+    { filename: "src/application/example.ts", line: 2, text: "Unexpected quoted message" },
+  ]);
+  assert.deepEqual(build, [{ filename: "dist/application/example.js", line: 1, text: "Unexpected built description" }]);
+});
+
 test("源码用户文案中的模板插值属于运行时代码而非英文文案", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-chinese-template-"));
   await mkdir(path.join(root, "src", "cli"), { recursive: true });

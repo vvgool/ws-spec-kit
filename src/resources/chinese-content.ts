@@ -29,7 +29,7 @@ function inspect(filename: string, content: string): ChineseContentFinding[] {
     if (fenced) continue;
     for (const text of proseFragments(line)) if (!isAllowed(text)) findings.push({ filename, line: index + 1, text: text.trim() });
   }
-  return findings;
+  return findings.sort((left, right) => left.filename.localeCompare(right.filename) || left.line - right.line);
 }
 
 function literalText(node: ts.Expression): string | undefined {
@@ -38,17 +38,39 @@ function literalText(node: ts.Expression): string | undefined {
   return undefined;
 }
 
+const publicTextFields = new Set(["description", "message", "summary", "title"]);
+
+function propertyName(node: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNumericLiteral(node)) return node.text;
+  return undefined;
+}
+
 function sourceUserText(filename: string, content: string): ChineseContentFinding[] {
   const findings: ChineseContentFinding[] = [];
   const source = ts.createSourceFile(filename, content, ts.ScriptTarget.Latest, true, filename.endsWith(".js") ? ts.ScriptKind.JS : ts.ScriptKind.TS);
   const candidates = new Set<ts.Expression>();
-  const add = (node: ts.Expression): void => { if (literalText(node) !== undefined) candidates.add(node); };
+  const initializers = new Map<string, ts.Expression>();
+  const add = (node: ts.Expression, seen = new Set<string>()): void => {
+    if (literalText(node) !== undefined) {
+      candidates.add(node);
+      return;
+    }
+    if (ts.isIdentifier(node) && !seen.has(node.text)) {
+      const initializer = initializers.get(node.text);
+      if (initializer !== undefined) add(initializer, new Set([...seen, node.text]));
+    }
+  };
   const addStringsBelow = (node: ts.Node): void => {
     if (ts.isExpression(node)) add(node);
     ts.forEachChild(node, addStringsBelow);
   };
   const driverFile = /(?:src|dist)\/adapters\/skills\/install\.(?:ts|js)$/u.test(filename);
   const cliHelp = /(?:src|dist)\/cli\/main\.(?:ts|js)$/u.test(filename);
+  const collectInitializers = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) initializers.set(node.name.text, node.initializer);
+    ts.forEachChild(node, collectInitializers);
+  };
+  collectInitializers(source);
   const visit = (node: ts.Node): void => {
     if (ts.isNewExpression(node) && node.expression.getText(source).endsWith("Error")) {
       for (const argument of node.arguments ?? []) add(argument);
@@ -56,7 +78,8 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     if (ts.isCallExpression(node) && node.expression.getText(source) === "completed") {
       for (const argument of node.arguments) add(argument);
     }
-    if (ts.isPropertyAssignment(node) && ["message", "title", "summary"].includes(node.name.getText(source))) add(node.initializer);
+    if (ts.isPropertyAssignment(node) && propertyName(node.name) !== undefined && publicTextFields.has(propertyName(node.name)!)) add(node.initializer);
+    if (ts.isShorthandPropertyAssignment(node) && publicTextFields.has(node.name.text)) add(node.name);
     if (driverFile && ts.isFunctionDeclaration(node) && (node.name?.text === "body" || node.name?.text === "skill") && node.body !== undefined) addStringsBelow(node.body);
     if (cliHelp && ts.isVariableDeclaration(node) && node.name.getText(source) === "help" && node.initializer !== undefined) addStringsBelow(node.initializer);
     ts.forEachChild(node, visit);
@@ -68,7 +91,7 @@ function sourceUserText(filename: string, content: string): ChineseContentFindin
     const line = source.getLineAndCharacterOfPosition(candidate.getStart(source)).line + 1;
     for (const fragment of proseFragments(text)) if (!isAllowed(fragment)) findings.push({ filename, line, text: fragment.trim() });
   }
-  return findings;
+  return findings.sort((left, right) => left.filename.localeCompare(right.filename) || left.line - right.line);
 }
 
 async function filesUnder(root: string, directory: string): Promise<Array<{ filename: string; content: string }>> {

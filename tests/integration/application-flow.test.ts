@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, cp, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -278,6 +278,39 @@ test("再次 acquire 已结束 Work Item 返回中文完成摘要", async () => 
     action: "completed",
     summary: { workItemId: started.workItemId, status: "closed", message: "Workflow 已结束。" },
   });
+});
+
+test("Global 与 Project Skill 在 Snapshot 和公开 Work Package 中使用中文描述", async (t) => {
+  for (const scenario of [
+    { name: "Global", ref: "global://vendor/test", skillPath: (root: string, home: string) => path.join(home, ".agents", "skills", "vendor", "test") },
+    { name: "Project", ref: "project://skills/test", skillPath: (root: string) => path.join(root, ".wsspec", "skills", "test") },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const home = await mkdtemp(path.join(os.tmpdir(), `wspec-${scenario.name.toLowerCase()}-skill-`));
+      const current = await fixture({ home, workflowTrust: { interactive: true, actor: "reviewer" } });
+      const projectPackage = path.join(current.root, ".wsspec", "workflows", "feature-delivery");
+      await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
+      const workflowPath = path.join(projectPackage, "workflow.yaml");
+      await writeFile(workflowPath, (await readFile(workflowPath, "utf8")).replaceAll("builtin://skills/requirement-exploration", scenario.ref), "utf8");
+      const skillDirectory = scenario.skillPath(current.root, home);
+      await mkdir(skillDirectory, { recursive: true });
+      await writeFile(path.join(skillDirectory, "SKILL.md"), "# 测试 Skill\n", "utf8");
+      await git(current.root, "add", ".wsspec");
+      await git(current.root, "commit", "-m", `test: add ${scenario.name} Skill Workflow`);
+      await trustProjectWorkflow(current);
+
+      const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "公开 Skill 描述" }, workflowRef: "project://workflows/feature-delivery", profile: "standard" });
+      const worktree = await worktreeFor(current.root, started.workItemId);
+      const snapshot = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"), "utf8")) as {
+        profiles: { standard: { steps: Array<{ id: string; skills: Array<{ description: string }> }> } };
+      };
+      assert.deepEqual(snapshot.profiles.standard.steps.find(({ id }) => id === "explore")?.skills.map(({ description }) => description), ["已锁定的工作流 Skill。"]);
+
+      const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+      const explore = requireExecute(await submitPackage(current, intake));
+      assert.deepEqual(explore.skills.map(({ description }) => description), ["已锁定的工作流 Skill。"]);
+    });
+  }
 });
 
 test("snapshot and recovery preserve recursive compiled semantics and output content levels", async () => {

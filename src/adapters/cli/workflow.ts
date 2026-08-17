@@ -8,7 +8,7 @@ import type { SkillProvider } from "../../registry/skills/types.js";
 import { loadBuiltinCatalog } from "../../resources/catalog.js";
 import { validate } from "../../schemas/index.js";
 import { writeFileAtomic } from "../../storage/files.js";
-import { loadRepository } from "../../storage/repository.js";
+import { isRepositoryInitialized, loadRepository } from "../../storage/repository.js";
 import { loadWorkflowPackage } from "../../workflow-package/loader.js";
 import { evaluateWorkflowTrust } from "../../workflow-package/trust.js";
 import type { WorkflowPackage } from "../../workflow-package/types.js";
@@ -39,9 +39,9 @@ function parseArgs(argv: string[], positions: number, options: readonly string[]
 }
 async function exists(filename: string): Promise<boolean> { try { await access(filename); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } }
 
-async function validatePackage(root: string, ref: string, home: string, selectedProvider: SkillProvider): Promise<WorkflowPackage> {
+async function validatePackage(root: string, ref: string, home: string, selectedProvider: SkillProvider, allowMissingConfig = false): Promise<WorkflowPackage> {
   const pkg = await loadWorkflowPackage({ root, ref });
-  const { configuration, skills } = await resolveProjectWorkflowContext({ root, pkg, provider: selectedProvider, home });
+  const { configuration, skills } = await resolveProjectWorkflowContext({ root, pkg, provider: selectedProvider, home, allowMissingConfig });
   for (const id of ["quick", "standard", "governed"] as const) {
     compileWorkflow(pkg, {
       id,
@@ -79,7 +79,7 @@ export async function runWorkflowCommand(input: WorkflowCommandInput): Promise<u
   const [command, ...args] = input.argv;
   if (command === "list") { parseArgs(args, 0, []); const catalog = await loadBuiltinCatalog(); return { workflows: catalog.workflows.map(({ workflow }) => ({ ref: `builtin://workflows/${workflow.id}`, id: workflow.id })).sort((left, right) => left.ref.localeCompare(right.ref)) } satisfies WorkflowListResult; }
   if (command === "show") { const parsed = parseArgs(args, 1, []); return packageView(await loadWorkflowPackage({ root: input.root, ref: parsed.positional[0]! })); }
-  if (command === "validate") { const parsed = parseArgs(args, 1, ["--provider"]); const pkg = await validatePackage(input.root, parsed.positional[0]!, input.home ?? process.env.HOME ?? "", provider(parsed.options["--provider"] as string | undefined ?? input.provider)); return { valid: true, workflow: packageView(pkg).workflow }; }
+  if (command === "validate") { const parsed = parseArgs(args, 1, ["--provider"]); const ref = parsed.positional[0]!; const initialized = await isRepositoryInitialized(input.root); const pkg = await validatePackage(input.root, ref, input.home ?? process.env.HOME ?? "", provider(parsed.options["--provider"] as string | undefined ?? input.provider), !initialized && ref.startsWith("builtin://")); return { valid: true, workflow: packageView(pkg).workflow }; }
   if (command === "eject") { const parsed = parseArgs(args, 2, []); return ejectBuiltin(input.root, parsed.positional[0]!, parsed.positional[1]!); }
   if (command === "use") { const parsed = parseArgs(args, 1, ["--profile", "--provider"]); return useWorkflow({ ...input, provider: provider(parsed.options["--provider"] as string | undefined ?? input.provider) }, parsed.positional[0]!, parsed.options["--profile"] as string | undefined); }
   throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知 Workflow 命令：${command ?? ""}`);

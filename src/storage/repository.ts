@@ -86,6 +86,22 @@ export async function loadRepository(cwd: string): Promise<RepositoryIdentity> {
   return identity;
 }
 
+export async function isRepositoryInitialized(cwd: string): Promise<boolean> {
+  let root: string;
+  try {
+    root = await repositoryRoot(cwd);
+  } catch {
+    throw new RepositoryError("WSSPEC_GIT_REPOSITORY_REQUIRED", "WiesenSpecKit M1 只能在 Git 仓库中运行。");
+  }
+  try {
+    await readIdentityFile(root);
+    return true;
+  } catch (error) {
+    if (error instanceof RepositoryError && error.code === "WSSPEC_REPOSITORY_NOT_INITIALIZED") return false;
+    throw error;
+  }
+}
+
 export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   let root: string;
   let commonDir: string;

@@ -100,21 +100,27 @@ function workflowSelection(value: unknown): { ref: string; profile: WorkflowProf
   return { ref: active.ref as string, profile: (source.profile ?? "auto") as WorkflowProfile };
 }
 
+async function readProjectConfigText(root: string, allowMissingConfig: boolean): Promise<string> {
+  try {
+    return await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!allowMissingConfig) throw new ApplicationStartError("WSSPEC_PROJECT_CONFIG_MISSING", "项目配置文件 .wsspec/config.yaml 不存在。");
+    return "version: 1\n";
+  }
+}
+
 export async function resolveProjectWorkflowContext(input: {
   root: string;
   pkg: WorkflowPackage;
   provider: SkillProvider;
   home: string;
   config?: unknown;
+  allowMissingConfig?: boolean;
 }): Promise<{ configuration: ProjectConfiguration; skills: ResolvedSkill[] }> {
   let rawConfig = input.config;
   if (rawConfig === undefined) {
-    try {
-      rawConfig = parse(await readFile(path.join(input.root, ".wsspec", "config.yaml"), "utf8"));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      rawConfig = { version: 1 };
-    }
+    rawConfig = parse(await readProjectConfigText(input.root, input.allowMissingConfig === true));
   }
   const configuration = projectConfiguration(rawConfig, input.pkg);
   const bindings = new Map(allWorkflowSteps(input.pkg.workflow.steps).flatMap((step) => (step.skills ?? []).map((binding) => [binding.ref, binding])));
@@ -136,7 +142,7 @@ function portableSkill(skill: ResolvedSkill, catalog: Awaited<ReturnType<typeof 
     ref: skill.ref,
     version: builtin?.version ?? "locked",
     digest: skill.digest,
-    description: builtin?.description ?? `Locked workflow skill ${skill.ref}`,
+    description: builtin?.description ?? "已锁定的工作流 Skill。",
   };
 }
 
@@ -180,7 +186,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
   const identity = await loadRepository(input.root);
   const [workflowText, configText] = await Promise.all([
     readFile(path.join(identity.repositoryRoot, ".wsspec", "workflow.yaml"), "utf8"),
-    readFile(path.join(identity.repositoryRoot, ".wsspec", "config.yaml"), "utf8"),
+    readProjectConfigText(identity.repositoryRoot, false),
   ]);
   const projectWorkflow = workflowSelection(parse(workflowText));
   const workflowRef = input.workflowRef ?? projectWorkflow.ref;
