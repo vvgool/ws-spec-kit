@@ -73,8 +73,9 @@ function strings(value: unknown, code: `WSSPEC_${string}`, label: string): strin
 
 async function collectTreeFiles(root: string, relativeDirectory: string): Promise<string[]> {
   const directory = path.join(root, relativeDirectory);
+  try { await assertContained(root, directory); }
+  catch (caught) { if ((caught as NodeJS.ErrnoException).code === "ENOENT") return []; throw caught; }
   try {
-    await assertContained(root, directory);
     const entries = await readdir(directory, { withFileTypes: true });
     const files: string[] = [];
     for (const entry of entries) {
@@ -85,10 +86,7 @@ async function collectTreeFiles(root: string, relativeDirectory: string): Promis
       else if ((await lstat(absolute)).isFile() || (await lstat(absolute)).isSymbolicLink()) files.push(relative);
     }
     return files;
-  } catch (caught) {
-    if ((caught as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw caught;
-  }
+  } catch (caught) { throw caught; }
 }
 
 async function collectFile(root: string, relative: string, missingCode: `WSSPEC_${string}` = "WSSPEC_WORKFLOW_PACKAGE_FILE_MISSING"): Promise<WorkflowPackageFile> {
@@ -113,8 +111,9 @@ function parseManifest(value: unknown): WorkflowManifest {
 
 function parseStep(value: unknown): WorkflowStep {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
-  const source = record(value, code, "Workflow Step", ["id", "skills"]);
-  return { id: string(source.id, code, "Step id"), skills: strings(source.skills, code, "Step skills") };
+  const source = record(value, code, "Workflow Step", ["id", "uses", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
+  if (source.skills !== undefined && (!Array.isArray(source.skills) || source.skills.some((skill) => typeof skill !== "string" && (skill === null || typeof skill !== "object" || Array.isArray(skill) || Object.keys(skill).some((key) => !["ref", "required", "fallback"].includes(key)) || typeof (skill as Record<string, unknown>).ref !== "string")))) error(code, "Step skills 必须是引用或绑定对象数组。");
+  return { ...(source as unknown as WorkflowStep), id: string(source.id, code, "Step id"), skills: (source.skills ?? []) as WorkflowStep["skills"] };
 }
 
 function parseGate(value: unknown): WorkflowGate {
@@ -133,23 +132,33 @@ function parseChangePolicy(value: unknown): WorkflowChangePolicy {
 
 function parseWorkflow(value: unknown): WorkflowDefinition {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
-  const source = record(value, code, "workflow.yaml", ["version", "id", "steps", "gates", "changePolicy"]);
+  const source = record(value, code, "workflow.yaml", ["version", "id", "inputs", "steps", "gates", "changePolicy"]);
   if (source.version !== 1) error("WSSPEC_WORKFLOW_PACKAGE_VERSION_UNSUPPORTED", "只支持 Workflow v1。");
   if (!Array.isArray(source.steps) || (source.gates !== undefined && !Array.isArray(source.gates))) error(code, "Workflow steps 和 gates 必须是数组。");
   const changePolicy = source.changePolicy === undefined ? undefined : parseChangePolicy(source.changePolicy);
-  return { version: 1, id: string(source.id, code, "Workflow id"), steps: source.steps.map(parseStep), gates: (source.gates ?? []).map(parseGate), ...(changePolicy === undefined ? {} : { changePolicy }) };
+  return { ...(source as unknown as WorkflowDefinition), version: 1, id: string(source.id, code, "Workflow id"), steps: source.steps.map(parseStep), gates: (source.gates ?? []).map(parseGate), ...(changePolicy === undefined ? {} : { changePolicy }) };
 }
 
 function parseProfile(value: unknown): ProfileDefinition {
   const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
-  const source = record(value, code, "Profile", ["version", "id", "workflow", "design", "reviewIterations", "audit"]);
+  const source = record(value, code, "Profile", ["version", "id", "workflow", "design", "reviewIterations", "audit", "profile", "steps", "publishing"]);
   if (source.version !== 1) error("WSSPEC_WORKFLOW_PACKAGE_VERSION_UNSUPPORTED", "只支持 Profile v1。");
   if (source.design !== undefined && typeof source.design !== "boolean") error(code, "Profile design 必须是布尔值。");
   const reviewIterations = source.reviewIterations;
   const audit = source.audit;
   if (reviewIterations !== undefined && (typeof reviewIterations !== "number" || !Number.isSafeInteger(reviewIterations) || reviewIterations < 1)) error(code, "Profile reviewIterations 必须是正整数。");
-  if (audit !== undefined && audit !== "standard" && audit !== "complete") error(code, "Profile audit 不受支持。");
-  return { version: 1, id: string(source.id, code, "Profile id"), workflow: string(source.workflow, code, "Profile workflow"), ...(source.design === undefined ? {} : { design: source.design }), ...(reviewIterations === undefined ? {} : { reviewIterations: reviewIterations as number }), ...(audit === undefined ? {} : { audit }) };
+  if (audit !== undefined && audit !== "standard" && audit !== "complete" && (audit === null || typeof audit !== "object" || Array.isArray(audit) || Object.keys(audit).some((key) => key !== "level") || !["standard", "complete"].includes((audit as { level?: unknown }).level as string))) error(code, "Profile audit 不受支持。");
+  const identity = source.profile === undefined ? source : record(source.profile, code, "Profile profile", ["id", "workflow"]);
+  return { version: 1, id: string(identity.id, code, "Profile id"), workflow: string(identity.workflow, code, "Profile workflow"), ...(source.design === undefined ? {} : { design: source.design }), ...(reviewIterations === undefined ? {} : { reviewIterations: reviewIterations as number }), ...(audit === undefined ? {} : { audit: audit as Exclude<ProfileDefinition["audit"], undefined> }), ...(source.steps === undefined ? {} : { steps: source.steps }), ...(source.publishing === undefined ? {} : { publishing: source.publishing }) } as ProfileDefinition;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    if (value instanceof Map) { for (const [key, item] of value) { deepFreeze(key); deepFreeze(item); } Object.defineProperties(value, { set: { value: () => { throw new TypeError("不可修改内置 Workflow Package 快照。"); } }, delete: { value: () => { throw new TypeError("不可修改内置 Workflow Package 快照。"); } }, clear: { value: () => { throw new TypeError("不可修改内置 Workflow Package 快照。"); } } }); }
+    else for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 function parseFile(value: unknown): WorkflowPackageFile {
@@ -174,7 +183,10 @@ async function validateExistingLock(root: string, expected: WorkflowPackageLock)
 }
 
 function validatePackageSkillReferences(workflow: WorkflowDefinition, packageSkills: Map<string, { entrypoint: string; digest: string }>): void {
-  for (const step of workflow.steps) for (const ref of step.skills) if (ref.startsWith("package://skills/") && !packageSkills.has(ref)) error("WSSPEC_WORKFLOW_PACKAGE_SKILL_UNDECLARED", "Workflow 引用了 Manifest 未声明的 Package Skill。");
+  for (const step of workflow.steps) for (const binding of step.skills) {
+    const ref = typeof binding === "string" ? binding : binding.ref;
+    if (ref.startsWith("package://skills/") && !packageSkills.has(ref)) error("WSSPEC_WORKFLOW_PACKAGE_SKILL_UNDECLARED", "Workflow 引用了 Manifest 未声明的 Package Skill。");
+  }
 }
 
 export async function loadWorkflowPackage(input: LoadWorkflowPackageInput): Promise<WorkflowPackage> {
@@ -212,6 +224,6 @@ export async function loadWorkflowPackage(input: LoadWorkflowPackageInput): Prom
   const files = [...allFiles.values()].sort((left, right) => left.path.localeCompare(right.path));
   const pkg: WorkflowPackage = { ref: input.ref, root: packageRoot, manifest, workflow, profiles, packageSkills, files, contentDigest: workflowPackageContentDigest(files) };
   await validateExistingLock(packageRoot, lockWorkflowPackage(pkg));
-  if (parsedRef.source === "builtin") builtinProvenance.set(pkg, { ref: pkg.ref, root: pkg.root, contentDigest: pkg.contentDigest, capabilityDigest: manifestCapabilityDigest(pkg.manifest) });
+  if (parsedRef.source === "builtin") { builtinProvenance.set(pkg, { ref: pkg.ref, root: pkg.root, contentDigest: pkg.contentDigest, capabilityDigest: manifestCapabilityDigest(pkg.manifest) }); return deepFreeze(pkg); }
   return pkg;
 }

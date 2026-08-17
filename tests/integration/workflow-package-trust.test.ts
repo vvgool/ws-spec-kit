@@ -32,7 +32,7 @@ test("项目 Package 首次使用要求交互信任，确认后相同摘要可�
   assert.ok(pending.summary.fileDigests.every((entry) => !path.isAbsolute(entry.path)));
   assert.ok(pending.summary.skillDigests.every((entry) => entry.ref === "package://skills/review"));
 
-  const recorded = await recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
+  const recorded = await recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", requestId: pending.summary.requestId, expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
   assert.equal(recorded.decision, "trusted");
   const trusted = await evaluateWorkflowTrust({ root, pkg, interactive: true });
   assert.equal(trusted.status, "trusted");
@@ -49,7 +49,7 @@ test("拒绝记录保持 Package blocked，非交互不会默认接受", async (
   await assert.rejects(evaluateWorkflowTrust({ root, pkg, interactive: false }), /WSSPEC_WORKFLOW_TRUST_REQUIRED/);
   const pending = await evaluateWorkflowTrust({ root, pkg, interactive: true });
   if (pending.status !== "approval_required") throw new Error("expected approval summary");
-  await recordWorkflowTrust({ root, pkg, decision: "rejected", actor: "tester", expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
+  await recordWorkflowTrust({ root, pkg, decision: "rejected", actor: "tester", requestId: pending.summary.requestId, expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
 
   const rejected = await evaluateWorkflowTrust({ root, pkg, interactive: true });
   assert.equal(rejected.status, "rejected");
@@ -62,7 +62,7 @@ test("内容或能力变化使信任失效，但仅搬迁相同内容不失效",
   const trusted = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
   const pending = await evaluateWorkflowTrust({ root, pkg: trusted, interactive: true });
   if (pending.status !== "approval_required") throw new Error("expected approval summary");
-  await recordWorkflowTrust({ root, pkg: trusted, decision: "trusted", actor: "tester", expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
+  await recordWorkflowTrust({ root, pkg: trusted, decision: "trusted", actor: "tester", requestId: pending.summary.requestId, expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
 
   const moved = path.join(root, ".wsspec", "workflows", "moved-feature");
   await mkdir(path.dirname(moved), { recursive: true });
@@ -84,13 +84,27 @@ test("内置 Package 仅由内置信任来源信任", async () => {
   if (decision.status === "trusted") assert.equal(decision.record.actor, "builtin");
 });
 
+test("Builtin Package 的嵌套内容不可在信任前被篡改", async () => {
+  const root = await createGitRepository();
+  const builtin = await loadWorkflowPackage({ root, ref: "builtin://workflows/feature-delivery" });
+  assert.throws(() => builtin.workflow.steps[0]!.skills.push("package://skills/forged"), /TypeError/);
+  assert.equal((await evaluateWorkflowTrust({ root, pkg: builtin, interactive: false })).status, "trusted");
+});
+
+test("没有 pending request 不能直接写入 trusted", async () => {
+  const root = await createGitRepository();
+  await packageFixture(root);
+  const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
+  await assert.rejects(recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", requestId: "missing", expectedPackageDigest: pkg.contentDigest, expectedCapabilityDigest: "sha256:ignored" } as never), /WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID/);
+});
+
 test("externalSideEffects 独立变化使已有信任失效", async () => {
   const root = await createGitRepository();
   const directory = await packageFixture(root);
   const first = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
   const pending = await evaluateWorkflowTrust({ root, pkg: first, interactive: true });
   if (pending.status !== "approval_required") throw new Error("expected approval summary");
-  await recordWorkflowTrust({ root, pkg: first, decision: "trusted", actor: "tester", expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
+  await recordWorkflowTrust({ root, pkg: first, decision: "trusted", actor: "tester", requestId: pending.summary.requestId, expectedPackageDigest: pending.summary.packageDigest, expectedCapabilityDigest: pending.summary.capabilityDigest });
   await writeFile(path.join(directory, "manifest.yaml"), "version: 1\nid: team-feature\nentry: workflow.yaml\nprofiles: []\ncapabilities: [external-read]\nexternalSideEffects: [external-write]\nskills: [review]\n");
   const changed = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
   assert.equal((await evaluateWorkflowTrust({ root, pkg: changed, interactive: true })).status, "approval_required");
@@ -119,11 +133,11 @@ test("信任记录必须匹配用户看到的两个摘要，并拒绝未知持�
   const pkg = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
   await assert.rejects(
     recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester" } as never),
-    /WSSPEC_WORKFLOW_TRUST_CHANGED/,
+    /WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID/,
   );
   await assert.rejects(
-    recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", expectedPackageDigest: "sha256:wrong", expectedCapabilityDigest: "sha256:wrong" }),
-    /WSSPEC_WORKFLOW_TRUST_CHANGED/,
+    recordWorkflowTrust({ root, pkg, decision: "trusted", actor: "tester", requestId: "missing", expectedPackageDigest: "sha256:wrong", expectedCapabilityDigest: "sha256:wrong" }),
+    /WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID/,
   );
   const common = await git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const trustPath = path.join(common, "wsspec", "trust", "workflow-packages.ndjson");

@@ -70,6 +70,23 @@ test("Package Skill 的辅助内容变化会改变 Skill 和 Package 摘要", as
   assert.ok(second.files.some((file) => file.path === "skills/review/scripts/review.sh"));
 });
 
+test("Skill 树的悬空链接必须 fail closed", async () => {
+  const root = await temporaryRoot();
+  const directory = await packageFixture(root);
+  await symlink(path.join(root, "missing-target"), path.join(directory, "skills", "review", "dangling"));
+  await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /ENOENT|WSSPEC_WORKFLOW_PACKAGE_PATH_ESCAPE/);
+});
+
+test("保真加载完整 Step 与 Profile overlay 字段", async () => {
+  const root = await temporaryRoot();
+  const directory = await packageFixture(root);
+  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nid: team-feature\ninputs: { requirement: { accepts: [user.prompt] } }\nsteps:\n  - id: review\n    uses: agent.execute\n    needs: []\n    when: '${bindings.issue.exists}'\n    retry: { maxAttempts: 2 }\n    loop: { until: '${review.approved}', maxIterations: 2 }\n    approval: required\n    inputs: [{ artifact: specification, required: true }]\n    outputs: [result]\n    skills: [{ ref: package://skills/review, required: true }]\n");
+  await writeFile(path.join(directory, "profiles", "standard.yaml"), "version: 1\nprofile: { id: standard, workflow: team-feature }\nsteps: { review: { enabled: true, approval: false, artifactLevel: compact, gates: [test] } }\npublishing: { issueRequired: false, knowledgeRequired: false }\naudit: { level: standard }\n");
+  const loaded = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
+  assert.equal(loaded.workflow.steps[0]!.uses, "agent.execute");
+  assert.equal((loaded.profiles.get("standard")?.audit as { level?: string } | undefined)?.level, "standard");
+});
+
 test("Manifest、Workflow、Profile、Schema 和 Template 的变化均改变 Package 摘要", async () => {
   const root = await temporaryRoot();
   const directory = await packageFixture(root);
