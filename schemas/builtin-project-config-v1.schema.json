@@ -4,11 +4,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "version",
-    "trigger",
-    "git",
-    "runtime",
-    "quality"
+    "version"
   ],
   "properties": {
     "version": {
@@ -161,6 +157,42 @@
         "targets": {
           "type": "object",
           "additionalProperties": false
+        }
+      }
+    },
+    "documentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowedPaths"
+      ],
+      "properties": {
+        "allowedPaths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "skills": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "additionalGlobalRoots"
+      ],
+      "properties": {
+        "additionalGlobalRoots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }

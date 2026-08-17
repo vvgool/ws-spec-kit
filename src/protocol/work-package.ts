@@ -7,6 +7,7 @@ export interface ArtifactReference {
   revision?: number;
   contentHash?: string;
   mediaType?: string;
+  contentLevel?: string;
 }
 
 export interface ResolvedSkillDescriptor {
@@ -32,6 +33,7 @@ export interface WorkPackage {
     expiresAt: string;
   };
   objective: string;
+  artifactLevel?: string;
   skills: ResolvedSkillDescriptor[];
   artifacts: ArtifactReference[];
   constraints: {
@@ -42,4 +44,3 @@ export interface WorkPackage {
   gates: WorkPackageGate[];
   resultSchema: "builtin.submit-result.v1";
 }
-

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.workflow-selection.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "activeWorkflow"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "activeWorkflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "version"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^(builtin|project)://workflows/[a-z0-9][a-z0-9-]*$"
+        },
+        "version": {
+          "const": 1
+        }
+      }
+    },
+    "profile": {
+      "enum": [
+        "auto",
+        "quick",
+        "standard",
+        "governed"
+      ]
+    }
+  }
+}

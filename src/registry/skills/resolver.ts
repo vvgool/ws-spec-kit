@@ -7,6 +7,7 @@ import { assertContainedPath } from "../../workflow-package/path-boundary.js";
 import { workflowPackageContentDigest } from "../../workflow-package/lock.js";
 import { WorkflowPackageError } from "../../workflow-package/types.js";
 import type { WorkflowSkillBinding } from "../../workflow-package/types.js";
+import type { WorkflowPackage } from "../../workflow-package/types.js";
 import { parseSkillLock } from "./lock.js";
 import type { ResolvedSkill, ResolvedSkillFallback, ResolvedSkillPrimary, SkillCandidate, SkillLockEntry, SkillProvider, SkillResolverContext, SkillSource } from "./types.js";
 import { SkillResolutionError } from "./types.js";
@@ -30,6 +31,8 @@ interface SearchRoot {
   rootId: string;
   directory: string;
 }
+
+type ResolutionContext = Omit<SkillResolverContext, "package"> & { package?: WorkflowPackage };
 
 const defaultGlobalRoots: Record<SkillProvider, string[]> = {
   codex: [".agents/skills"],
@@ -127,7 +130,7 @@ async function candidate(root: SearchRoot, segments: string[]): Promise<(SkillCa
   return { rootId: root.rootId, entrypoint, digest: await skillDirectoryDigest(root.directory, skillDirectory) };
 }
 
-function globalRoots(context: SkillResolverContext): SearchRoot[] {
+function globalRoots(context: ResolutionContext): SearchRoot[] {
   if (!path.isAbsolute(context.home)) error("WSSPEC_SKILL_PATH_INVALID", "Skill Resolver home 必须是绝对路径。");
   const defaults = defaultGlobalRoots[context.provider].map((relative, index) => ({
     rootId: `${context.provider}:default:${index}`,
@@ -144,7 +147,7 @@ function globalRoots(context: SkillResolverContext): SearchRoot[] {
   return [...defaults, ...additional];
 }
 
-async function resolveGlobal(parsed: ParsedSkillRef, context: SkillResolverContext): Promise<ResolvedReference | undefined> {
+async function resolveGlobal(parsed: ParsedSkillRef, context: ResolutionContext): Promise<ResolvedReference | undefined> {
   const found = (await Promise.all(globalRoots(context).map((root) => candidate(root, parsed.segments)))).filter((item): item is SkillCandidate & { entrypoint: string } => item !== undefined);
   if (found.length === 0) return undefined;
   if (new Set(found.map(({ digest }) => digest)).size !== 1) error("WSSPEC_SKILL_AMBIGUOUS", `Global Skill ${parsed.ref} 在多个根中内容不一致。`);
@@ -172,7 +175,8 @@ async function resolveBuiltin(parsed: ParsedSkillRef): Promise<ResolvedReference
   return { ref: parsed.ref, source: "builtin", rootId: "builtin", entrypoint: skill.entry, digest, candidates: [{ rootId: "builtin", digest }] };
 }
 
-async function resolvePackage(parsed: ParsedSkillRef, context: SkillResolverContext): Promise<ResolvedReference | undefined> {
+async function resolvePackage(parsed: ParsedSkillRef, context: ResolutionContext): Promise<ResolvedReference | undefined> {
+  if (context.package === undefined) error("WSSPEC_SKILL_CONTEXT_INVALID", "Package Skill 解析缺少 Workflow Package 上下文。");
   const id = parsed.segments[1]!;
   if (!context.package.manifest.skills.includes(id)) throw new WorkflowPackageError("WSSPEC_WORKFLOW_PACKAGE_SKILL_UNDECLARED", "Skill 未在当前 Workflow Package Manifest 中声明。");
   const declared = context.package.packageSkills.get(parsed.ref);
@@ -197,7 +201,7 @@ async function resolvePackage(parsed: ParsedSkillRef, context: SkillResolverCont
   return { ref: parsed.ref, source: "package", rootId: candidate.rootId, entrypoint: expectedEntrypoint, digest: candidate.digest, candidates: [candidate] };
 }
 
-async function resolveProject(parsed: ParsedSkillRef, context: SkillResolverContext): Promise<ResolvedReference | undefined> {
+async function resolveProject(parsed: ParsedSkillRef, context: ResolutionContext): Promise<ResolvedReference | undefined> {
   if (!path.isAbsolute(context.projectRoot)) error("WSSPEC_SKILL_PATH_INVALID", "Skill Resolver projectRoot 必须是绝对路径。");
   const projectConfigurationRoot = path.join(context.projectRoot, ".wsspec");
   if (!(await exists(projectConfigurationRoot))) return undefined;
@@ -212,7 +216,7 @@ async function resolveProject(parsed: ParsedSkillRef, context: SkillResolverCont
   return { ref: parsed.ref, source: "project", rootId: found.rootId, entrypoint: found.entrypoint, digest: found.digest, candidates: [{ rootId: found.rootId, digest: found.digest }] };
 }
 
-async function resolveReference(ref: string, context: SkillResolverContext): Promise<ResolvedReference | undefined> {
+async function resolveReference(ref: string, context: ResolutionContext): Promise<ResolvedReference | undefined> {
   const parsed = parseSkillRef(ref);
   if (parsed.source === "builtin") return resolveBuiltin(parsed);
   if (parsed.source === "package") return resolvePackage(parsed, context);
@@ -233,7 +237,7 @@ function lockedPrimaryDescriptor(lock: SkillLockEntry): ResolvedSkillPrimary | u
   return { ref: lock.requested, source: lock.source, rootId: lock.rootId, digest: lock.digest, candidates: lock.candidates };
 }
 
-function assertLockIdentity(lock: SkillLockEntry, binding: WorkflowSkillBinding, context: SkillResolverContext, requested: ParsedSkillRef): void {
+function assertLockIdentity(lock: SkillLockEntry, binding: WorkflowSkillBinding, context: ResolutionContext, requested: ParsedSkillRef): void {
   if (lock.requested !== binding.ref || lock.resolved !== binding.ref || lock.source !== requested.source || lock.provider !== context.provider || lock.required !== (binding.required ?? true)) {
     error("WSSPEC_SKILL_LOCK_CHANGED", "Skill Lock 与当前绑定或 Provider 不一致。");
   }
@@ -257,6 +261,10 @@ export function resolveSkill(binding: WorkflowSkillBinding & { required: false }
 export function resolveSkill(binding: WorkflowSkillBinding & { required?: true }, context: SkillResolverContext): Promise<ResolvedSkill>;
 export function resolveSkill(binding: WorkflowSkillBinding, context: SkillResolverContext): Promise<ResolvedSkill | undefined>;
 export async function resolveSkill(binding: WorkflowSkillBinding, context: SkillResolverContext): Promise<ResolvedSkill | undefined> {
+  return resolveSkillWithContext(binding, context);
+}
+
+async function resolveSkillWithContext(binding: WorkflowSkillBinding, context: ResolutionContext): Promise<ResolvedSkill | undefined> {
   if (context.stepStatus !== "not_started" && context.stepStatus !== "started") error("WSSPEC_SKILL_CONTEXT_INVALID", "Skill Resolver 必须显式声明 Step 状态。");
   if (context.stepStatus === "started" && context.lock === undefined) error("WSSPEC_SKILL_LOCK_CHANGED", "已开始的 Step 必须提供 Skill Lock。");
   const requested = parseSkillRef(binding.ref);
@@ -323,4 +331,28 @@ export async function resolveSkill(binding: WorkflowSkillBinding, context: Skill
     ...(resolvedPrimary === undefined ? {} : { primary: resolvedPrimary }),
     ...(fallback === undefined ? {} : { fallback: fallbackDescriptor(fallback) }),
   };
+}
+
+export async function revalidateGlobalSkillLock(input: {
+  lock: unknown;
+  provider: SkillProvider;
+  projectRoot: string;
+  home: string;
+  additionalGlobalRoots?: string[];
+}): Promise<void> {
+  const lock = parseSkillLock(input.lock);
+  for (const entry of lock.skills.filter(({ source }) => source === "global")) {
+    await resolveSkillWithContext({
+      ref: entry.requested,
+      required: entry.required,
+      ...(entry.fallback === undefined ? {} : { fallback: entry.fallback.ref }),
+    }, {
+      provider: input.provider,
+      projectRoot: input.projectRoot,
+      home: input.home,
+      stepStatus: "not_started",
+      lock,
+      ...(input.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: input.additionalGlobalRoots }),
+    });
+  }
 }

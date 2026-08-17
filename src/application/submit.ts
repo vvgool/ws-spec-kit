@@ -1,7 +1,6 @@
-import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import { computeArtifactContentHash, readArtifact } from "../domain/artifacts.js";
+import { verifyArtifact } from "../domain/artifacts.js";
 import { computeWorkspaceSnapshot, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { prepareArtifactApproval } from "../engine/approvals.js";
@@ -82,23 +81,20 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 路径必须位于工作区内。 ");
   }
   const filename = path.join(state.worktree, normalized);
-  const [realRoot, realFile] = await Promise.all([realpath(state.worktree), realpath(filename)]);
-  const relative = path.relative(realRoot, realFile);
-  if (relative.startsWith("..") || path.isAbsolute(relative) || relative === "") {
-    throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 真实路径越出工作区。 ");
-  }
-  const artifact = await readArtifact(realFile);
-  if (artifact.metadata.artifactType !== reference.artifactType
-    || artifact.metadata.workItemId !== state.item.workItemId
-    || artifact.metadata.stageId !== step.id
-    || artifact.metadata.attemptId !== attemptId
-    || artifact.metadata.revision !== reference.revision
-    || artifact.metadata.contentHash !== reference.contentHash) {
+  const verified = await verifyArtifact(filename, {
+    repositoryRoot: state.worktree,
+    artifactType: reference.artifactType,
+    workItemId: state.item.workItemId,
+    stageId: step.id,
+    attemptId,
+  }, { allowUnregisteredType: true });
+  if (verified.artifactType !== reference.artifactType
+    || verified.schemaVersion !== reference.schemaVersion
+    || verified.path !== normalized
+    || verified.revision !== reference.revision
+    || verified.contentHash !== reference.contentHash
+    || (reference.mediaType !== undefined && verified.mediaType !== reference.mediaType)) {
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 身份与提交引用不一致。 `);
-  }
-  const { contentHash: _contentHash, ...metadata } = artifact.metadata;
-  if (computeArtifactContentHash(metadata, artifact.body) !== reference.contentHash) {
-    throw new ApplicationSubmitError("WSSPEC_ARTIFACT_HASH_MISMATCH", `Artifact ${reference.artifactType} 内容摘要不匹配。 `);
   }
 }
 

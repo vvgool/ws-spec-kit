@@ -3,6 +3,7 @@ import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import type { AgentAction, AcquireInput, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
+import { revalidateGlobalSkillLock } from "../registry/skills/resolver.js";
 import { validate } from "../schemas/index.js";
 import { applicationCloseEvidenceKey, recoverControlPlane, type ApplicationCloseEvidence, type RuntimeClaim, type RuntimeProjection } from "../storage/control-plane.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
@@ -12,6 +13,7 @@ import { loadApplicationState, selectedProfile } from "./state.js";
 export interface AcquireDependencies {
   now(): Date;
   executors: ExecutorRegistry;
+  home: string;
 }
 
 export interface ApplicationAttemptRecord {
@@ -90,7 +92,11 @@ function workPackageFor(input: {
   const gatesById = new Map(input.snapshot.gates.map((gate) => [gate.id, gate]));
   const requiredOutputs = input.step.outputs.filter((output) => output.required).map((output) => {
     if (output.artifact === "requirement-source") return input.snapshot.source;
-    return { artifactType: output.artifact, schemaVersion: 1 } as const;
+    return {
+      artifactType: output.artifact,
+      schemaVersion: 1,
+      ...(output.contentLevel === undefined ? {} : { contentLevel: output.contentLevel }),
+    } as const;
   });
   const value: WorkPackage = {
     version: 1,
@@ -99,6 +105,7 @@ function workPackageFor(input: {
     attemptId: input.attemptId,
     lease: { token: input.token, expiresAt: input.expiresAt },
     objective: input.step.objective ?? `${input.step.uses}${input.step.action === undefined ? "" : `/${input.step.action}`}`,
+    ...(input.step.artifactLevel === undefined ? {} : { artifactLevel: input.step.artifactLevel }),
     skills: input.step.skills.map((skill) => ({ ...skill })),
     artifacts: priorArtifacts(input.projection, input.snapshot),
     constraints: {
@@ -173,6 +180,13 @@ export async function acquireNextLocked(input: {
         : completed(state.item.workItemId, "closed", "Workflow completed"),
     };
   }
+  await revalidateGlobalSkillLock({
+    lock: state.snapshot.skillLock,
+    provider: state.snapshot.skillResolution.provider,
+    projectRoot: state.worktree,
+    home: dependencies.home,
+    additionalGlobalRoots: state.snapshot.skillResolution.additionalGlobalRoots,
+  });
   dependencies.executors.assertStep(step as unknown as CompiledStepShape);
   if (step.uses === "control.close") {
     let stage = transitionStage(projection.stages[step.id]!, { type: "transition", to: "running" });

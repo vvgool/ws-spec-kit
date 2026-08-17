@@ -68,6 +68,10 @@
               "type": "string",
               "minLength": 1
             },
+            "artifactLevel": {
+              "type": "string",
+              "minLength": 1
+            },
             "skills": {
               "type": "array",
               "items": {
@@ -130,6 +134,10 @@
                   },
                   "mediaType": {
                     "type": "string"
+                  },
+                  "contentLevel": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 }
               }
@@ -189,6 +197,10 @@
                   },
                   "mediaType": {
                     "type": "string"
+                  },
+                  "contentLevel": {
+                    "type": "string",
+                    "minLength": 1
                   }
                 }
               }

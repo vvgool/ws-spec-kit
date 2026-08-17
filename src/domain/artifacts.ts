@@ -190,14 +190,21 @@ function verifyStructuredContent(type: string, body: string): void {
   }
 }
 
-function verifySections(type: string, body: string): void {
+function verifySections(type: string, body: string, allowUnregisteredType: boolean): void {
   const sections = sectionContracts[type];
-  if (sections === undefined) throw new ArtifactError("WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND", `未注册内置 Artifact 类型：${type}`);
+  if (sections === undefined) {
+    if (allowUnregisteredType) return;
+    throw new ArtifactError("WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND", `未注册内置 Artifact 类型：${type}`);
+  }
   for (const section of sections) sectionBody(type, section, body);
   verifyStructuredContent(type, body);
 }
 
-export async function verifyArtifact(filename: string, expected: ArtifactExpectation): Promise<ArtifactReference> {
+export async function verifyArtifact(
+  filename: string,
+  expected: ArtifactExpectation,
+  options: { allowUnregisteredType?: boolean } = {},
+): Promise<ArtifactReference> {
   const [root, actual] = await Promise.all([realpath(expected.repositoryRoot), realpath(filename)]);
   const relative = path.relative(root, actual);
   if (relative.startsWith("..") || path.isAbsolute(relative) || relative === "") {
@@ -213,7 +220,7 @@ export async function verifyArtifact(filename: string, expected: ArtifactExpecta
   ) {
     throw new ArtifactError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 类型或生产者身份与预期不符。");
   }
-  verifySections(metadata.artifactType, artifact.body);
+  verifySections(metadata.artifactType, artifact.body, options.allowUnregisteredType === true);
   const { contentHash, ...metadataWithoutHash } = metadata;
   const actualHash = computeArtifactContentHash(metadataWithoutHash, artifact.body);
   if (actualHash !== contentHash) {

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createApplication, type ApplicationDependencies } from "../../src/application/application.js";
+import { parseApplicationSnapshot } from "../../src/application/snapshot.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { sha256 } from "../../src/domain/digests.js";
 import type { AgentAction, SubmitResult } from "../../src/protocol/application.js";
@@ -42,6 +43,31 @@ async function worktreeFor(root: string, workItemId: string): Promise<string> {
   const projection = await readControlPlane(root, workItemId);
   const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
   return path.join(root, locator.worktree);
+}
+
+async function rewriteApplicationSnapshot(
+  current: Fixture,
+  workItemId: string,
+  mutate: (snapshot: Record<string, unknown>) => void,
+): Promise<{ controlPlane: string; snapshot: Record<string, unknown> }> {
+  const worktree = await worktreeFor(current.root, workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", workItemId);
+  const applicationPath = path.join(itemRoot, "snapshot", "application.json");
+  const manifestPath = path.join(itemRoot, "work-item.yaml");
+  const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as Record<string, unknown>;
+  mutate(snapshot);
+  const applicationText = `${JSON.stringify(snapshot, null, 2)}\n`;
+  await writeFile(applicationPath, applicationText, "utf8");
+  const manifest = await readFile(manifestPath, "utf8");
+  const updatedManifest = manifest.replace(/workflowDigest: sha256:[a-f0-9]+/u, `workflowDigest: ${sha256(applicationText)}`);
+  assert.notEqual(updatedManifest, manifest);
+  await writeFile(manifestPath, updatedManifest, "utf8");
+  const projection = await readControlPlane(current.root, workItemId);
+  const anchorPath = path.join(projection.controlPlane, "application-anchor.json");
+  const anchor = JSON.parse(await readFile(anchorPath, "utf8")) as Record<string, unknown>;
+  anchor.manifestDigest = sha256(updatedManifest);
+  await writeFile(anchorPath, `${JSON.stringify(anchor, null, 2)}\n`, "utf8");
+  return { controlPlane: projection.controlPlane, snapshot };
 }
 
 function completedResult(workPackage: WorkPackage, artifacts = workPackage.requiredOutputs): SubmitResult {
@@ -131,6 +157,65 @@ async function prepareApproval(current: Fixture): Promise<{
   return { started, clarify, awaiting: action, worktree };
 }
 
+async function installGlobalSkillWorkflow(current: Fixture, home: string): Promise<void> {
+  const projectPackage = path.join(current.root, ".wsspec", "workflows", "feature-delivery");
+  await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
+  const workflowPath = path.join(projectPackage, "workflow.yaml");
+  const workflow = await readFile(workflowPath, "utf8");
+  await writeFile(workflowPath, workflow.replaceAll("builtin://skills/requirement-exploration", "global://vendor/test"), "utf8");
+  await mkdir(path.join(home, ".agents", "skills", "vendor", "test"), { recursive: true });
+  await writeFile(path.join(home, ".agents", "skills", "vendor", "test", "SKILL.md"), "# Global Test\n", "utf8");
+  await git(current.root, "add", ".wsspec/workflows/feature-delivery");
+  await git(current.root, "commit", "-m", "test: add global Skill Workflow");
+}
+
+async function installArtifactContractWorkflow(current: Fixture, artifactType: string): Promise<void> {
+  const projectPackage = path.join(current.root, ".wsspec", "workflows", "feature-delivery");
+  await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
+  const workflowPath = path.join(projectPackage, "workflow.yaml");
+  const workflow = await readFile(workflowPath, "utf8");
+  await writeFile(workflowPath, workflow.replace("outputs: [exploration-report]", `outputs: [${artifactType}]`), "utf8");
+  await git(current.root, "add", ".wsspec/workflows/feature-delivery");
+  await git(current.root, "commit", "-m", `test: declare ${artifactType} output`);
+}
+
+async function installRetryWorkflow(current: Fixture): Promise<void> {
+  const projectPackage = path.join(current.root, ".wsspec", "workflows", "feature-delivery");
+  await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
+  const workflowPath = path.join(projectPackage, "workflow.yaml");
+  const workflow = await readFile(workflowPath, "utf8");
+  const withRetry = workflow.replace(
+    "  - id: plan\n    uses: agent.execute\n",
+    "  - id: plan\n    uses: agent.execute\n    retry: { maxAttempts: 3 }\n",
+  );
+  assert.notEqual(withRetry, workflow);
+  await writeFile(workflowPath, withRetry, "utf8");
+  await git(current.root, "add", ".wsspec/workflows/feature-delivery");
+  await git(current.root, "commit", "-m", "test: add Workflow retry policy");
+}
+
+async function trustProjectWorkflow(current: Fixture): Promise<void> {
+  let request: { requestId: string; packageDigest: string; capabilityDigest: string } | undefined;
+  await assert.rejects(
+    current.app.start({ root: current.root, source: { type: "prompt", text: "Global Skill lock" }, workflowRef: "project://workflows/feature-delivery" }),
+    (error: unknown) => {
+      if (!(error instanceof Error) || !("code" in error) || (error as Error & { code: string }).code !== "WSSPEC_WORKFLOW_TRUST_REQUIRED") return false;
+      request = (error as unknown as Error & { details: typeof request }).details;
+      return request !== undefined;
+    },
+  );
+  assert.ok(request);
+  await current.app.decide({
+    kind: "workflow_trust",
+    root: current.root,
+    requestId: request.requestId,
+    decision: "trusted",
+    expectedPackageDigest: request.packageDigest,
+    expectedCapabilityDigest: request.capabilityDigest,
+    actor: "reviewer",
+  });
+}
+
 test("start resolves explicit or active Workflow and persists a complete immutable snapshot", async () => {
   const explicit = await fixture();
   await writeFile(path.join(explicit.root, "requirement.md"), "只更新文档\n", "utf8");
@@ -180,6 +265,133 @@ test("start resolves explicit or active Workflow and persists a complete immutab
   assert.equal(inspected.status, "active");
 });
 
+test("snapshot and recovery preserve recursive compiled semantics and output content levels", async () => {
+  const current = await fixture({ workflowTrust: { interactive: true, actor: "reviewer" } });
+  await installRetryWorkflow(current);
+  await trustProjectWorkflow(current);
+  const started = await current.app.start({
+    root: current.root,
+    source: { type: "prompt", text: "保留编译后的执行语义" },
+    workflowRef: "project://workflows/feature-delivery",
+    profile: "quick",
+  });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const application = JSON.parse(await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8")) as {
+    profiles: Record<string, { steps: Array<{
+      id: string;
+      artifactLevel?: string;
+      until?: string;
+      retry?: { maxAttempts: number };
+      maxIterations?: number;
+      independentReviewActor?: boolean;
+      outputs: Array<{ artifact: string; required: boolean; contentLevel?: string }>;
+      steps?: Array<{ id: string }>;
+    }> }>;
+  };
+  const governedReviewFix = application.profiles.governed?.steps.find(({ id }) => id === "review-fix");
+  assert.equal(governedReviewFix?.until, "${review-result.approved}");
+  assert.equal(governedReviewFix?.maxIterations, 5);
+  assert.equal(governedReviewFix?.independentReviewActor, true);
+  assert.deepEqual(governedReviewFix?.steps?.map(({ id }) => id), ["review", "fix", "verify"]);
+  const quickPlan = application.profiles.quick?.steps.find(({ id }) => id === "plan");
+  assert.equal(quickPlan?.artifactLevel, "compact");
+  assert.deepEqual(quickPlan?.retry, { maxAttempts: 3 });
+  assert.deepEqual(quickPlan?.outputs, [{ artifact: "tasks", required: true, contentLevel: "compact" }]);
+
+  const projection = await readControlPlane(current.root, started.workItemId);
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+
+  const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  const explore = requireExecute(await submitPackage(current, intake));
+  const exploration = await writeArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    workPackage: explore,
+    artifactType: "exploration-report",
+    body: "# Exploration\n\nRepository facts.\n",
+  });
+  const clarify = requireExecute(await submitPackage(current, explore, completedResult(explore, [exploration])));
+  const specification = await writeArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    workPackage: clarify,
+    artifactType: "specification",
+    body: [
+      "# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "需求",
+      "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
+    ].join("\n"),
+  });
+  const plan = requireExecute(await submitPackage(current, clarify, completedResult(clarify, [specification])));
+  assert.equal(plan.stepId, "plan");
+  assert.equal(plan.artifactLevel, "compact");
+  assert.deepEqual(plan.requiredOutputs, [{ artifactType: "tasks", schemaVersion: 1, contentLevel: "compact" }]);
+});
+
+test("application snapshot parser rejects unknown and malformed recursive fields", async () => {
+  const current = await fixture();
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "严格解析快照" } });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const applicationPath = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json");
+  const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as Record<string, unknown>;
+  assert.equal(parseApplicationSnapshot(snapshot).version, 1);
+
+  const corruptions: Array<[string, (value: Record<string, unknown>) => void]> = [
+    ["top-level unknown field", (value) => { value.typo = true; }],
+    ["nested Step unknown field", (value) => {
+      const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      const reviewFix = profiles.governed!.steps.find(({ id }) => id === "review-fix")!;
+      (reviewFix.steps as Array<Record<string, unknown>>)[0]!.typo = true;
+    }],
+    ["missing recursive steps", (value) => {
+      const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      delete profiles.quick!.steps[0]!.steps;
+    }],
+    ["invalid output content level", (value) => {
+      const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      const plan = profiles.quick!.steps.find(({ id }) => id === "plan")!;
+      (plan.outputs as Array<Record<string, unknown>>)[0]!.contentLevel = 1;
+    }],
+  ];
+  for (const [name, mutate] of corruptions) {
+    const corrupted = structuredClone(snapshot);
+    mutate(corrupted);
+    assert.throws(
+      () => parseApplicationSnapshot(corrupted),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_APPLICATION_SNAPSHOT_INVALID",
+      name,
+    );
+  }
+});
+
+test("acquire and recovery reject structurally invalid Application snapshots with coordinated digests", async (t) => {
+  await t.test("acquire", async () => {
+    const current = await fixture();
+    const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "Acquire 严格解析" } });
+    await rewriteApplicationSnapshot(current, started.workItemId, (snapshot) => { snapshot.typo = true; });
+    await assert.rejects(
+      current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_APPLICATION_SNAPSHOT_INVALID",
+    );
+  });
+
+  await t.test("recovery", async () => {
+    const current = await fixture();
+    const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "Recovery 严格解析" } });
+    const rewritten = await rewriteApplicationSnapshot(current, started.workItemId, (snapshot) => {
+      const profiles = snapshot.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      const reviewFix = profiles.governed!.steps.find(({ id }) => id === "review-fix")!;
+      (reviewFix.steps as Array<Record<string, unknown>>)[0]!.typo = true;
+    });
+    await writeFile(path.join(rewritten.controlPlane, "runtime.json"), "not-json\n", "utf8");
+    await assert.rejects(
+      recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_APPLICATION_SNAPSHOT_INVALID",
+    );
+  });
+});
+
 test("start rejects unknown Workflows and non-repository or unsupported file sources", async () => {
   const current = await fixture();
   await assert.rejects(
@@ -195,6 +407,39 @@ test("start rejects unknown Workflows and non-repository or unsupported file sou
     current.app.start({ root: current.root, source: { type: "file", path: "../outside.md" } }),
     (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SOURCE_PATH_INVALID",
   );
+});
+
+test("start strictly validates project config and Workflow selection files", async (t) => {
+  const cases: Array<{
+    name: string;
+    file: "config.yaml" | "workflow.yaml";
+    value: unknown;
+    code: string;
+    path: string;
+  }> = [
+    { name: "config root unknown", file: "config.yaml", value: { version: 1, unknownSecuritySetting: true }, code: "WSSPEC_SCHEMA_UNKNOWN_FIELD", path: "/unknownSecuritySetting" },
+    { name: "config nested unknown", file: "config.yaml", value: { version: 1, runtime: { claimTtlSeconds: 60, maxStageRetries: 3, typo: true } }, code: "WSSPEC_SCHEMA_UNKNOWN_FIELD", path: "/runtime/typo" },
+    { name: "config claim TTL below range", file: "config.yaml", value: { version: 1, runtime: { claimTtlSeconds: 59, maxStageRetries: 3 } }, code: "WSSPEC_SCHEMA_INVALID_VALUE", path: "/runtime/claimTtlSeconds" },
+    { name: "config retry limit above range", file: "config.yaml", value: { version: 1, runtime: { claimTtlSeconds: 60, maxStageRetries: 11 } }, code: "WSSPEC_SCHEMA_INVALID_VALUE", path: "/runtime/maxStageRetries" },
+    { name: "Workflow root unknown", file: "workflow.yaml", value: { version: 1, activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 }, typo: true }, code: "WSSPEC_SCHEMA_UNKNOWN_FIELD", path: "/typo" },
+    { name: "Workflow nested unknown", file: "workflow.yaml", value: { version: 1, activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1, typo: true } }, code: "WSSPEC_SCHEMA_UNKNOWN_FIELD", path: "/activeWorkflow/typo" },
+    { name: "Workflow profile invalid", file: "workflow.yaml", value: { version: 1, activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 }, profile: "fast" }, code: "WSSPEC_SCHEMA_INVALID_VALUE", path: "/profile" },
+  ];
+
+  for (const currentCase of cases) {
+    await t.test(currentCase.name, async () => {
+      const current = await fixture();
+      await writeFile(path.join(current.root, ".wsspec", currentCase.file), `${JSON.stringify(currentCase.value)}\n`, "utf8");
+      await assert.rejects(
+        current.app.start({ root: current.root, source: { type: "prompt", text: "严格配置" } }),
+        (error: unknown) => error instanceof Error
+          && "code" in error
+          && "path" in error
+          && (error as Error & { code: string }).code === currentCase.code
+          && (error as Error & { path: string }).path === currentCase.path,
+      );
+    });
+  }
 });
 
 test("start preserves a foreign control-plane collision while rolling back its own branch, worktree and locator", async () => {
@@ -329,6 +574,88 @@ test("project Workflow start requires a persisted trust decision before creating
   assert.equal(decision.action, "blocked");
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "可信项目流程" }, workflowRef: "project://workflows/feature-delivery" });
   assert.equal(started.workflowRef, "project://workflows/feature-delivery");
+});
+
+test("acquire revalidates every locked Global Skill before issuing a Work Package", async (t) => {
+  for (const scenario of [
+    {
+      name: "modified selected candidate",
+      expectedCode: "WSSPEC_SKILL_LOCK_CHANGED",
+      mutate: async (home: string) => writeFile(path.join(home, ".agents", "skills", "vendor", "test", "SKILL.md"), "# Changed Global Test\n", "utf8"),
+    },
+    {
+      name: "deleted selected candidate",
+      expectedCode: "WSSPEC_SKILL_LOCK_CHANGED",
+      mutate: async (home: string) => rm(path.join(home, ".agents", "skills", "vendor", "test"), { recursive: true }),
+    },
+    {
+      name: "new conflicting candidate",
+      expectedCode: "WSSPEC_SKILL_AMBIGUOUS",
+      mutate: async (home: string) => {
+        const candidate = path.join(home, ".cursor", "skills", "vendor", "test");
+        await mkdir(candidate, { recursive: true });
+        await writeFile(path.join(candidate, "SKILL.md"), "# Conflicting Global Test\n", "utf8");
+      },
+    },
+  ] as const) {
+    await t.test(scenario.name, async () => {
+      const home = path.join(os.tmpdir(), `wsspec-application-home-${crypto.randomUUID()}`);
+      const current = await fixture({ provider: "cursor", home, workflowTrust: { interactive: true, actor: "reviewer" } });
+      await installGlobalSkillWorkflow(current, home);
+      await trustProjectWorkflow(current);
+      const started = await current.app.start({
+        root: current.root,
+        source: { type: "prompt", text: "Global Skill lock" },
+        workflowRef: "project://workflows/feature-delivery",
+      });
+
+      await scenario.mutate(home);
+
+      await assert.rejects(
+        current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+        (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === scenario.expectedCode,
+      );
+    });
+  }
+});
+
+test("submit validates malformed bodies for every built-in Artifact contract", async (t) => {
+  for (const artifactType of [
+    "specification",
+    "design",
+    "plan",
+    "tasks",
+    "implementation-result",
+    "review-result",
+    "verification-result",
+    "knowledge-entry",
+  ]) {
+    await t.test(artifactType, async () => {
+      const current = await fixture({ workflowTrust: { interactive: true, actor: "reviewer" } });
+      await installArtifactContractWorkflow(current, artifactType);
+      await trustProjectWorkflow(current);
+      const started = await current.app.start({
+        root: current.root,
+        source: { type: "prompt", text: `validate ${artifactType}` },
+        workflowRef: "project://workflows/feature-delivery",
+      });
+      const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+      const explore = requireExecute(await submitPackage(current, intake));
+      const worktree = await worktreeFor(current.root, started.workItemId);
+      const malformed = await writeArtifact({
+        worktree,
+        workItemId: started.workItemId,
+        workPackage: explore,
+        artifactType,
+        body: "# Malformed\n\nMissing the required contract body.\n",
+      });
+
+      await assert.rejects(
+        submitPackage(current, explore, completedResult(explore, [malformed])),
+        (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ARTIFACT_INCOMPLETE",
+      );
+    });
+  }
 });
 
 test("acquire rejects a mutated Workflow snapshot", async () => {
@@ -523,6 +850,25 @@ test("submit rejects Artifacts not declared by the Step output contract", async 
   );
 });
 
+test("submit preserves the optional mediaType contract for verified Artifacts", async () => {
+  const current = await fixture();
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "可选 media type" } });
+  const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  const explore = requireExecute(await submitPackage(current, intake));
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const { mediaType: _mediaType, ...exploration } = await writeArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    workPackage: explore,
+    artifactType: "exploration-report",
+    body: "# Exploration\n\nRepository facts.\n",
+  });
+
+  const next = await submitPackage(current, explore, completedResult(explore, [exploration]));
+
+  assert.equal(requireExecute(next).stepId, "clarify");
+});
+
 test("a failed Submit retries the same Step before dependent Steps can advance", async () => {
   const current = await fixture();
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "失败重试" } });
@@ -540,7 +886,7 @@ test("a failed Submit retries the same Step before dependent Steps can advance",
 
 test("failed Submit stops after the snapshotted retry limit", async () => {
   const current = await fixture();
-  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), "version: 1\nruntime: { maxStageRetries: 0 }\n", "utf8");
+  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), "version: 1\nruntime: { claimTtlSeconds: 60, maxStageRetries: 0 }\n", "utf8");
   await git(current.root, "add", ".wsspec/config.yaml");
   await git(current.root, "commit", "-m", "test: disable retries");
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "不重试" } });
@@ -680,13 +1026,14 @@ test("rejected or expired approval returns a replacement execution action", asyn
   assert.notEqual(expiredNext.attemptId, expiredApproval.clarify.attemptId);
 });
 
-test("inspect recovers an interrupted Attempt from any Git worktree", async () => {
+test("explicit recovery resumes an interrupted Attempt from any Git worktree", async () => {
   const current = await fixture();
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "恢复" } });
   const interrupted = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex-a" }));
   const observer = path.join(path.dirname(current.root), `wspec-observer-${crypto.randomUUID()}`);
   await git(current.root, "worktree", "add", "-b", `observer-${crypto.randomUUID()}`, observer, "HEAD");
 
+  await recoverControlPlane({ cwd: observer, workItemId: started.workItemId });
   const view = await current.app.inspect({ root: observer, workItemId: started.workItemId });
   assert.equal(view.workItemId, started.workItemId);
   assert.equal(view.workflowRef, "builtin://workflows/feature-delivery");
@@ -709,6 +1056,29 @@ test("inspect preserves an unexpired active lease", async () => {
   assert.equal(second.action, "blocked");
 });
 
+test("inspect from a second Git worktree leaves a pending approval and event history byte-for-byte unchanged", async () => {
+  const current = await fixture();
+  const { started, awaiting } = await prepareApproval(current);
+  const before = await readControlPlane(current.root, started.workItemId);
+  const runtimePath = path.join(before.controlPlane, "runtime.json");
+  const eventsPath = path.join(before.controlPlane, "events.jsonl");
+  const [runtimeBytes, eventBytes] = await Promise.all([
+    readFile(runtimePath),
+    readFile(eventsPath),
+  ]);
+  const secondRoot = path.join(os.tmpdir(), `wsspec-inspect-host-${crypto.randomUUID()}`);
+  await git(current.root, "worktree", "add", "-b", `inspect-${crypto.randomUUID()}`, secondRoot);
+
+  const view = await current.app.inspect({ root: secondRoot, workItemId: started.workItemId });
+
+  const after = await readControlPlane(secondRoot, started.workItemId);
+  assert.equal(view.status, "awaiting_approval");
+  assert.equal(after.approvals[awaiting.approval.requestId]?.status, "pending");
+  assert.deepEqual(after, before);
+  assert.deepEqual(await readFile(runtimePath), runtimeBytes);
+  assert.deepEqual(await readFile(eventsPath), eventBytes);
+});
+
 test("start assembles Task 6 ProjectGatePolicy from project configuration", async () => {
   const current = await fixture();
   const config = {
@@ -728,7 +1098,7 @@ test("start assembles Task 6 ProjectGatePolicy from project configuration", asyn
   assert.deepEqual(snapshot.gatePolicy, { requiredGateIds: ["test"], configuredGateIds: ["test"] });
 });
 
-test("inspect recovers and archives a terminal control.close transition", async () => {
+test("explicit recovery rebuilds a terminal control.close archive before read-only inspect", async () => {
   const current = await fixture();
   const started = await current.app.start({
     root: current.root,
@@ -747,6 +1117,7 @@ test("inspect recovers and archives a terminal control.close transition", async 
   assert.equal(action.action, "completed");
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
 
+  await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
   const inspected = await current.app.inspect({ root: current.root, workItemId: started.workItemId });
   assert.equal(inspected.status, "closed");
   const worktree = await worktreeFor(current.root, started.workItemId);

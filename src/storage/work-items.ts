@@ -276,11 +276,11 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     ? await snapshotSource(root, input.source, createdAt)
     : snapshotCapturedSource(input.capturedSource, input.source, createdAt);
   const baselineRevision = await runGit(root, ["rev-parse", "HEAD"]);
-  const baselineTreeDigest = await computeWorkspaceTreeDigest(root);
   const ownerToken = crypto.randomUUID();
 
   await runGit(root, ["worktree", "add", "-b", branch, worktree, baselineRevision]);
   try {
+    const baselineTreeDigest = await computeWorkspaceTreeDigest(worktree);
     const itemRoot = path.join(worktree, ".wsspec", "work-items", input.workItemId);
     const snapshotRoot = path.join(itemRoot, "snapshot");
     await writeFileAtomic(path.join(snapshotRoot, "workflow.yaml"), workflowText);

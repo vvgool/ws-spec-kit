@@ -2,6 +2,7 @@ import { mkdir, open, readFile, realpath, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
+import { parseApplicationSnapshot } from "../application/snapshot.js";
 import type { StageState, WorkItemState } from "../domain/states.js";
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
@@ -320,17 +321,13 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     if (typeof manifest.execution?.workflowDigest !== "string" || sha256(applicationText) !== manifest.execution.workflowDigest) {
       throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "Application 快照摘要与 Work Item manifest 不一致。");
     }
-    const application = JSON.parse(applicationText) as { profiles?: Record<string, { order?: unknown; steps?: Array<{ id?: unknown; enabled?: unknown; needs?: unknown }> }>; selectedProfile?: string };
-    const profile = application.selectedProfile === undefined ? undefined : application.profiles?.[application.selectedProfile];
-    const order = profile?.order;
-    if (!Array.isArray(order) || !order.every((id) => typeof id === "string") || !Array.isArray(profile?.steps)) {
-      throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_INVALID", "Application 快照缺少有效的 Profile Stage 定义。");
-    }
-    stageIds = order;
+    const application = parseApplicationSnapshot(JSON.parse(applicationText));
+    const profile = application.profiles[application.selectedProfile];
+    stageIds = profile.order;
     initialWorkItem = { status: "active" };
-    initialStages = Object.fromEntries((profile?.steps ?? []).filter((step): step is { id: string; enabled?: unknown; needs?: unknown } => typeof step.id === "string").map((step) => [
+    initialStages = Object.fromEntries(profile.steps.map((step) => [
       step.id,
-      { status: step.enabled === false ? "skipped" : Array.isArray(step.needs) && step.needs.length === 0 ? "ready" : "pending" },
+      { status: !step.enabled ? "skipped" : step.needs.length === 0 ? "ready" : "pending" },
     ])) as Record<string, StageState>;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

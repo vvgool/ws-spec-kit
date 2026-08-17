@@ -1,5 +1,6 @@
 export const schemaIds = [
   "builtin.workflow.v1",
+  "builtin.workflow-selection.v1",
   "builtin.project-config.v1",
   "builtin.work-item.v1",
   "builtin.application-start-input.v1",
@@ -95,6 +96,7 @@ const artifactReferenceSchema: JsonSchema = {
     revision: { type: "integer", minimum: 1 },
     contentHash: { type: "string", pattern: digestPattern },
     mediaType: { type: "string" },
+    contentLevel: { type: "string", minLength: 1 },
   },
 };
 
@@ -149,6 +151,7 @@ const workPackageSchema: JsonSchema = {
       properties: { token: { type: "string", minLength: 1 }, expiresAt: { type: "string", format: "date-time" } },
     },
     objective: { type: "string", minLength: 1 },
+    artifactLevel: { type: "string", minLength: 1 },
     skills: {
       type: "array",
       items: {
@@ -209,12 +212,32 @@ export const schemas: Record<SchemaId, JsonSchema> = {
       stages: { type: "array", minItems: 1, items: stageSchema },
     },
   },
+  "builtin.workflow-selection.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "builtin.workflow-selection.v1",
+    type: "object",
+    additionalProperties: false,
+    required: ["version", "activeWorkflow"],
+    properties: {
+      version: { const: 1 },
+      activeWorkflow: {
+        type: "object",
+        additionalProperties: false,
+        required: ["ref", "version"],
+        properties: {
+          ref: { type: "string", pattern: "^(builtin|project)://workflows/[a-z0-9][a-z0-9-]*$" },
+          version: { const: 1 },
+        },
+      },
+      profile: { enum: ["auto", "quick", "standard", "governed"] },
+    },
+  },
   "builtin.project-config.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "builtin.project-config.v1",
     type: "object",
     additionalProperties: false,
-    required: ["version", "trigger", "git", "runtime", "quality"],
+    required: ["version"],
     properties: {
       version: { const: 1 },
       trigger: {
@@ -267,6 +290,32 @@ export const schemas: Record<SchemaId, JsonSchema> = {
         additionalProperties: false,
         required: ["targets"],
         properties: { targets: { type: "object", additionalProperties: false } },
+      },
+      documentation: {
+        type: "object",
+        additionalProperties: false,
+        required: ["allowedPaths"],
+        properties: {
+          allowedPaths: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 },
+          },
+        },
+      },
+      skills: {
+        type: "object",
+        additionalProperties: false,
+        required: ["additionalGlobalRoots"],
+        properties: {
+          additionalGlobalRoots: {
+            type: "array",
+            minItems: 1,
+            uniqueItems: true,
+            items: { type: "string", minLength: 1 },
+          },
+        },
       },
     },
   },

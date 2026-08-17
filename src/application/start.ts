@@ -4,7 +4,7 @@ import { ulid } from "ulid";
 import { parse, stringify } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
-import type { CompiledStep, CompiledWorkflow, ProfileId } from "../domain/workflow.js";
+import type { ProfileId } from "../domain/workflow.js";
 import { compileWorkflow, type ProjectGatePolicy } from "../engine/compiler.js";
 import { selectProfile } from "../policy/profile.js";
 import type { StartInput, StartResult, WorkflowProfile } from "../protocol/application.js";
@@ -23,7 +23,7 @@ import { loadWorkflowPackage } from "../workflow-package/loader.js";
 import { lockWorkflowPackage } from "../workflow-package/lock.js";
 import { evaluateWorkflowTrust } from "../workflow-package/trust.js";
 import type { WorkflowPackage, WorkflowStep } from "../workflow-package/types.js";
-import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "./state.js";
+import { snapshotProfile, type ApplicationSnapshot, type SnapshotProfile } from "./snapshot.js";
 
 export interface StartDependencies {
   provider: SkillProvider;
@@ -62,8 +62,7 @@ function stringArray(value: unknown): string[] | undefined {
 }
 
 function projectConfiguration(raw: unknown, pkg: WorkflowPackage): ProjectConfiguration {
-  const source = record(raw);
-  if (source?.version !== 1) throw new ApplicationStartError("WSSPEC_PROJECT_CONFIG_INVALID", "项目 config.yaml 只支持 v1。 ");
+  const source = validate<Record<string, unknown>>("builtin.project-config.v1", raw);
   const quality = record(source.quality);
   const gates = quality === undefined ? undefined : record(quality.gates);
   const defaultGate = pkg.workflow.workflow.id === "documentation-delivery" ? "docs.integrity" : "test";
@@ -96,16 +95,9 @@ function projectConfiguration(raw: unknown, pkg: WorkflowPackage): ProjectConfig
 }
 
 function workflowSelection(value: unknown): { ref: string; profile: WorkflowProfile } {
-  const source = record(value);
-  const active = record(source?.activeWorkflow);
-  if (source?.version !== 1 || typeof active?.ref !== "string" || active.version !== 1) {
-    throw new ApplicationStartError("WSSPEC_ACTIVE_WORKFLOW_INVALID", ".wsspec/workflow.yaml 缺少有效 activeWorkflow。 ");
-  }
-  const profile = source.profile;
-  if (profile !== undefined && !["auto", "quick", "standard", "governed"].includes(String(profile))) {
-    throw new ApplicationStartError("WSSPEC_ACTIVE_WORKFLOW_INVALID", "项目默认 Profile 不受支持。 ");
-  }
-  return { ref: active.ref, profile: (profile ?? "auto") as WorkflowProfile };
+  const source = validate<Record<string, unknown>>("builtin.workflow-selection.v1", value);
+  const active = record(source.activeWorkflow)!;
+  return { ref: active.ref as string, profile: (source.profile ?? "auto") as WorkflowProfile };
 }
 
 function portableSkill(skill: ResolvedSkill, catalog: Awaited<ReturnType<typeof loadBuiltinCatalog>>): ResolvedSkillDescriptor {
@@ -116,37 +108,6 @@ function portableSkill(skill: ResolvedSkill, catalog: Awaited<ReturnType<typeof 
     version: builtin?.version ?? "locked",
     digest: skill.digest,
     description: builtin?.description ?? `Locked workflow skill ${skill.ref}`,
-  };
-}
-
-function snapshotStep(step: CompiledStep, skills: Map<string, ResolvedSkillDescriptor>): SnapshotStep {
-  return {
-    id: step.id,
-    uses: step.uses,
-    securityClass: step.securityClass,
-    needs: [...step.needs],
-    enabled: step.enabled,
-    skills: step.skills.map((skill) => skills.get(skill.requestedRef) ?? skills.get(skill.ref)!),
-    inputs: step.inputs.map((input) => ({ ...input })),
-    outputs: step.outputs.map((output) => ({ ...output })),
-    gates: [...step.gates],
-    approval: step.approval,
-    authorizationRequired: step.authorizationRequired,
-    ...(step.objective === undefined ? {} : { objective: step.objective }),
-    ...(step.expectedOutcome === undefined ? {} : { expectedOutcome: step.expectedOutcome }),
-    ...(step.when === undefined ? {} : { when: step.when }),
-    ...(step.action === undefined ? {} : { action: step.action }),
-  };
-}
-
-function snapshotProfile(workflow: CompiledWorkflow, skills: Map<string, ResolvedSkillDescriptor>): SnapshotProfile {
-  return {
-    id: workflow.profile.id,
-    order: [...workflow.order],
-    steps: workflow.steps.map((step) => snapshotStep(step, skills)),
-    publishing: { ...workflow.profile.publishing },
-    audit: { ...workflow.profile.audit },
-    changePolicy: { ...workflow.changePolicy, allowedPaths: [...workflow.changePolicy.allowedPaths] },
   };
 }
 
@@ -269,6 +230,10 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       profiles,
       workflowPackageLock: lockWorkflowPackage(pkg),
       skillLock: createSkillLock(resolved),
+      skillResolution: {
+        provider: dependencies.provider,
+        additionalGlobalRoots: configuration.additionalGlobalRoots ?? [],
+      },
       gatePolicy: configuration.gatePolicy,
       changePolicy: profiles[selected].changePolicy,
       source: sourceReference,

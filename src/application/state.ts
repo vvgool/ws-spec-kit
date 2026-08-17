@@ -3,57 +3,11 @@ import path from "node:path";
 import { parse } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
-import type { ProfileId, ResolvedChangePolicy, SecurityClass } from "../domain/workflow.js";
-import type { ProjectGatePolicy } from "../engine/compiler.js";
-import type { ArtifactReference, ResolvedSkillDescriptor } from "../protocol/work-package.js";
-import type { SkillLock } from "../registry/skills/types.js";
 import { readApplicationAnchor, readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
 import type { WorkItem } from "../storage/work-items.js";
-import type { WorkflowPackageLock } from "../workflow-package/types.js";
+import { parseApplicationSnapshot, type ApplicationSnapshot, type SnapshotProfile } from "./snapshot.js";
 
-export interface SnapshotStep {
-  id: string;
-  uses: string;
-  securityClass: SecurityClass;
-  needs: string[];
-  enabled: boolean;
-  skills: ResolvedSkillDescriptor[];
-  inputs: Array<{ artifact: string; required: boolean }>;
-  outputs: Array<{ artifact: string; required: boolean; contentLevel?: string }>;
-  gates: string[];
-  approval: boolean;
-  authorizationRequired: boolean;
-  objective?: string;
-  expectedOutcome?: string;
-  when?: string;
-  action?: string;
-}
-
-export interface SnapshotProfile {
-  id: string;
-  order: string[];
-  steps: SnapshotStep[];
-  publishing: Record<string, unknown>;
-  audit: Record<string, unknown>;
-  changePolicy: ResolvedChangePolicy;
-}
-
-export interface ApplicationSnapshot {
-  version: 1;
-  workflowRef: string;
-  packageDigest: string;
-  selectedProfile: ProfileId;
-  profiles: Record<ProfileId, SnapshotProfile>;
-  workflowPackageLock: WorkflowPackageLock;
-  skillLock: SkillLock;
-  gatePolicy: ProjectGatePolicy;
-  changePolicy: ResolvedChangePolicy;
-  source: ArtifactReference;
-  gates: Array<{ id: string; evidence: "trusted" | "attested" }>;
-  leaseTtlSeconds: number;
-  maxStageRetries: number;
-  createdAt: string;
-}
+export type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "./snapshot.js";
 
 export interface ApplicationState {
   projection: RuntimeProjection;
@@ -144,9 +98,12 @@ export async function loadApplicationState(root: string, workItemId: string): Pr
   if (sha256(applicationText) !== item.execution.workflowDigest) {
     throw new ApplicationStateError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "Application 快照摘要与 Work Item 锚点不一致。 ");
   }
-  const snapshot = JSON.parse(applicationText) as ApplicationSnapshot;
-  if (snapshot.version !== 1 || snapshot.profiles[snapshot.selectedProfile] === undefined) {
-    throw new ApplicationStateError("WSSPEC_APPLICATION_SNAPSHOT_INVALID", "Application 快照不完整。 ");
+  let snapshot: ApplicationSnapshot;
+  try {
+    snapshot = parseApplicationSnapshot(JSON.parse(applicationText));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new ApplicationStateError("WSSPEC_APPLICATION_SNAPSHOT_INVALID", "Application 快照不是合法 JSON。 ");
+    throw error;
   }
   await verifySnapshots(itemRoot, item, snapshot);
   const sourcePath = path.join(itemRoot, item.source.snapshot);

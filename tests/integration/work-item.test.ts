@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
+import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { validate } from "../../src/schemas/index.js";
 import { initRepository } from "../../src/storage/repository.js";
 import { WorkItemError, createWorkItem } from "../../src/storage/work-items.js";
@@ -113,6 +114,36 @@ test("captures Markdown file content instead of retaining a mutable source path"
 
   assert.equal(snapshot.origin, "requirement.md");
   assert.match(snapshot.content.text, /Retry payment/);
+});
+
+test("baseline digest is measured from the created worktree when the caller is dirty", async (t) => {
+  const cases: Array<[string, (root: string) => Promise<void>]> = [
+    ["tracked content", async (root) => { await writeFile(path.join(root, "README.md"), "dirty tracked\n", "utf8"); }],
+    ["untracked file", async (root) => { await writeFile(path.join(root, "untracked.txt"), "dirty untracked\n", "utf8"); }],
+    ["executable mode", async (root) => { await chmod(path.join(root, "README.md"), 0o755); }],
+    ["symlink", async (root) => { await symlink("README.md", path.join(root, "readme-link")); }],
+  ];
+
+  for (const [index, [name, makeDirty]] of cases.entries()) {
+    await t.test(name, async () => {
+      const root = await prepareRepository();
+      await makeDirty(root);
+      const callerDigest = await computeWorkspaceTreeDigest(root);
+      const workItem = await createWorkItem({
+        root,
+        workItemId: `WSS-DIRTY-${index + 1}`,
+        title: `Dirty caller ${name}`,
+        source: { type: "prompt", content: "measure the created worktree" },
+        createdAt: "2026-08-17T12:00:00.000Z",
+      });
+      const worktree = path.join(root, workItem.execution.worktree);
+      await rm(path.join(worktree, ".wsspec", "work-items", workItem.workItemId), { recursive: true });
+      const worktreeDigest = await computeWorkspaceTreeDigest(worktree);
+
+      assert.notEqual(callerDigest, worktreeDigest);
+      assert.equal(workItem.execution.baselineTreeDigest, worktreeDigest);
+    });
+  }
 });
 
 test("duplicate Work Item IDs fail without overwriting the existing snapshot", async () => {

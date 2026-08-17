@@ -31,6 +31,11 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
       },
     ],
   },
+  "builtin.workflow-selection.v1": {
+    version: 1,
+    activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },
+    profile: "auto",
+  },
   "builtin.project-config.v1": {
     version: 1,
     trigger: { mode: "suggest" },
@@ -50,6 +55,8 @@ const validValues: Record<SchemaId, Record<string, unknown>> = {
       },
     },
     publishing: { targets: {} },
+    documentation: { allowedPaths: ["docs/**/*.md"] },
+    skills: { additionalGlobalRoots: ["/opt/wsspec/skills"] },
   },
   "builtin.work-item.v1": {
     version: 1,

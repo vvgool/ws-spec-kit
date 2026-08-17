@@ -66,6 +66,10 @@
           },
           "mediaType": {
             "type": "string"
+          },
+          "contentLevel": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
