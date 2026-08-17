@@ -23,6 +23,15 @@ export class RepositoryError extends Error {
 
 const repositoryIdPattern = /^repo-[0-9A-HJKMNP-TV-Z]{26}$/;
 
+async function writeDefaultIfMissing(filename: string, content: string): Promise<void> {
+  try {
+    await readFile(filename, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await writeFileAtomic(filename, content);
+  }
+}
+
 async function readIdentityFile(root: string): Promise<{ version: 1; repositoryId: RepositoryId }> {
   const filename = path.join(root, ".wsspec", "repository.yaml");
   let content: string;
@@ -95,8 +104,13 @@ export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   }
   const repositoryId = `repo-${ulid()}` as RepositoryId;
   await writeFileAtomic(filename, stringify({ version: 1, repositoryId }, { lineWidth: 0 }));
+  await writeDefaultIfMissing(path.join(root, ".wsspec", "config.yaml"), stringify({ version: 1 }, { lineWidth: 0 }));
+  await writeDefaultIfMissing(path.join(root, ".wsspec", "workflow.yaml"), stringify({
+    version: 1,
+    activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },
+    profile: "auto",
+  }, { lineWidth: 0 }));
   const identity: RepositoryIdentity = { version: 1, repositoryId, repositoryRoot: root, commonDir };
   await synchronizeCache(identity);
   return identity;
 }
-

@@ -1,0 +1,17 @@
+version: 1
+id: documentation-delivery
+changePolicy:
+  kind: documentation-only
+  allowedPaths: ["README.md", "docs/**", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"]
+steps:
+  - id: explore
+    skills: [builtin://skills/documentation-exploration]
+  - id: edit
+    skills: [builtin://skills/documentation-editing]
+  - id: review
+    skills: [builtin://skills/documentation-review]
+gates:
+  - id: docs.integrity
+    evidence: trusted
+    command: [wspec, gate, docs.integrity]
+

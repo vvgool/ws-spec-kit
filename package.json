@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "resources",
     "schemas",
     "LICENSE"
   ],

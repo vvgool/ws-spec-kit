@@ -1,0 +1,6 @@
+version: 1
+id: standard
+workflow: feature-delivery
+design: true
+reviewIterations: 5
+audit: standard

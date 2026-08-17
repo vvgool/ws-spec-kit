@@ -1,0 +1,6 @@
+version: 1
+id: feature-delivery
+description: 基础功能交付工作流
+profiles: [quick, standard, governed]
+entry: workflow.yaml
+

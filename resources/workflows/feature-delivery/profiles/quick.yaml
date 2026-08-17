@@ -1,0 +1,6 @@
+version: 1
+id: quick
+workflow: feature-delivery
+design: false
+reviewIterations: 1
+audit: standard

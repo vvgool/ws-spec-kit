@@ -1,0 +1,5 @@
+version: 1
+id: quick
+workflow: documentation-delivery
+reviewIterations: 1
+audit: standard

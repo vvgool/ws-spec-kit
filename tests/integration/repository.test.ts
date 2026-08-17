@@ -7,6 +7,7 @@ import test from "node:test";
 import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { RepositoryError, initRepository, loadRepository } from "../../src/storage/repository.js";
 import { createGitRepository, git } from "./helpers/git.js";
+import { parse } from "yaml";
 
 test("repository initialization creates a stable committed identity and common-dir cache", async () => {
   const root = await createGitRepository();
@@ -23,6 +24,19 @@ test("repository initialization creates a stable committed identity and common-d
   assert.equal(loaded.repositoryId, initialized.repositoryId);
   assert.match(repositoryYaml, new RegExp(`repositoryId: ${initialized.repositoryId}`));
   assert.equal(cache.repositoryId, initialized.repositoryId);
+});
+
+test("repository initialization creates complete project workflow configuration", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const config = parse(await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8"));
+  const workflow = parse(await readFile(path.join(root, ".wsspec", "workflow.yaml"), "utf8"));
+  assert.equal(config.version, 1);
+  assert.deepEqual(workflow, {
+    version: 1,
+    activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },
+    profile: "auto",
+  });
 });
 
 test("a clone preserves repository identity and creates only a local cache", async () => {

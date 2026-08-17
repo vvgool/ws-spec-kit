@@ -1,0 +1,6 @@
+version: 1
+id: documentation-delivery
+description: 纯文档交付工作流
+profiles: [quick, standard, governed]
+entry: workflow.yaml
+

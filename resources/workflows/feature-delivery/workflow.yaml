@@ -1,0 +1,26 @@
+version: 1
+id: feature-delivery
+changePolicy:
+  kind: feature
+  allowedPaths: ["**"]
+steps:
+  - id: explore
+    skills: [builtin://skills/requirement-exploration]
+  - id: design
+    skills: [builtin://skills/solution-design]
+  - id: plan
+    skills: [builtin://skills/task-planning]
+  - id: implement
+    skills: [builtin://skills/tdd-implementation]
+  - id: review
+    skills: [builtin://skills/code-review]
+  - id: fix
+    skills: [builtin://skills/bug-fixing]
+gates:
+  - id: verify-red
+    evidence: trusted
+    command: [wspec, gate, test, --expect-failure]
+  - id: verify-green
+    evidence: trusted
+    command: [wspec, gate, test]
+

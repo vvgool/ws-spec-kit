@@ -1,0 +1,33 @@
+version: 1
+workflows:
+  - feature-delivery
+  - documentation-delivery
+skills:
+  - id: requirement-exploration
+    version: 1.0.0
+    description: 探索代码并澄清功能需求
+  - id: solution-design
+    version: 1.0.0
+    description: 编写可实施的技术方案
+  - id: task-planning
+    version: 1.0.0
+    description: 将方案拆分为可验证任务
+  - id: tdd-implementation
+    version: 1.0.0
+    description: 以测试驱动方式实现任务
+  - id: code-review
+    version: 1.0.0
+    description: 审查实现缺陷与需求偏差
+  - id: bug-fixing
+    version: 1.0.0
+    description: 修复审查发现并重新验证
+  - id: documentation-exploration
+    version: 1.0.0
+    description: 探索文档现状和事实来源
+  - id: documentation-editing
+    version: 1.0.0
+    description: 按事实编辑中文文档
+  - id: documentation-review
+    version: 1.0.0
+    description: 审查文档准确性和完整性
+

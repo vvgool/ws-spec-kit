@@ -1,0 +1,5 @@
+version: 1
+id: standard
+workflow: documentation-delivery
+reviewIterations: 5
+audit: standard
