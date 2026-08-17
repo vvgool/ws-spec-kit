@@ -10,32 +10,51 @@ export interface WorkflowManifest {
   connectors: string[];
 }
 
+export interface WorkflowIdentity { id: string; version: 1 }
+export interface WorkflowInputDefinition { accepts: string[] }
 export interface WorkflowSkillBinding { ref: string; required?: boolean; fallback?: string }
+export interface WorkflowArtifactInput { artifact: string; required?: boolean }
+export interface WorkflowRetry { maxAttempts: number }
+export interface WorkflowLoop { until: string; maxIterations: number }
 export interface WorkflowStep {
-  id: string; uses?: string; needs?: string[]; when?: string; retry?: { maxAttempts: number }; loop?: { until: string; maxIterations: number };
-  approval?: boolean | "required"; inputs?: Array<string | { artifact: string; required?: boolean }>; outputs?: string[]; skills: Array<string | WorkflowSkillBinding>;
-  action?: string; objective?: string; expectedOutcome?: string; until?: string; maxIterations?: number; steps?: WorkflowStep[];
+  id: string;
+  uses: string;
+  needs?: string[];
+  when?: string;
+  retry?: WorkflowRetry;
+  loop?: WorkflowLoop;
+  approval?: boolean | "required";
+  inputs?: Array<string | WorkflowArtifactInput>;
+  outputs?: string[];
+  skills?: WorkflowSkillBinding[];
+  action?: string;
+  objective?: string;
+  expectedOutcome?: string;
+  until?: string;
+  maxIterations?: number;
+  steps?: WorkflowStep[];
 }
 export interface WorkflowGate { id: string; evidence: "trusted" | "attested"; command: string[] }
 export interface WorkflowChangePolicy { kind: "feature" | "documentation-only"; allowedPaths: string[] }
 export interface WorkflowDefinition {
   version: 1;
-  id: string;
-  inputs?: Record<string, { accepts: string[] }>;
+  workflow: WorkflowIdentity;
+  inputs: Record<string, WorkflowInputDefinition>;
   steps: WorkflowStep[];
   gates: WorkflowGate[];
-  changePolicy?: WorkflowChangePolicy;
+  changePolicy: WorkflowChangePolicy;
 }
 
+export interface ProfileIdentity { id: string; workflow: string }
+export interface ProfileStepOverlay { enabled?: boolean; approval?: boolean; artifactLevel?: string; gates?: string[]; maxIterations?: number }
+export interface ProfilePublishing { issueRequired: boolean; knowledgeRequired: boolean }
+export interface ProfileAudit { level: "standard" | "complete" }
 export interface ProfileDefinition {
   version: 1;
-  id: string;
-  workflow: string;
-  design?: boolean;
-  reviewIterations?: number;
-  audit?: "standard" | "complete" | { level: "standard" | "complete" };
-  steps?: Record<string, { enabled?: boolean; approval?: boolean; artifactLevel?: string; gates?: string[]; maxIterations?: number }>;
-  publishing?: { issueRequired?: boolean; knowledgeRequired?: boolean };
+  profile: ProfileIdentity;
+  steps: Record<string, ProfileStepOverlay>;
+  publishing: ProfilePublishing;
+  audit: ProfileAudit;
 }
 
 export interface WorkflowPackageFile {
@@ -62,6 +81,7 @@ export interface WorkflowPackageLock {
 }
 
 export interface WorkflowTrustRecord {
+  requestId: string;
   packageRef: string;
   packageDigest: string;
   capabilityDigest: string;

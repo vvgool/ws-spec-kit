@@ -1,5 +1,9 @@
 version: 1
-id: standard
-workflow: documentation-delivery
-reviewIterations: 5
-audit: standard
+profile:
+  id: standard
+  workflow: documentation-delivery
+steps:
+  review-fix: { maxIterations: 5 }
+  verify-document: { gates: [docs.integrity] }
+publishing: { issueRequired: false, knowledgeRequired: false }
+audit: { level: standard }

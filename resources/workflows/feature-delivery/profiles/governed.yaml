@@ -1,6 +1,12 @@
 version: 1
-id: governed
-workflow: feature-delivery
-design: true
-reviewIterations: 5
-audit: complete
+profile:
+  id: governed
+  workflow: feature-delivery
+steps:
+  clarify: { approval: true }
+  design: { approval: true }
+  plan: { approval: true }
+  review-fix: { maxIterations: 5 }
+  verify-green: { gates: [test] }
+publishing: { issueRequired: true, knowledgeRequired: true }
+audit: { level: complete }

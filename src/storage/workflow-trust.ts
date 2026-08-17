@@ -2,8 +2,8 @@ import { mkdir, open, readFile, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
 
-import { gitCommonDir } from "./git.js";
 import type { WorkflowTrustRecord } from "../workflow-package/types.js";
+import { gitCommonDir } from "./git.js";
 
 const delay = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
@@ -12,7 +12,143 @@ export class WorkflowTrustStoreError extends Error {
 }
 
 interface TrustLockOwner { version: 1; ownerToken: string; pid: number; hostname: string; createdAt: string }
-export interface PendingWorkflowTrustRequest { requestId: string; packageRef: string; packageDigest: string; capabilityDigest: string; createdAt: string; expiresAt: string; status: "pending" | "consumed" }
+
+export interface WorkflowTrustRequestedEvent {
+  event: "requested";
+  requestId: string;
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  actor: string;
+  channel: "interactive";
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface WorkflowTrustDecidedEvent {
+  event: "decided";
+  requestId: string;
+  decision: "trusted" | "rejected";
+  actor: string;
+  decidedAt: string;
+}
+
+interface WorkflowTrustJournalState {
+  requests: Map<string, WorkflowTrustRequestedEvent>;
+  decisions: Map<string, WorkflowTrustDecidedEvent>;
+  records: WorkflowTrustRecord[];
+}
+
+function journalError(message: string): never {
+  throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_JOURNAL_INVALID", message);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
+function isCanonicalIso(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function parseRequested(value: Record<string, unknown>, line: number): WorkflowTrustRequestedEvent {
+  const keys = ["event", "requestId", "packageRef", "packageDigest", "capabilityDigest", "actor", "channel", "createdAt", "expiresAt"] as const;
+  if (!hasExactKeys(value, keys)
+    || value.event !== "requested"
+    || !isNonEmptyString(value.requestId)
+    || !isNonEmptyString(value.packageRef)
+    || !isNonEmptyString(value.packageDigest)
+    || !isNonEmptyString(value.capabilityDigest)
+    || !isNonEmptyString(value.actor)
+    || value.channel !== "interactive"
+    || !isCanonicalIso(value.createdAt)
+    || !isCanonicalIso(value.expiresAt)
+    || value.createdAt >= value.expiresAt) journalError(`Workflow 信任 journal 第 ${line} 行 requested 事件无效。`);
+  return {
+    event: "requested",
+    requestId: value.requestId,
+    packageRef: value.packageRef,
+    packageDigest: value.packageDigest,
+    capabilityDigest: value.capabilityDigest,
+    actor: value.actor,
+    channel: "interactive",
+    createdAt: value.createdAt,
+    expiresAt: value.expiresAt,
+  };
+}
+
+function parseDecided(value: Record<string, unknown>, line: number): WorkflowTrustDecidedEvent {
+  const keys = ["event", "requestId", "decision", "actor", "decidedAt"] as const;
+  if (!hasExactKeys(value, keys)
+    || value.event !== "decided"
+    || !isNonEmptyString(value.requestId)
+    || (value.decision !== "trusted" && value.decision !== "rejected")
+    || !isNonEmptyString(value.actor)
+    || !isCanonicalIso(value.decidedAt)) journalError(`Workflow 信任 journal 第 ${line} 行 decided 事件无效。`);
+  return { event: "decided", requestId: value.requestId, decision: value.decision, actor: value.actor, decidedAt: value.decidedAt };
+}
+
+function deriveRecord(request: WorkflowTrustRequestedEvent, decision: WorkflowTrustDecidedEvent): WorkflowTrustRecord {
+  return {
+    requestId: request.requestId,
+    packageRef: request.packageRef,
+    packageDigest: request.packageDigest,
+    capabilityDigest: request.capabilityDigest,
+    decision: decision.decision,
+    actor: decision.actor,
+    decidedAt: decision.decidedAt,
+  };
+}
+
+async function readJournal(target: string): Promise<WorkflowTrustJournalState> {
+  let content: string;
+  try { content = await readFile(target, "utf8"); }
+  catch (caught) {
+    if ((caught as NodeJS.ErrnoException).code === "ENOENT") return { requests: new Map(), decisions: new Map(), records: [] };
+    throw caught;
+  }
+  if (content !== "" && !content.endsWith("\n")) journalError("Workflow 信任 journal 包含未完成的末尾事件。");
+  const requests = new Map<string, WorkflowTrustRequestedEvent>();
+  const decisions = new Map<string, WorkflowTrustDecidedEvent>();
+  const records: WorkflowTrustRecord[] = [];
+  const lines = content === "" ? [] : content.slice(0, -1).split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (line === "") journalError(`Workflow 信任 journal 第 ${index + 1} 行为空。`);
+    let value: unknown;
+    try { value = JSON.parse(line); }
+    catch { journalError(`Workflow 信任 journal 第 ${index + 1} 行不是合法 JSON。`); }
+    if (!isRecord(value) || (value.event !== "requested" && value.event !== "decided")) journalError(`Workflow 信任 journal 第 ${index + 1} 行包含未知事件。`);
+    if (value.event === "requested") {
+      const request = parseRequested(value, index + 1);
+      if (requests.has(request.requestId)) journalError(`Workflow 信任 requestId ${request.requestId} 重复。`);
+      requests.set(request.requestId, request);
+      continue;
+    }
+    const decision = parseDecided(value, index + 1);
+    const request = requests.get(decision.requestId);
+    if (request === undefined) journalError(`Workflow 信任决定 ${decision.requestId} 缺少 requested 事件。`);
+    if (decision.actor !== request.actor) journalError(`Workflow 信任决定 ${decision.requestId} 的 actor 不匹配。`);
+    if (decision.decidedAt < request.createdAt || decision.decidedAt >= request.expiresAt) journalError(`Workflow 信任决定 ${decision.requestId} 不在有效时间内。`);
+    const existing = decisions.get(decision.requestId);
+    if (existing !== undefined) {
+      if (existing.decision !== decision.decision || existing.actor !== decision.actor) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_DECISION_CONFLICT", "同一 Workflow 信任请求存在冲突决定。");
+      continue;
+    }
+    decisions.set(decision.requestId, decision);
+    records.push(deriveRecord(request, decision));
+  }
+  return { requests, decisions, records };
+}
 
 async function readTrustLock(lockPath: string): Promise<TrustLockOwner | undefined> {
   try {
@@ -31,8 +167,6 @@ export async function workflowTrustPath(root: string): Promise<string> {
   return path.join(await gitCommonDir(root), "wsspec", "trust", "workflow-packages.ndjson");
 }
 
-async function pendingTrustPath(root: string): Promise<string> { return `${await workflowTrustPath(root)}.pending.ndjson`; }
-
 async function withTrustLock<T>(target: string, operation: () => Promise<T>): Promise<T> {
   const lockPath = `${target}.lock`;
   await mkdir(path.dirname(target), { recursive: true });
@@ -45,12 +179,12 @@ async function withTrustLock<T>(target: string, operation: () => Promise<T>): Pr
       await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
       await handle.sync();
       break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+    } catch (caught) {
+      if ((caught as NodeJS.ErrnoException).code === "EEXIST") {
         const existing = await readTrustLock(lockPath);
         if (existing?.hostname === hostname() && !processIsAlive(existing.pid)) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_STALE_LOCK", "检测到异常退出遗留的 Workflow 信任锁，请先恢复。");
       }
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任记录当前被其他进程占用。");
+      if ((caught as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_LOCKED", "Workflow 信任记录当前被其他进程占用。");
       await delay(10);
     }
   }
@@ -62,27 +196,14 @@ async function withTrustLock<T>(target: string, operation: () => Promise<T>): Pr
   }
 }
 
-function validRecord(value: unknown): value is WorkflowTrustRecord {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return Object.keys(record).every((key) => ["packageRef", "packageDigest", "capabilityDigest", "decision", "actor", "decidedAt"].includes(key)) && typeof record.packageRef === "string" && typeof record.packageDigest === "string" && typeof record.capabilityDigest === "string" && (record.decision === "trusted" || record.decision === "rejected") && typeof record.actor === "string" && typeof record.decidedAt === "string";
+async function appendJournalEvent(target: string, event: WorkflowTrustRequestedEvent | WorkflowTrustDecidedEvent): Promise<void> {
+  const handle = await open(target, "a", 0o600);
+  try { await handle.writeFile(`${JSON.stringify(event)}\n`, "utf8"); await handle.sync(); }
+  finally { await handle.close(); }
 }
 
 export async function readWorkflowTrustRecords(root: string): Promise<WorkflowTrustRecord[]> {
-  const target = await workflowTrustPath(root);
-  try {
-    return (await readFile(target, "utf8")).split("\n").filter(Boolean).map((line, index) => {
-      let value: unknown;
-      try { value = JSON.parse(line); }
-      catch { throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_RECORD_INVALID", `Workflow 信任记录第 ${index + 1} 行不是合法 JSON。`); }
-      if (!validRecord(value)) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_RECORD_INVALID", `Workflow 信任记录第 ${index + 1} 行包含不支持字段。`);
-      const record = value as WorkflowTrustRecord;
-      return { packageRef: record.packageRef, packageDigest: record.packageDigest, capabilityDigest: record.capabilityDigest, decision: record.decision, actor: record.actor, decidedAt: record.decidedAt };
-    });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+  return (await readJournal(await workflowTrustPath(root))).records;
 }
 
 export async function recoverStaleWorkflowTrustLock(root: string): Promise<boolean> {
@@ -101,55 +222,45 @@ export async function recoverStaleWorkflowTrustLock(root: string): Promise<boole
   return true;
 }
 
-export async function appendWorkflowTrustRecord(root: string, record: WorkflowTrustRecord): Promise<WorkflowTrustRecord> {
+export async function createWorkflowTrustRequest(root: string, request: WorkflowTrustRequestedEvent): Promise<void> {
   const target = await workflowTrustPath(root);
-  return withTrustLock(target, async () => {
-    const handle = await open(target, "a", 0o600);
-    try { await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8"); await handle.sync(); }
-    finally { await handle.close(); }
-    return record;
+  await withTrustLock(target, async () => {
+    const state = await readJournal(target);
+    const existing = state.requests.get(request.requestId);
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) === JSON.stringify(request)) return;
+      throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow 信任 requestId 已绑定其他请求。");
+    }
+    parseRequested(request as unknown as Record<string, unknown>, state.requests.size + state.decisions.size + 1);
+    await appendJournalEvent(target, request);
   });
 }
 
-function parsePending(value: unknown): PendingWorkflowTrustRequest | undefined {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const item = value as Record<string, unknown>;
-  if (Object.keys(item).some((key) => !["requestId", "packageRef", "packageDigest", "capabilityDigest", "createdAt", "expiresAt", "status"].includes(key))) return undefined;
-  if (typeof item.requestId !== "string" || typeof item.packageRef !== "string" || typeof item.packageDigest !== "string" || typeof item.capabilityDigest !== "string" || typeof item.createdAt !== "string" || typeof item.expiresAt !== "string" || (item.status !== "pending" && item.status !== "consumed")) return undefined;
-  return item as unknown as PendingWorkflowTrustRequest;
+export interface DecideWorkflowTrustRequestInput {
+  requestId: string;
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  decision: "trusted" | "rejected";
+  actor: string;
+  decidedAt: string;
 }
 
-async function readPending(target: string): Promise<PendingWorkflowTrustRequest[]> {
-  try {
-    return (await readFile(target, "utf8")).split("\n").filter(Boolean).map((line) => parsePending(JSON.parse(line))).map((item) => {
-      if (item === undefined) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow 信任待决记录无效。");
-      return item;
-    });
-  } catch (caught) { if ((caught as NodeJS.ErrnoException).code === "ENOENT") return []; throw caught; }
-}
-
-export async function createWorkflowTrustRequest(root: string, request: PendingWorkflowTrustRequest): Promise<void> {
+export async function decideWorkflowTrustRequest(root: string, input: DecideWorkflowTrustRequestInput): Promise<WorkflowTrustRecord> {
   const target = await workflowTrustPath(root);
   return withTrustLock(target, async () => {
-    const pending = await pendingTrustPath(root);
-    const handle = await open(pending, "a", 0o600);
-    try { await handle.writeFile(`${JSON.stringify(request)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
-  });
-}
-
-export async function consumeWorkflowTrustRequest(root: string, requestId: string, packageRef: string, packageDigest: string, capabilityDigest: string, record: WorkflowTrustRecord): Promise<WorkflowTrustRecord> {
-  const target = await workflowTrustPath(root);
-  return withTrustLock(target, async () => {
-    const pendingPath = await pendingTrustPath(root);
-    const pending = await readPending(pendingPath);
-    const index = pending.findIndex((item) => item.requestId === requestId);
-    const request = pending[index];
-    if (request === undefined || request.status !== "pending" || request.expiresAt <= new Date().toISOString() || request.packageRef !== packageRef || request.packageDigest !== packageDigest || request.capabilityDigest !== capabilityDigest) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow Package 信任请求不存在、已消费、已过期或已变化。");
-    pending[index] = { ...request, status: "consumed" };
-    const rewrite = await open(pendingPath, "w", 0o600);
-    try { await rewrite.writeFile(`${pending.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8"); await rewrite.sync(); } finally { await rewrite.close(); }
-    const handle = await open(target, "a", 0o600);
-    try { await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8"); await handle.sync(); } finally { await handle.close(); }
-    return record;
+    const state = await readJournal(target);
+    const request = state.requests.get(input.requestId);
+    if (request === undefined || request.packageRef !== input.packageRef || request.packageDigest !== input.packageDigest || request.capabilityDigest !== input.capabilityDigest) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow Package 信任请求不存在或已变化。");
+    if (request.actor !== input.actor) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_ACTOR_INVALID", "Workflow Package 信任决定 actor 与请求不匹配。");
+    const existing = state.decisions.get(input.requestId);
+    if (existing !== undefined) {
+      if (existing.decision !== input.decision) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_DECISION_CONFLICT", "同一 Workflow 信任请求不能记录冲突决定。");
+      return deriveRecord(request, existing);
+    }
+    if (!isCanonicalIso(input.decidedAt) || input.decidedAt < request.createdAt || input.decidedAt >= request.expiresAt || request.expiresAt <= new Date().toISOString()) throw new WorkflowTrustStoreError("WSSPEC_WORKFLOW_TRUST_REQUEST_INVALID", "Workflow Package 信任请求已过期或时间无效。");
+    const decision: WorkflowTrustDecidedEvent = { event: "decided", requestId: input.requestId, decision: input.decision, actor: input.actor, decidedAt: input.decidedAt };
+    await appendJournalEvent(target, decision);
+    return deriveRecord(request, decision);
   });
 }

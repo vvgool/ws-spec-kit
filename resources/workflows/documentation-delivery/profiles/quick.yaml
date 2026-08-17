@@ -1,5 +1,11 @@
 version: 1
-id: quick
-workflow: documentation-delivery
-reviewIterations: 1
-audit: standard
+profile:
+  id: quick
+  workflow: documentation-delivery
+steps:
+  clarify: { artifactLevel: compact }
+  plan: { artifactLevel: compact }
+  review-fix: { maxIterations: 1 }
+  verify-document: { gates: [docs.integrity] }
+publishing: { issueRequired: false, knowledgeRequired: false }
+audit: { level: standard }

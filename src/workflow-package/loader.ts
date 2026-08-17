@@ -5,22 +5,34 @@ import { parse } from "yaml";
 import { sha256 } from "../domain/digests.js";
 import { builtinResourcesRoot, loadBuiltinCatalog } from "../resources/catalog.js";
 import { lockWorkflowPackage, workflowPackageContentDigest } from "./lock.js";
-import type { ProfileDefinition, WorkflowChangePolicy, WorkflowDefinition, WorkflowGate, WorkflowManifest, WorkflowPackage, WorkflowPackageFile, WorkflowPackageLock, WorkflowStep } from "./types.js";
+import type { ProfileAudit, ProfileDefinition, ProfileIdentity, ProfilePublishing, ProfileStepOverlay, WorkflowArtifactInput, WorkflowChangePolicy, WorkflowDefinition, WorkflowGate, WorkflowIdentity, WorkflowInputDefinition, WorkflowLoop, WorkflowManifest, WorkflowPackage, WorkflowPackageFile, WorkflowPackageLock, WorkflowRetry, WorkflowSkillBinding, WorkflowStep } from "./types.js";
 import { WorkflowPackageError } from "./types.js";
 
 export interface LoadWorkflowPackageInput { root: string; ref: string }
 
-interface BuiltinProvenance { ref: string; root: string; contentDigest: string; capabilityDigest: string }
+interface BuiltinProvenance { ref: string; snapshot: string }
 const builtinProvenance = new WeakMap<WorkflowPackage, BuiltinProvenance>();
 
-function manifestCapabilityDigest(manifest: WorkflowManifest): string {
-  const capabilities = [...new Set([...manifest.capabilities, ...manifest.externalSideEffects])].sort();
-  return sha256(`${JSON.stringify({ version: 1, capabilities })}\n`);
+function normalizedPackageSnapshot(pkg: WorkflowPackage): string {
+  return JSON.stringify({
+    ref: pkg.ref,
+    root: pkg.root,
+    manifest: pkg.manifest,
+    workflow: pkg.workflow,
+    profiles: [...pkg.profiles.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    packageSkills: [...pkg.packageSkills.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    files: [...pkg.files].sort((left, right) => left.path.localeCompare(right.path)),
+    contentDigest: pkg.contentDigest,
+  });
 }
 
-export function builtinWorkflowPackageProvenance(pkg: WorkflowPackage): BuiltinProvenance | undefined {
+export async function builtinWorkflowPackageProvenance(pkg: WorkflowPackage): Promise<BuiltinProvenance | undefined> {
   const provenance = builtinProvenance.get(pkg);
-  if (provenance === undefined || provenance.ref !== pkg.ref || provenance.root !== pkg.root || provenance.contentDigest !== pkg.contentDigest || provenance.capabilityDigest !== manifestCapabilityDigest(pkg.manifest)) return undefined;
+  if (provenance === undefined || provenance.ref !== pkg.ref || !pkg.ref.startsWith("builtin://")) return undefined;
+  const canonical = await loadWorkflowPackage({ root: pkg.root, ref: provenance.ref });
+  const currentSnapshot = normalizedPackageSnapshot(pkg);
+  const canonicalSnapshot = normalizedPackageSnapshot(canonical);
+  if (currentSnapshot !== provenance.snapshot || currentSnapshot !== canonicalSnapshot) return undefined;
   return provenance;
 }
 
@@ -71,22 +83,34 @@ function strings(value: unknown, code: `WSSPEC_${string}`, label: string): strin
   return [...value];
 }
 
-async function collectTreeFiles(root: string, relativeDirectory: string): Promise<string[]> {
+function boolean(value: unknown, code: `WSSPEC_${string}`, label: string): boolean {
+  if (typeof value !== "boolean") error(code, `${label} 必须是布尔值。`);
+  return value;
+}
+
+function positiveInteger(value: unknown, code: `WSSPEC_${string}`, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) error(code, `${label} 必须是正整数。`);
+  return value;
+}
+
+async function collectTreeFiles(root: string, relativeDirectory: string, optionalRoot: boolean): Promise<string[]> {
   const directory = path.join(root, relativeDirectory);
   try { await assertContained(root, directory); }
-  catch (caught) { if ((caught as NodeJS.ErrnoException).code === "ENOENT") return []; throw caught; }
-  try {
-    const entries = await readdir(directory, { withFileTypes: true });
-    const files: string[] = [];
-    for (const entry of entries) {
-      const relative = path.posix.join(relativeDirectory, entry.name);
-      const absolute = path.join(root, relative);
-      await assertContained(root, absolute);
-      if ((await stat(absolute)).isDirectory()) files.push(...await collectTreeFiles(root, relative));
-      else if ((await lstat(absolute)).isFile() || (await lstat(absolute)).isSymbolicLink()) files.push(relative);
+  catch (caught) { if (optionalRoot && (caught as NodeJS.ErrnoException).code === "ENOENT") return []; throw caught; }
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const relative = path.posix.join(relativeDirectory, entry.name);
+    const absolute = path.join(root, relative);
+    await assertContained(root, absolute);
+    const target = await stat(absolute);
+    if (target.isDirectory()) files.push(...await collectTreeFiles(root, relative, false));
+    else {
+      const source = await lstat(absolute);
+      if (source.isFile() || source.isSymbolicLink()) files.push(relative);
     }
-    return files;
-  } catch (caught) { throw caught; }
+  }
+  return files;
 }
 
 async function collectFile(root: string, relative: string, missingCode: `WSSPEC_${string}` = "WSSPEC_WORKFLOW_PACKAGE_FILE_MISSING"): Promise<WorkflowPackageFile> {
@@ -109,11 +133,67 @@ function parseManifest(value: unknown): WorkflowManifest {
   return { version: 1, id: string(source.id, code, "Manifest id"), ...(description === undefined ? {} : { description }), entry: "workflow.yaml", profiles: names(source.profiles, code, "Manifest profiles"), skills: names(source.skills, code, "Manifest skills"), capabilities: names(source.capabilities, code, "Manifest capabilities"), externalSideEffects: names(source.externalSideEffects, code, "Manifest externalSideEffects"), connectors: names(source.connectors, code, "Manifest connectors") };
 }
 
+function parseSkillBinding(value: unknown): WorkflowSkillBinding {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  const source = record(value, code, "Step skill binding", ["ref", "required", "fallback"]);
+  const result: WorkflowSkillBinding = { ref: string(source.ref, code, "Step skill ref") };
+  if (source.required !== undefined) result.required = boolean(source.required, code, "Step skill required");
+  if (source.fallback !== undefined) result.fallback = string(source.fallback, code, "Step skill fallback");
+  return result;
+}
+
+function parseArtifactInput(value: unknown): string | WorkflowArtifactInput {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  if (typeof value === "string") return string(value, code, "Step input");
+  const source = record(value, code, "Step artifact input", ["artifact", "required"]);
+  const result: WorkflowArtifactInput = { artifact: string(source.artifact, code, "Step artifact input.artifact") };
+  if (source.required !== undefined) result.required = boolean(source.required, code, "Step artifact input.required");
+  return result;
+}
+
+function parseRetry(value: unknown): WorkflowRetry {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  const source = record(value, code, "Step retry", ["maxAttempts"]);
+  return { maxAttempts: positiveInteger(source.maxAttempts, code, "Step retry.maxAttempts") };
+}
+
+function parseLoop(value: unknown): WorkflowLoop {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  const source = record(value, code, "Step loop", ["until", "maxIterations"]);
+  return { until: string(source.until, code, "Step loop.until"), maxIterations: positiveInteger(source.maxIterations, code, "Step loop.maxIterations") };
+}
+
 function parseStep(value: unknown): WorkflowStep {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
   const source = record(value, code, "Workflow Step", ["id", "uses", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
-  if (source.skills !== undefined && (!Array.isArray(source.skills) || source.skills.some((skill) => typeof skill !== "string" && (skill === null || typeof skill !== "object" || Array.isArray(skill) || Object.keys(skill).some((key) => !["ref", "required", "fallback"].includes(key)) || typeof (skill as Record<string, unknown>).ref !== "string")))) error(code, "Step skills 必须是引用或绑定对象数组。");
-  return { ...(source as unknown as WorkflowStep), id: string(source.id, code, "Step id"), skills: (source.skills ?? []) as WorkflowStep["skills"] };
+  const result: WorkflowStep = { id: string(source.id, code, "Step id"), uses: string(source.uses, code, "Step uses") };
+  if (source.needs !== undefined) result.needs = strings(source.needs, code, "Step needs");
+  if (source.when !== undefined) result.when = string(source.when, code, "Step when");
+  if (source.retry !== undefined) result.retry = parseRetry(source.retry);
+  if (source.loop !== undefined) result.loop = parseLoop(source.loop);
+  if (source.approval !== undefined) {
+    if (source.approval !== "required" && typeof source.approval !== "boolean") error(code, "Step approval 必须是布尔值或 required。");
+    result.approval = source.approval;
+  }
+  if (source.inputs !== undefined) {
+    if (!Array.isArray(source.inputs)) error(code, "Step inputs 必须是数组。");
+    result.inputs = source.inputs.map(parseArtifactInput);
+  }
+  if (source.outputs !== undefined) result.outputs = strings(source.outputs, code, "Step outputs");
+  if (source.skills !== undefined) {
+    if (!Array.isArray(source.skills)) error(code, "Step skills 必须是绑定对象数组。");
+    result.skills = source.skills.map(parseSkillBinding);
+  }
+  if (source.action !== undefined) result.action = string(source.action, code, "Step action");
+  if (source.objective !== undefined) result.objective = string(source.objective, code, "Step objective");
+  if (source.expectedOutcome !== undefined) result.expectedOutcome = string(source.expectedOutcome, code, "Step expectedOutcome");
+  if (source.until !== undefined) result.until = string(source.until, code, "Step until");
+  if (source.maxIterations !== undefined) result.maxIterations = positiveInteger(source.maxIterations, code, "Step maxIterations");
+  if (source.steps !== undefined) {
+    if (!Array.isArray(source.steps)) error(code, "Step steps 必须是数组。");
+    result.steps = source.steps.map(parseStep);
+  }
+  return result;
 }
 
 function parseGate(value: unknown): WorkflowGate {
@@ -130,26 +210,82 @@ function parseChangePolicy(value: unknown): WorkflowChangePolicy {
   return { kind: source.kind, allowedPaths: strings(source.allowedPaths, code, "changePolicy.allowedPaths") };
 }
 
+function parseWorkflowIdentity(value: unknown): WorkflowIdentity {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  const source = record(value, code, "Workflow workflow", ["id", "version"]);
+  if (source.version !== 1) error("WSSPEC_WORKFLOW_PACKAGE_VERSION_UNSUPPORTED", "只支持 Workflow identity v1。");
+  return { id: string(source.id, code, "Workflow id"), version: 1 };
+}
+
+function parseWorkflowInputs(value: unknown): Record<string, WorkflowInputDefinition> {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) error(code, "Workflow inputs 必须是对象。");
+  const result: Record<string, WorkflowInputDefinition> = {};
+  for (const [id, input] of Object.entries(value as Record<string, unknown>)) {
+    if (id === "") error(code, "Workflow input id 不能为空。");
+    const source = record(input, code, `Workflow input ${id}`, ["accepts"]);
+    result[id] = { accepts: strings(source.accepts, code, `Workflow input ${id}.accepts`) };
+  }
+  return result;
+}
+
 function parseWorkflow(value: unknown): WorkflowDefinition {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
-  const source = record(value, code, "workflow.yaml", ["version", "id", "inputs", "steps", "gates", "changePolicy"]);
+  const source = record(value, code, "workflow.yaml", ["version", "workflow", "inputs", "steps", "gates", "changePolicy"]);
   if (source.version !== 1) error("WSSPEC_WORKFLOW_PACKAGE_VERSION_UNSUPPORTED", "只支持 Workflow v1。");
-  if (!Array.isArray(source.steps) || (source.gates !== undefined && !Array.isArray(source.gates))) error(code, "Workflow steps 和 gates 必须是数组。");
-  const changePolicy = source.changePolicy === undefined ? undefined : parseChangePolicy(source.changePolicy);
-  return { ...(source as unknown as WorkflowDefinition), version: 1, id: string(source.id, code, "Workflow id"), steps: source.steps.map(parseStep), gates: (source.gates ?? []).map(parseGate), ...(changePolicy === undefined ? {} : { changePolicy }) };
+  if (!Array.isArray(source.steps) || !Array.isArray(source.gates)) error(code, "Workflow steps 和 gates 必须是数组。");
+  return {
+    version: 1,
+    workflow: parseWorkflowIdentity(source.workflow),
+    inputs: parseWorkflowInputs(source.inputs),
+    steps: source.steps.map(parseStep),
+    gates: source.gates.map(parseGate),
+    changePolicy: parseChangePolicy(source.changePolicy),
+  };
+}
+
+function parseProfileIdentity(value: unknown): ProfileIdentity {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
+  const source = record(value, code, "Profile profile", ["id", "workflow"]);
+  return { id: string(source.id, code, "Profile id"), workflow: string(source.workflow, code, "Profile workflow") };
+}
+
+function parseProfileStep(value: unknown): ProfileStepOverlay {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
+  const source = record(value, code, "Profile step", ["enabled", "approval", "artifactLevel", "gates", "maxIterations"]);
+  const result: ProfileStepOverlay = {};
+  if (source.enabled !== undefined) result.enabled = boolean(source.enabled, code, "Profile step.enabled");
+  if (source.approval !== undefined) result.approval = boolean(source.approval, code, "Profile step.approval");
+  if (source.artifactLevel !== undefined) result.artifactLevel = string(source.artifactLevel, code, "Profile step.artifactLevel");
+  if (source.gates !== undefined) result.gates = strings(source.gates, code, "Profile step.gates");
+  if (source.maxIterations !== undefined) result.maxIterations = positiveInteger(source.maxIterations, code, "Profile step.maxIterations");
+  return result;
+}
+
+function parseProfileSteps(value: unknown): Record<string, ProfileStepOverlay> {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) error(code, "Profile steps 必须是对象。");
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([id, overlay]) => [id, parseProfileStep(overlay)]));
+}
+
+function parsePublishing(value: unknown): ProfilePublishing {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
+  const source = record(value, code, "Profile publishing", ["issueRequired", "knowledgeRequired"]);
+  return { issueRequired: boolean(source.issueRequired, code, "Profile publishing.issueRequired"), knowledgeRequired: boolean(source.knowledgeRequired, code, "Profile publishing.knowledgeRequired") };
+}
+
+function parseAudit(value: unknown): ProfileAudit {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
+  const source = record(value, code, "Profile audit", ["level"]);
+  if (source.level !== "standard" && source.level !== "complete") error(code, "Profile audit.level 不受支持。");
+  return { level: source.level };
 }
 
 function parseProfile(value: unknown): ProfileDefinition {
   const code = "WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID" as const;
-  const source = record(value, code, "Profile", ["version", "id", "workflow", "design", "reviewIterations", "audit", "profile", "steps", "publishing"]);
+  const source = record(value, code, "Profile", ["version", "profile", "steps", "publishing", "audit"]);
   if (source.version !== 1) error("WSSPEC_WORKFLOW_PACKAGE_VERSION_UNSUPPORTED", "只支持 Profile v1。");
-  if (source.design !== undefined && typeof source.design !== "boolean") error(code, "Profile design 必须是布尔值。");
-  const reviewIterations = source.reviewIterations;
-  const audit = source.audit;
-  if (reviewIterations !== undefined && (typeof reviewIterations !== "number" || !Number.isSafeInteger(reviewIterations) || reviewIterations < 1)) error(code, "Profile reviewIterations 必须是正整数。");
-  if (audit !== undefined && audit !== "standard" && audit !== "complete" && (audit === null || typeof audit !== "object" || Array.isArray(audit) || Object.keys(audit).some((key) => key !== "level") || !["standard", "complete"].includes((audit as { level?: unknown }).level as string))) error(code, "Profile audit 不受支持。");
-  const identity = source.profile === undefined ? source : record(source.profile, code, "Profile profile", ["id", "workflow"]);
-  return { version: 1, id: string(identity.id, code, "Profile id"), workflow: string(identity.workflow, code, "Profile workflow"), ...(source.design === undefined ? {} : { design: source.design }), ...(reviewIterations === undefined ? {} : { reviewIterations: reviewIterations as number }), ...(audit === undefined ? {} : { audit: audit as Exclude<ProfileDefinition["audit"], undefined> }), ...(source.steps === undefined ? {} : { steps: source.steps }), ...(source.publishing === undefined ? {} : { publishing: source.publishing }) } as ProfileDefinition;
+  return { version: 1, profile: parseProfileIdentity(source.profile), steps: parseProfileSteps(source.steps), publishing: parsePublishing(source.publishing), audit: parseAudit(source.audit) };
 }
 
 function deepFreeze<T>(value: T): T {
@@ -183,26 +319,29 @@ async function validateExistingLock(root: string, expected: WorkflowPackageLock)
 }
 
 function validatePackageSkillReferences(workflow: WorkflowDefinition, packageSkills: Map<string, { entrypoint: string; digest: string }>): void {
-  for (const step of workflow.steps) for (const binding of step.skills) {
-    const ref = typeof binding === "string" ? binding : binding.ref;
-    if (ref.startsWith("package://skills/") && !packageSkills.has(ref)) error("WSSPEC_WORKFLOW_PACKAGE_SKILL_UNDECLARED", "Workflow 引用了 Manifest 未声明的 Package Skill。");
-  }
+  const visit = (steps: WorkflowStep[]): void => {
+    for (const step of steps) {
+      for (const binding of step.skills ?? []) if (binding.ref.startsWith("package://skills/") && !packageSkills.has(binding.ref)) error("WSSPEC_WORKFLOW_PACKAGE_SKILL_UNDECLARED", "Workflow 引用了 Manifest 未声明的 Package Skill。");
+      visit(step.steps ?? []);
+    }
+  };
+  visit(workflow.steps);
 }
 
 export async function loadWorkflowPackage(input: LoadWorkflowPackageInput): Promise<WorkflowPackage> {
   const parsedRef = normalizeRef(input.ref);
   const sourceRoot = parsedRef.source === "builtin" ? builtinResourcesRoot() : input.root;
-  if (parsedRef.source === "builtin" && !(await loadBuiltinCatalog()).workflows.some((workflow) => workflow.id === parsedRef.id)) error("WSSPEC_WORKFLOW_PACKAGE_NOT_FOUND", "内置 Workflow Package 不存在。");
+  if (parsedRef.source === "builtin" && !(await loadBuiltinCatalog()).workflows.some((workflow) => workflow.workflow.id === parsedRef.id)) error("WSSPEC_WORKFLOW_PACKAGE_NOT_FOUND", "内置 Workflow Package 不存在。");
   const packagesRoot = parsedRef.source === "builtin" ? path.join(sourceRoot, "workflows") : path.join(sourceRoot, ".wsspec", "workflows");
   const packageRoot = path.resolve(packagesRoot, parsedRef.id);
   await assertContained(packagesRoot, packageRoot);
   const manifest = parseManifest(await readYaml(path.join(packageRoot, "manifest.yaml"), "WSSPEC_WORKFLOW_PACKAGE_MANIFEST_MISSING", "manifest.yaml"));
   const workflow = parseWorkflow(await readYaml(path.join(packageRoot, manifest.entry), "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_MISSING", manifest.entry));
-  if (manifest.id !== workflow.id) error("WSSPEC_WORKFLOW_PACKAGE_MANIFEST_INVALID", "Manifest 与 Workflow 的 id 必须一致。");
+  if (manifest.id !== workflow.workflow.id) error("WSSPEC_WORKFLOW_PACKAGE_MANIFEST_INVALID", "Manifest 与 Workflow 的 id 必须一致。");
   const profiles = new Map<string, ProfileDefinition>();
   for (const id of manifest.profiles) {
     const profile = parseProfile(await readYaml(path.join(packageRoot, "profiles", `${id}.yaml`), "WSSPEC_WORKFLOW_PACKAGE_PROFILE_MISSING", `profiles/${id}.yaml`));
-    if (profile.id !== id || profile.workflow !== workflow.id) error("WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID", "Profile 必须绑定当前 Workflow。");
+    if (profile.profile.id !== id || profile.profile.workflow !== workflow.workflow.id) error("WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID", "Profile 必须绑定当前 Workflow。");
     profiles.set(id, profile);
   }
   const packageSkills = new Map<string, { entrypoint: string; digest: string }>();
@@ -213,17 +352,22 @@ export async function loadWorkflowPackage(input: LoadWorkflowPackageInput): Prom
   for (const id of profiles.keys()) add(await collectFile(packageRoot, path.posix.join("profiles", `${id}.yaml`), "WSSPEC_WORKFLOW_PACKAGE_PROFILE_MISSING"));
   for (const id of manifest.skills) {
     const skillDirectory = path.posix.join("skills", id);
-    const skillFiles = await Promise.all((await collectTreeFiles(packageRoot, skillDirectory)).map((relative) => collectFile(packageRoot, relative)));
+    const skillFiles = new Map<string, WorkflowPackageFile>();
+    for (const relative of await collectTreeFiles(packageRoot, skillDirectory, true)) {
+      const file = await collectFile(packageRoot, relative);
+      skillFiles.set(file.path, file);
+    }
     const entrypoint = path.posix.join(skillDirectory, "SKILL.md");
-    if (!skillFiles.some((file) => file.path === entrypoint)) await collectFile(packageRoot, entrypoint, "WSSPEC_WORKFLOW_PACKAGE_SKILL_MISSING");
-    for (const file of skillFiles) add(file);
-    packageSkills.set(`package://skills/${id}`, { entrypoint: path.join(packageRoot, entrypoint), digest: workflowPackageContentDigest(skillFiles) });
+    const entryFile = await collectFile(packageRoot, entrypoint, "WSSPEC_WORKFLOW_PACKAGE_SKILL_MISSING");
+    skillFiles.set(entryFile.path, entryFile);
+    for (const file of skillFiles.values()) add(file);
+    packageSkills.set(`package://skills/${id}`, { entrypoint: path.join(packageRoot, entrypoint), digest: workflowPackageContentDigest([...skillFiles.values()]) });
   }
   validatePackageSkillReferences(workflow, packageSkills);
-  for (const directory of ["schemas", "templates"]) for (const relative of await collectTreeFiles(packageRoot, directory)) add(await collectFile(packageRoot, relative));
+  for (const directory of ["schemas", "templates"]) for (const relative of await collectTreeFiles(packageRoot, directory, true)) add(await collectFile(packageRoot, relative));
   const files = [...allFiles.values()].sort((left, right) => left.path.localeCompare(right.path));
   const pkg: WorkflowPackage = { ref: input.ref, root: packageRoot, manifest, workflow, profiles, packageSkills, files, contentDigest: workflowPackageContentDigest(files) };
   await validateExistingLock(packageRoot, lockWorkflowPackage(pkg));
-  if (parsedRef.source === "builtin") { builtinProvenance.set(pkg, { ref: pkg.ref, root: pkg.root, contentDigest: pkg.contentDigest, capabilityDigest: manifestCapabilityDigest(pkg.manifest) }); return deepFreeze(pkg); }
+  if (parsedRef.source === "builtin") { builtinProvenance.set(pkg, { ref: pkg.ref, snapshot: normalizedPackageSnapshot(pkg) }); return deepFreeze(pkg); }
   return pkg;
 }

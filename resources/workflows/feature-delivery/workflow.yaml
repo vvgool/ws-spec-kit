@@ -1,26 +1,138 @@
 version: 1
-id: feature-delivery
-changePolicy:
-  kind: feature
-  allowedPaths: ["**"]
+workflow:
+  id: feature-delivery
+  version: 1
+inputs:
+  requirement:
+    accepts: [user.prompt, local.file, github.issue, gitlab.issue, feishu.document]
 steps:
+  - id: intake
+    uses: connector.execute
+    action: requirement.capture
+    outputs: [requirement-source]
   - id: explore
-    skills: [builtin://skills/requirement-exploration]
+    uses: agent.execute
+    needs: [intake]
+    objective: 探索代码并提取需求相关约束
+    skills:
+      - ref: builtin://skills/requirement-exploration
+        required: true
+    outputs: [exploration-report]
+  - id: clarify
+    uses: agent.execute
+    needs: [explore]
+    objective: 澄清需求并生成可验收规格
+    skills:
+      - ref: builtin://skills/requirement-exploration
+        required: true
+    outputs: [specification]
+    approval: required
   - id: design
-    skills: [builtin://skills/solution-design]
+    uses: agent.execute
+    needs: [clarify]
+    objective: 形成可实施的技术方案
+    skills:
+      - ref: builtin://skills/solution-design
+        required: true
+    outputs: [design]
+    approval: required
   - id: plan
-    skills: [builtin://skills/task-planning]
+    uses: agent.execute
+    needs: [clarify, design]
+    objective: 将设计拆分为可验证任务
+    skills:
+      - ref: builtin://skills/task-planning
+        required: true
+    outputs: [tasks]
+    inputs:
+      - artifact: specification
+        required: true
+      - artifact: design
+        required: false
+  - id: write-tests
+    uses: agent.execute
+    needs: [plan]
+    objective: 根据当前任务先编写能够因缺少功能而失败的测试
+    skills:
+      - ref: builtin://skills/tdd-implementation
+        required: true
+    outputs: [red-test-result]
+  - id: verify-red
+    uses: command.execute
+    action: quality.test
+    expectedOutcome: test-failure
+    needs: [write-tests]
+    outputs: [red-evidence]
   - id: implement
-    skills: [builtin://skills/tdd-implementation]
-  - id: review
-    skills: [builtin://skills/code-review]
-  - id: fix
-    skills: [builtin://skills/bug-fixing]
+    uses: agent.execute
+    needs: [verify-red]
+    objective: 在保留 Red 测试的前提下完成最小实现
+    skills:
+      - ref: builtin://skills/tdd-implementation
+        required: true
+    outputs: [implementation-result]
+  - id: verify-green
+    uses: command.execute
+    action: quality.test
+    expectedOutcome: success
+    needs: [implement]
+    inputs: [red-evidence]
+    outputs: [tdd-evidence]
+  - id: review-fix
+    uses: control.loop
+    needs: [verify-green]
+    until: ${review-result.approved}
+    maxIterations: 5
+    steps:
+      - id: review
+        uses: agent.execute
+        skills:
+          - ref: builtin://skills/code-review
+            required: true
+        outputs: [review-result]
+      - id: fix
+        uses: agent.execute
+        when: ${review-result.approved == false}
+        skills:
+          - ref: builtin://skills/bug-fixing
+            required: true
+      - id: verify
+        uses: command.execute
+        action: quality.verify
+  - id: commit
+    uses: connector.execute
+    action: git.commit
+    needs: [review-fix]
+    approval: required
+  - id: update-issue
+    uses: connector.execute
+    action: issue.update
+    needs: [commit]
+    when: ${bindings.issue.exists}
+  - id: update-wiki
+    uses: connector.execute
+    action: knowledge.publish
+    needs: [update-issue]
+    when: ${bindings.knowledge.exists}
+  - id: close-issue
+    uses: connector.execute
+    action: issue.close
+    needs: [update-wiki]
+    when: ${bindings.issue.exists}
+    approval: required
+  - id: close
+    uses: control.close
+    needs: [close-issue]
 gates:
+  - id: test
+    evidence: trusted
+    command: [wspec, gate, test]
   - id: verify-red
     evidence: trusted
     command: [wspec, gate, test, --expect-failure]
   - id: verify-green
     evidence: trusted
     command: [wspec, gate, test]
-
+changePolicy:
+  kind: feature
+  allowedPaths: ["**"]

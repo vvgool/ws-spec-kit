@@ -1,6 +1,12 @@
 version: 1
-id: quick
-workflow: feature-delivery
-design: false
-reviewIterations: 1
-audit: standard
+profile:
+  id: quick
+  workflow: feature-delivery
+steps:
+  clarify: { approval: false, artifactLevel: compact }
+  design: { enabled: false }
+  plan: { artifactLevel: compact }
+  review-fix: { maxIterations: 1 }
+  verify-green: { gates: [test] }
+publishing: { issueRequired: false, knowledgeRequired: false }
+audit: { level: standard }

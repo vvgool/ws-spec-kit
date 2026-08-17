@@ -1,5 +1,11 @@
 version: 1
-id: governed
-workflow: documentation-delivery
-reviewIterations: 5
-audit: complete
+profile:
+  id: governed
+  workflow: documentation-delivery
+steps:
+  clarify: { approval: true }
+  plan: { approval: true }
+  review-fix: { maxIterations: 5 }
+  verify-document: { gates: [docs.integrity] }
+publishing: { issueRequired: true, knowledgeRequired: true }
+audit: { level: complete }

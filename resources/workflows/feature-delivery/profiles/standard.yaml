@@ -1,6 +1,11 @@
 version: 1
-id: standard
-workflow: feature-delivery
-design: true
-reviewIterations: 5
-audit: standard
+profile:
+  id: standard
+  workflow: feature-delivery
+steps:
+  clarify: { approval: true }
+  design: { approval: true }
+  review-fix: { maxIterations: 5 }
+  verify-green: { gates: [test] }
+publishing: { issueRequired: false, knowledgeRequired: false }
+audit: { level: standard }

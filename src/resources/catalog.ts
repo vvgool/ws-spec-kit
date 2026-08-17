@@ -2,15 +2,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
+import type { ProfileDefinition, WorkflowDefinition } from "../workflow-package/types.js";
+
 export interface BuiltinSkill { id: string; version: string; description: string; entry: string }
-export interface BuiltinProfile { id: string }
-export interface BuiltinWorkflow {
-  id: string;
-  steps: Array<{ id: string; skills: string[] }>;
-  gates: Array<{ id: string; evidence: "trusted" | "attested"; command: string[] }>;
-  changePolicy: { kind: "feature" | "documentation-only"; allowedPaths: string[] };
-  profiles: BuiltinProfile[];
-}
+export type BuiltinProfile = ProfileDefinition;
+export interface BuiltinWorkflow extends WorkflowDefinition { profiles: BuiltinProfile[] }
 export interface BuiltinCatalog { version: 1; skills: BuiltinSkill[]; workflows: BuiltinWorkflow[] }
 
 export function builtinResourcesRoot(): string {
@@ -31,4 +27,3 @@ export async function loadBuiltinCatalog(root = builtinResourcesRoot()): Promise
   }));
   return { version: source.version, skills, workflows };
 }
-
