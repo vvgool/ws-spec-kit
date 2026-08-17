@@ -1,0 +1,107 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { evaluateProfileUpgrade, selectProfile } from "../../src/policy/profile.js";
+import { evaluateRiskRules, type RiskEvaluationInput } from "../../src/policy/risk.js";
+
+test("auto uses provisional quick during intake and standard for unknown post-explore risk", () => {
+  assert.equal(selectProfile({ mode: "auto", phase: "intake", risk: null }).id, "quick");
+  assert.equal(selectProfile({ mode: "auto", phase: "post-explore", risk: null }).id, "standard");
+});
+
+test("auto deterministically maps known risk while explicit mode remains explicit", () => {
+  assert.equal(selectProfile({ mode: "auto", phase: "post-explore", risk: "low" }).id, "quick");
+  assert.equal(selectProfile({ mode: "auto", phase: "post-explore", risk: "medium" }).id, "standard");
+  assert.equal(selectProfile({ mode: "auto", phase: "post-explore", risk: "high" }).id, "governed");
+  assert.deepEqual(selectProfile({ mode: "governed", phase: "intake", risk: "low" }), { id: "governed", provisional: false, source: "explicit" });
+});
+
+test("automatic upgrade is one-way and returns affected Steps without mutating Runtime", () => {
+  assert.equal(evaluateProfileUpgrade({ current: "standard", minimum: "quick" }).profile, "standard");
+  assert.deepEqual(evaluateProfileUpgrade({ current: "standard", minimum: "governed", affectedSteps: ["plan", "design", "plan"] }), {
+    profile: "governed",
+    upgraded: true,
+    affectedSteps: ["design", "plan"],
+  });
+  assert.deepEqual(evaluateProfileUpgrade({ current: "governed", minimum: "quick", affectedSteps: ["design"] }), {
+    profile: "governed",
+    upgraded: false,
+    affectedSteps: [],
+  });
+});
+
+const neutralRisk: RiskEvaluationInput = {
+  issueLabels: [],
+  requirementRisk: null,
+  affectedPaths: [],
+  modifiedPaths: [],
+  fileTypes: [],
+  plannedActions: [],
+};
+
+test("risk rules read every deterministic signal and choose the strictest minimum", () => {
+  const cases: Array<[string, Partial<RiskEvaluationInput>]> = [
+    ["Issue label", { issueLabels: ["security"] }],
+    ["requirement risk", { requirementRisk: "high" }],
+    ["affected path", { affectedPaths: ["src/auth/session.ts"] }],
+    ["modified path", { modifiedPaths: ["migrations/20260817.sql"] }],
+    ["file type", { fileTypes: ["sql"] }],
+    ["planned action", { plannedActions: ["deploy"] }],
+  ];
+  for (const [label, override] of cases) {
+    const result = evaluateRiskRules({ ...neutralRisk, ...override });
+    assert.equal(result.minimum, "governed", label);
+    assert.ok(result.matchedRules.length > 0, label);
+  }
+});
+
+test("risk remains unknown before evidence exists and documentation-only evidence is low", () => {
+  assert.deepEqual(evaluateRiskRules(neutralRisk), { risk: null, minimum: "standard", matchedRules: [], affectedSteps: [] });
+  assert.deepEqual(evaluateRiskRules({ ...neutralRisk, requirementRisk: "low" }), {
+    risk: "low",
+    minimum: "quick",
+    matchedRules: ["low-requirement"],
+    affectedSteps: ["clarify", "plan", "review-fix", "verify-green"],
+  });
+  assert.deepEqual(evaluateRiskRules({
+    ...neutralRisk,
+    affectedPaths: ["docs/guide.md"],
+    modifiedPaths: ["README.md"],
+    fileTypes: ["md"],
+  }), { risk: "low", minimum: "quick", matchedRules: ["documentation-only"], affectedSteps: ["clarify", "plan", "review-fix", "verify-document"] });
+});
+
+test("custom project rules match all declared selectors and return sorted affected Steps", () => {
+  const result = evaluateRiskRules({
+    ...neutralRisk,
+    issueLabels: ["regulated-ledger"],
+    affectedPaths: ["src/billing/charge.ts"],
+    plannedActions: ["write-ledger"],
+    rules: [{
+      id: "payment-write",
+      labels: ["regulated-ledger"],
+      paths: ["src/billing/**"],
+      actions: ["write-ledger"],
+      minimum: "governed",
+      affectedSteps: ["verify-green", "design", "verify-green"],
+    }],
+  });
+
+  assert.equal(result.minimum, "governed");
+  assert.ok(result.matchedRules.includes("payment-write"));
+  assert.deepEqual(result.affectedSteps, ["design", "verify-green"]);
+});
+
+test("documentation risk always returns documentation Workflow affected Steps", () => {
+  const result = evaluateRiskRules({
+    ...neutralRisk,
+    workflow: "documentation-only",
+    requirementRisk: "high",
+    affectedPaths: ["docs/security.md"],
+    fileTypes: ["md"],
+  });
+
+  assert.equal(result.minimum, "governed");
+  assert.ok(result.affectedSteps.includes("verify-document"));
+  assert.ok(!result.affectedSteps.includes("verify-green"));
+});

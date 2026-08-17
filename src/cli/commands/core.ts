@@ -8,10 +8,8 @@ import { verifyWorkItem } from "../../engine/verification.js";
 import { closeWorkItem } from "../../engine/archive.js";
 import { transitionRuntime } from "../../engine/scheduler.js";
 import { advanceWorkflow } from "../../engine/orchestrator.js";
-import { workflowFor } from "../../engine/orchestrator.js";
+import { validateLegacyWorkflowSnapshot, workflowFor } from "../../engine/orchestrator.js";
 import { requestArtifactApproval } from "../../engine/approvals.js";
-import { compileWorkflow, type ProjectConfig } from "../../engine/compiler.js";
-import type { Workflow } from "../../domain/workflow.js";
 import { initializeControlPlane, readControlPlane, recoverControlPlane } from "../../storage/control-plane.js";
 import { initRepository } from "../../storage/repository.js";
 import { createWorkItem } from "../../storage/work-items.js";
@@ -26,9 +24,11 @@ export async function runCommand(cwd: string, argv: string[], _json = false): Pr
   if (command === "init") return initRepository(cwd);
   if (command === "new" || command === "new-file") {
     const workItemId = required(args, 0, "workItemId") as `WSS-${string}`; const title = required(args, 1, "title"); const source = required(args, 2, "source");
-    const workflowSource = parse(await readFile(path.join(cwd, ".wsspec/workflow.yaml"), "utf8")) as Workflow;
-    const configSource = parse(await readFile(path.join(cwd, ".wsspec/config.yaml"), "utf8")) as ProjectConfig;
-    compileWorkflow(workflowSource, configSource);
+    const [workflowSource, configSource] = await Promise.all([
+      readFile(path.join(cwd, ".wsspec/workflow.yaml"), "utf8"),
+      readFile(path.join(cwd, ".wsspec/config.yaml"), "utf8"),
+    ]);
+    validateLegacyWorkflowSnapshot(parse(workflowSource), parse(configSource));
     const item = await createWorkItem({ root: cwd, workItemId, title, source: command === "new" ? { type: "prompt", content: source } : { type: "file", path: source } });
     const workflow = parse(await readFile(path.join(cwd, item.execution.worktree, ".wsspec/work-items", workItemId, "snapshot/workflow.yaml"), "utf8")) as { stages: Array<{ id: string }> };
     await initializeControlPlane({ cwd, workItemId, stages: workflow.stages.map((stage) => stage.id) });

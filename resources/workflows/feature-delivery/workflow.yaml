@@ -66,6 +66,7 @@ steps:
   - id: implement
     uses: agent.execute
     needs: [verify-red]
+    inputs: [tasks]
     objective: 在保留 Red 测试的前提下完成最小实现
     skills:
       - ref: builtin://skills/tdd-implementation

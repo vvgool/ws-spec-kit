@@ -1,17 +1,410 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CompileError, compileWorkflow, type ProjectConfig, type Workflow } from "../../src/engine/compiler.js";
+import {
+  CompileError,
+  compileWorkflow,
+  resolveChangePolicy,
+  type CompileProfile,
+} from "../../src/engine/compiler.js";
+import { resolveSkill } from "../../src/registry/skills/resolver.js";
+import type { ResolvedSkill } from "../../src/registry/skills/types.js";
+import { loadWorkflowPackage } from "../../src/workflow-package/loader.js";
+import type { ProfileDefinition, WorkflowPackage, WorkflowStep } from "../../src/workflow-package/types.js";
+import {
+  validateLegacyWorkflowSnapshot,
+  type LegacyWorkflowSnapshot,
+} from "../../src/engine/orchestrator.js";
 
-const config: ProjectConfig = {
-  quality: { gates: { test: { required: true } } },
-  publishing: { targets: {} },
-};
+interface CompilerFixture {
+  pkg: WorkflowPackage;
+  profile: CompileProfile;
+}
 
-function validWorkflow(): Workflow {
+function clonePackage(pkg: WorkflowPackage): WorkflowPackage {
   return {
-    version: 1,
-    workflow: { id: "verified-delivery" },
+    ...pkg,
+    manifest: structuredClone(pkg.manifest),
+    workflow: structuredClone(pkg.workflow),
+    profiles: new Map([...pkg.profiles].map(([id, profile]) => [id, structuredClone(profile)])),
+    packageSkills: new Map([...pkg.packageSkills].map(([ref, skill]) => [ref, { ...skill }])),
+    files: pkg.files.map((file) => ({ ...file })),
+  };
+}
+
+function allSteps(steps: readonly WorkflowStep[]): WorkflowStep[] {
+  return steps.flatMap((step) => [step, ...allSteps(step.steps ?? [])]);
+}
+
+async function fixture(workflow = "feature-delivery", profileId = "standard"): Promise<CompilerFixture> {
+  const loaded = await loadWorkflowPackage({ root: process.cwd(), ref: `builtin://workflows/${workflow}` });
+  const pkg = clonePackage(loaded);
+  const bindings = new Map(allSteps(pkg.workflow.steps).flatMap((step) => (step.skills ?? []).map((binding) => [binding.ref, binding])));
+  const skills = (await Promise.all([...bindings.values()].map((binding) => resolveSkill(binding, {
+    provider: "codex",
+    projectRoot: process.cwd(),
+    home: process.cwd(),
+    package: pkg,
+    stepStatus: "not_started",
+  })))).filter((skill): skill is ResolvedSkill => skill !== undefined);
+  return { pkg, profile: { id: profileId, skills } };
+}
+
+function step(pkg: WorkflowPackage, id: string): WorkflowStep {
+  const found = allSteps(pkg.workflow.steps).find((candidate) => candidate.id === id);
+  assert.ok(found, `missing fixture step ${id}`);
+  return found;
+}
+
+function profile(pkg: WorkflowPackage, id: string): ProfileDefinition {
+  const found = pkg.profiles.get(id);
+  assert.ok(found, `missing fixture profile ${id}`);
+  return found;
+}
+
+function expectCompileError(run: () => unknown, code: `WSSPEC_${string}`): void {
+  assert.throws(run, (error: unknown) => error instanceof CompileError && error.code === code && error.path.startsWith("/"));
+}
+
+test("compiles the formal Step Manifest with registry-owned security classes and resolved Skills", async () => {
+  const { pkg, profile } = await fixture();
+
+  const compiled = compileWorkflow(pkg, profile);
+
+  assert.equal(compiled.id, "feature-delivery");
+  assert.equal(compiled.profile.id, "standard");
+  assert.equal(compiled.steps.find(({ id }) => id === "intake")?.securityClass, "external-read");
+  assert.equal(compiled.steps.find(({ id }) => id === "verify-red")?.securityClass, "local-write");
+  assert.equal(compiled.steps.find(({ id }) => id === "commit")?.securityClass, "local-write");
+  assert.equal(compiled.steps.find(({ id }) => id === "update-wiki")?.securityClass, "external-write");
+  assert.equal(compiled.steps.find(({ id }) => id === "close")?.securityClass, "control");
+  assert.equal(compiled.steps.find(({ id }) => id === "intake")?.authorizationRequired, false);
+  assert.equal(compiled.steps.find(({ id }) => id === "commit")?.authorizationRequired, true);
+  assert.equal(compiled.steps.find(({ id }) => id === "update-wiki")?.authorizationRequired, true);
+  assert.equal(compiled.steps.find(({ id }) => id === "implement")?.skills[0]?.requestedRef, "builtin://skills/tdd-implementation");
+  assert.equal(compiled.steps.find(({ id }) => id === "review-fix")?.until, "${review-result.approved}");
+  assert.deepEqual(compiled.order.slice(0, 5), ["intake", "explore", "clarify", "design", "plan"]);
+  assert.equal(compiled.changePolicy.kind, "feature");
+});
+
+test("Quick skips only independent design while keeping a compact plan consumed by implement", async () => {
+  const { pkg, profile } = await fixture("feature-delivery", "quick");
+
+  const compiled = compileWorkflow(pkg, profile);
+
+  assert.equal(compiled.steps.find(({ id }) => id === "design")?.enabled, false);
+  assert.equal(compiled.steps.find(({ id }) => id === "plan")?.enabled, true);
+  assert.equal(compiled.steps.find(({ id }) => id === "plan")?.artifactLevel, "compact");
+  assert.deepEqual(compiled.steps.find(({ id }) => id === "plan")?.inputs, [
+    { artifact: "specification", required: true },
+    { artifact: "design", required: false },
+  ]);
+  assert.deepEqual(compiled.steps.find(({ id }) => id === "implement")?.inputs, [{ artifact: "tasks", required: true }]);
+});
+
+test("rejects duplicate Step IDs including nested control Steps", async () => {
+  const { pkg, profile } = await fixture();
+  step(pkg, "review-fix").steps?.push({ id: "plan", uses: "agent.execute" });
+
+  expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_DUPLICATE_STEP");
+});
+
+test("rejects unknown dependencies and cycles in the complete top-level DAG", async () => {
+  const unknown = await fixture();
+  step(unknown.pkg, "plan").needs = ["missing"];
+  expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile), "WSSPEC_COMPILE_UNKNOWN_DEPENDENCY");
+
+  const cyclic = await fixture();
+  step(cyclic.pkg, "intake").needs = ["plan"];
+  expectCompileError(() => compileWorkflow(cyclic.pkg, cyclic.profile), "WSSPEC_COMPILE_CYCLE");
+});
+
+test("rejects unknown dependencies and cycles inside nested control DAGs", async () => {
+  const unknown = await fixture();
+  step(unknown.pkg, "review").needs = ["missing"];
+  expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile), "WSSPEC_COMPILE_UNKNOWN_DEPENDENCY");
+
+  const cyclic = await fixture();
+  step(cyclic.pkg, "review").needs = ["verify"];
+  step(cyclic.pkg, "verify").needs = ["review"];
+  expectCompileError(() => compileWorkflow(cyclic.pkg, cyclic.profile), "WSSPEC_COMPILE_CYCLE");
+});
+
+test("rejects malformed expressions and references to undeclared outputs", async () => {
+  const malformed = await fixture();
+  step(malformed.pkg, "update-issue").when = "${bindings.issue.exists = true}";
+  expectCompileError(() => compileWorkflow(malformed.pkg, malformed.profile), "WSSPEC_COMPILE_EXPRESSION_INVALID");
+
+  const unknown = await fixture();
+  step(unknown.pkg, "update-issue").when = "${missing.approved}";
+  expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN");
+});
+
+test("rejects expressions that reference unreachable, future, disabled or unknown-typed outputs", async () => {
+  const future = await fixture();
+  step(future.pkg, "clarify").when = "${review-result.approved}";
+  expectCompileError(() => compileWorkflow(future.pkg, future.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE");
+
+  const disabled = await fixture("feature-delivery", "quick");
+  step(disabled.pkg, "plan").when = "${design.approved}";
+  expectCompileError(() => compileWorkflow(disabled.pkg, disabled.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE");
+
+  const property = await fixture();
+  step(property.pkg, "commit").when = "${review-result.typo}";
+  expectCompileError(() => compileWorkflow(property.pkg, property.profile), "WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN");
+});
+
+test("rejects unknown Executors and Workflow attempts to supply a security class", async () => {
+  const unknown = await fixture();
+  step(unknown.pkg, "implement").uses = "shell.execute";
+  expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile), "WSSPEC_EXECUTOR_NOT_FOUND");
+
+  const forged = await fixture();
+  Object.assign(step(forged.pkg, "commit"), { securityClass: "agent" });
+  expectCompileError(() => compileWorkflow(forged.pkg, forged.profile), "WSSPEC_COMPILE_SECURITY_OVERRIDE");
+});
+
+test("rejects missing required Skills and Skill attempts to expand allowed paths", async () => {
+  const missing = await fixture();
+  missing.profile.skills = missing.profile.skills.filter(({ requestedRef }) => requestedRef !== "builtin://skills/tdd-implementation");
+  expectCompileError(() => compileWorkflow(missing.pkg, missing.profile), "WSSPEC_COMPILE_REQUIRED_SKILL_MISSING");
+
+  const forged = await fixture();
+  Object.assign(forged.profile.skills[0]!, { allowedPaths: ["src/**"] });
+  expectCompileError(() => compileWorkflow(forged.pkg, forged.profile), "WSSPEC_COMPILE_SKILL_POLICY_OVERRIDE");
+});
+
+test("rejects required inputs produced only by a disabled Step", async () => {
+  const { pkg, profile: selected } = await fixture("feature-delivery", "quick");
+  step(pkg, "plan").inputs = [{ artifact: "specification", required: true }, { artifact: "design", required: true }];
+
+  expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED");
+});
+
+test("rejects nested required inputs produced only by a disabled sibling Step", async () => {
+  const { pkg, profile: selected } = await fixture();
+  Object.assign(profile(pkg, "standard").steps, { fix: { enabled: false } });
+  step(pkg, "fix").outputs = ["fix-result"];
+  step(pkg, "verify").needs = ["fix"];
+  step(pkg, "verify").inputs = ["fix-result"];
+
+  expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED");
+});
+
+test("rejects required inputs without a producer in the dependency closure", async () => {
+  const { pkg, profile } = await fixture();
+  step(pkg, "verify-green").inputs = ["red-evidence", "unknown-result"];
+
+  expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER");
+});
+
+test("rejects Profile attempts to change execution, dependencies, security or external targets", async () => {
+  const forbidden = [
+    ["uses", "command.execute"],
+    ["needs", ["intake"]],
+    ["securityClass", "agent"],
+    ["externalTarget", "attacker"],
+    ["allowedPaths", ["src/**"]],
+  ] as const;
+  for (const [key, value] of forbidden) {
+    const { pkg, profile: selected } = await fixture();
+    Object.assign(profile(pkg, "standard").steps.plan!, { [key]: value });
+    expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_PROFILE_OVERRIDE_FORBIDDEN");
+  }
+
+  const publishing = await fixture();
+  Object.assign(profile(publishing.pkg, "standard").publishing, { targets: ["attacker"] });
+  expectCompileError(() => compileWorkflow(publishing.pkg, publishing.profile), "WSSPEC_COMPILE_PROFILE_OVERRIDE_FORBIDDEN");
+});
+
+test("Profiles cannot lower approval, Review or enabled-Step strength", async () => {
+  const approval = await fixture();
+  profile(approval.pkg, "standard").steps.commit = { approval: false };
+  expectCompileError(() => compileWorkflow(approval.pkg, approval.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const review = await fixture();
+  profile(review.pkg, "standard").steps["review-fix"]!.maxIterations = 1;
+  expectCompileError(() => compileWorkflow(review.pkg, review.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const governed = await fixture("feature-delivery", "governed");
+  profile(governed.pkg, "governed").steps.design!.enabled = false;
+  expectCompileError(() => compileWorkflow(governed.pkg, governed.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const unselected = await fixture("feature-delivery", "standard");
+  profile(unselected.pkg, "governed").steps.design!.enabled = false;
+  expectCompileError(() => compileWorkflow(unselected.pkg, unselected.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const publishing = await fixture("feature-delivery", "standard");
+  profile(publishing.pkg, "quick").publishing.issueRequired = true;
+  expectCompileError(() => compileWorkflow(publishing.pkg, publishing.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const audit = await fixture("feature-delivery", "standard");
+  profile(audit.pkg, "quick").audit.level = "complete";
+  expectCompileError(() => compileWorkflow(audit.pkg, audit.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const jointlyWeakened = await fixture("feature-delivery", "standard");
+  profile(jointlyWeakened.pkg, "standard").steps.clarify!.approval = false;
+  profile(jointlyWeakened.pkg, "governed").steps.clarify!.approval = false;
+  profile(jointlyWeakened.pkg, "governed").steps.plan!.approval = false;
+  profile(jointlyWeakened.pkg, "governed").publishing = { issueRequired: false, knowledgeRequired: false, readBackRequired: false };
+  profile(jointlyWeakened.pkg, "governed").audit = {
+    level: "standard",
+    retention: "standard",
+    recordDecisions: false,
+    recordApprovals: false,
+    recordActors: false,
+    recordPublishing: false,
+  };
+  expectCompileError(() => compileWorkflow(jointlyWeakened.pkg, jointlyWeakened.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const excessiveReview = await fixture("feature-delivery", "standard");
+  profile(excessiveReview.pkg, "standard").steps["review-fix"]!.maxIterations = 6;
+  profile(excessiveReview.pkg, "governed").steps["review-fix"]!.maxIterations = 6;
+  expectCompileError(() => compileWorkflow(excessiveReview.pkg, excessiveReview.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+});
+
+test("Quick documentation Profile may disable an optional publishing Step", async () => {
+  const { pkg, profile: selected } = await fixture("documentation-delivery", "quick");
+  profile(pkg, "quick").steps["update-wiki"] = { enabled: false };
+
+  const compiled = compileWorkflow(pkg, selected);
+
+  assert.equal(compiled.steps.find(({ id }) => id === "update-wiki")?.enabled, false);
+});
+
+test("project Workflow Profile may disable an optional Step without inheriting Builtin-only defaults", async () => {
+  const { pkg, profile: selected } = await fixture("feature-delivery", "quick");
+  pkg.ref = "project://workflows/feature-delivery";
+  profile(pkg, "quick").steps["update-wiki"] = { enabled: false };
+
+  const compiled = compileWorkflow(pkg, selected);
+
+  assert.equal(compiled.steps.find(({ id }) => id === "update-wiki")?.enabled, false);
+});
+
+test("Package Manifest must disclose every Executor capability, connector and external side effect", async () => {
+  const capability = await fixture();
+  capability.pkg.manifest.capabilities = capability.pkg.manifest.capabilities.filter((item) => item !== "command-execution");
+  expectCompileError(() => compileWorkflow(capability.pkg, capability.profile), "WSSPEC_COMPILE_MANIFEST_CAPABILITY_MISSING");
+
+  const connector = await fixture();
+  connector.pkg.manifest.connectors = connector.pkg.manifest.connectors.filter((item) => item !== "knowledge");
+  expectCompileError(() => compileWorkflow(connector.pkg, connector.profile), "WSSPEC_COMPILE_MANIFEST_CONNECTOR_MISSING");
+
+  const sideEffect = await fixture();
+  sideEffect.pkg.manifest.externalSideEffects = sideEffect.pkg.manifest.externalSideEffects.filter((item) => item !== "issue-close");
+  expectCompileError(() => compileWorkflow(sideEffect.pkg, sideEffect.profile), "WSSPEC_COMPILE_MANIFEST_SIDE_EFFECT_MISSING");
+});
+
+test("feature delivery cannot disable its Red/Green safety kernel or trusted test Gate", async () => {
+  for (const id of ["write-tests", "verify-red", "implement", "verify-green"]) {
+    const { pkg, profile: selected } = await fixture();
+    Object.assign(profile(pkg, "standard").steps, { [id]: { enabled: false } });
+    expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_TDD_REQUIRED");
+  }
+
+  const gates = await fixture();
+  profile(gates.pkg, "standard").steps["verify-green"]!.gates = [];
+  expectCompileError(() => compileWorkflow(gates.pkg, gates.profile), "WSSPEC_COMPILE_TDD_REQUIRED");
+});
+
+test("feature Red verification cannot bypass write-tests", async () => {
+  const { pkg, profile } = await fixture();
+  step(pkg, "verify-red").needs = ["plan"];
+
+  expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_TDD_REQUIRED");
+});
+
+test("Quick cannot disable nested Review Steps", async () => {
+  const { pkg, profile: selected } = await fixture("feature-delivery", "quick");
+  Object.assign(profile(pkg, "quick").steps, { review: { enabled: false } });
+
+  expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_QUICK_PROFILE_INVALID");
+});
+
+test("selected Profile identity must match its package map key", async () => {
+  const { pkg, profile: selected } = await fixture();
+  profile(pkg, "standard").profile.id = "quick";
+
+  expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_PROFILE_MISMATCH");
+});
+
+test("feature implement must explicitly consume tasks", async () => {
+  const { pkg, profile } = await fixture();
+  step(pkg, "implement").inputs = [];
+
+  expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_PLAN_REQUIRED");
+});
+
+test("documentation workflow compiles an immutable narrowed documentation-only Change Policy", async () => {
+  const { pkg, profile } = await fixture("documentation-delivery", "standard");
+  profile.documentationAllowedPaths = ["docs/guides/**/*.md"];
+
+  const compiled = compileWorkflow(pkg, profile);
+
+  assert.deepEqual(compiled.changePolicy.allowedPaths, ["docs/guides/**/*.md"]);
+  assert.match(compiled.changePolicy.digest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(compiled.changePolicy.kind, "documentation-only");
+  assert.equal(Object.isFrozen(compiled.changePolicy.allowedPaths), true);
+});
+
+test("documentation Change Policy defaults to five safe path classes", () => {
+  const resolved = resolveChangePolicy({
+    workflowId: "documentation-delivery",
+    policy: { kind: "documentation-only", allowedPaths: [] },
+  });
+
+  assert.deepEqual(resolved.allowedPaths, [
+    "README*.md",
+    "CHANGELOG*.md",
+    "docs/**/*.md",
+    "docs/**/*.mdx",
+    "docs/**/*.txt",
+  ]);
+});
+
+test("documentation Change Policy rejects empty entries, escapes, absolute and production fallback paths", () => {
+  for (const allowedPath of ["", "/docs/readme.md", "../README.md", "docs/../../src/index.ts", "src/**", "**", "package.json"]) {
+    expectCompileError(() => resolveChangePolicy({
+      workflowId: "documentation-delivery",
+      policy: { kind: "documentation-only", allowedPaths: [allowedPath] },
+    }), "WSSPEC_CHANGE_POLICY_PATH_INVALID");
+  }
+});
+
+test("only project documentation policy may narrow, while Profile and Skill scope keys are rejected", () => {
+  expectCompileError(() => resolveChangePolicy({
+    workflowId: "documentation-delivery",
+    policy: { kind: "documentation-only", allowedPaths: ["docs/**/*.md"] },
+    documentationAllowedPaths: ["README.md"],
+  }), "WSSPEC_CHANGE_POLICY_EXPANSION");
+
+  for (const forbidden of ["profileAllowedPaths", "skillAllowedPaths"] as const) {
+    expectCompileError(() => resolveChangePolicy({
+      workflowId: "documentation-delivery",
+      policy: { kind: "documentation-only", allowedPaths: ["docs/**/*.md"] },
+      [forbidden]: ["src/**"],
+    } as never), "WSSPEC_CHANGE_POLICY_OVERRIDE_FORBIDDEN");
+  }
+});
+
+test("documentation glob narrowing rejects broader wildcard placement", () => {
+  for (const [parent, child] of [
+    ["docs/*-guide.md", "docs/*.md"],
+    ["README*-safe.md", "README*.md"],
+  ] as const) {
+    expectCompileError(() => resolveChangePolicy({
+      workflowId: "documentation-delivery",
+      policy: { kind: "documentation-only", allowedPaths: [parent] },
+      documentationAllowedPaths: [child],
+    }), "WSSPEC_CHANGE_POLICY_EXPANSION");
+  }
+});
+
+const legacyConfig = { quality: { gates: { test: { required: true } } } };
+
+function legacyWorkflow(): LegacyWorkflowSnapshot {
+  return {
     stages: [
       { id: "define", kind: "define", owner: "agent", uses: "artifact.generate", output: ["specification"], approval: { required: true, provider: "interactive" } },
       { id: "design", kind: "design", owner: "agent", uses: "artifact.generate", needs: ["define"], input: ["specification"], output: ["design"], approval: { required: true, provider: "interactive" } },
@@ -24,94 +417,49 @@ function validWorkflow(): Workflow {
   };
 }
 
-function expectCompileError(workflow: Workflow, code: string): void {
+function expectLegacyError(workflow: unknown, code: `WSSPEC_${string}`): void {
   assert.throws(
-    () => compileWorkflow(workflow, config),
-    (error: unknown) => error instanceof CompileError && error.code === code && error.path.startsWith("/stages/"),
+    () => validateLegacyWorkflowSnapshot(workflow, legacyConfig),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && "path" in error
+      && error.code === code
+      && typeof error.path === "string"
+      && error.path.startsWith("/stages/"),
   );
 }
 
-test("compiles a valid workflow and normalizes optional stage fields", () => {
-  const workflow = validWorkflow();
-  delete workflow.stages[0]?.needs;
-  delete workflow.stages[0]?.input;
-  delete workflow.stages[0]?.gates;
-  delete workflow.stages[0]?.publish;
+test("legacy new preflight preserves complete semantic validation and stable codes before side effects", () => {
+  const duplicate = legacyWorkflow();
+  duplicate.stages.push({ ...duplicate.stages[0]! });
+  expectLegacyError(duplicate, "WSSPEC_COMPILE_DUPLICATE_STAGE");
 
-  const compiled = compileWorkflow(workflow, config);
+  const dependency = legacyWorkflow();
+  dependency.stages[1]!.needs = ["missing"];
+  expectLegacyError(dependency, "WSSPEC_COMPILE_UNKNOWN_DEPENDENCY");
 
-  assert.deepEqual(compiled.stages[0]?.needs, []);
-  assert.deepEqual(compiled.stages[0]?.input, []);
-  assert.deepEqual(compiled.order, ["define", "design", "plan", "build", "review", "verify", "close"]);
-});
+  const executor = legacyWorkflow();
+  executor.stages[3]!.uses = "shell.execute";
+  expectLegacyError(executor, "WSSPEC_EXECUTOR_NOT_FOUND");
 
-test("rejects duplicate stage IDs", () => {
-  const workflow = validWorkflow();
-  workflow.stages.push({ ...workflow.stages[0]! });
-  expectCompileError(workflow, "WSSPEC_COMPILE_DUPLICATE_STAGE");
-});
+  const artifact = legacyWorkflow();
+  artifact.stages[3]!.input = ["tasks"];
+  expectLegacyError(artifact, "WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER");
 
-test("rejects unknown dependencies", () => {
-  const workflow = validWorkflow();
-  workflow.stages[1]!.needs = ["missing"];
-  expectCompileError(workflow, "WSSPEC_COMPILE_UNKNOWN_DEPENDENCY");
-});
+  const approval = legacyWorkflow();
+  approval.stages[0]!.approval = { required: false };
+  expectLegacyError(approval, "WSSPEC_COMPILE_APPROVAL_REQUIRED");
 
-test("rejects dependency cycles", () => {
-  const workflow = validWorkflow();
-  workflow.stages[0]!.needs = ["design"];
-  expectCompileError(workflow, "WSSPEC_COMPILE_CYCLE");
-});
+  const review = legacyWorkflow();
+  review.stages[5]!.needs = ["build"];
+  review.stages[5]!.input = ["implementation-result"];
+  expectLegacyError(review, "WSSPEC_COMPILE_REVIEW_PATH_REQUIRED");
 
-test("rejects owner and kind mismatches", () => {
-  const workflow = validWorkflow();
-  workflow.stages[3]!.owner = "engine";
-  expectCompileError(workflow, "WSSPEC_COMPILE_OWNER_KIND_MISMATCH");
-});
+  const gate = legacyWorkflow();
+  gate.stages[5]!.gates = [];
+  expectLegacyError(gate, "WSSPEC_COMPILE_REQUIRED_GATE_MISSING");
 
-test("rejects executors that cannot serve the stage kind", () => {
-  const workflow = validWorkflow();
-  workflow.stages[3]!.uses = "artifact.generate";
-  expectCompileError(workflow, "WSSPEC_EXECUTOR_CONTRACT_MISMATCH");
-});
-
-test("rejects input artifacts not produced by the dependency closure", () => {
-  const workflow = validWorkflow();
-  workflow.stages[3]!.needs = ["plan"];
-  workflow.stages[3]!.input = ["tasks"];
-  expectCompileError(workflow, "WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER");
-});
-
-test("rejects implementation paths that bypass approved specification, design or plan", () => {
-  for (const stageId of ["define", "design", "plan"]) {
-    const workflow = validWorkflow();
-    const stage = workflow.stages.find((candidate) => candidate.id === stageId)!;
-    stage.approval = { required: false };
-    expectCompileError(workflow, "WSSPEC_COMPILE_APPROVAL_REQUIRED");
-  }
-});
-
-test("rejects verify stages without a configured required gate", () => {
-  const workflow = validWorkflow();
-  workflow.stages[5]!.gates = [];
-  expectCompileError(workflow, "WSSPEC_COMPILE_REQUIRED_GATE_MISSING");
-});
-
-test("rejects close stages without a verify dependency path", () => {
-  const workflow = validWorkflow();
-  workflow.stages[6]!.needs = ["review"];
-  expectCompileError(workflow, "WSSPEC_COMPILE_VERIFY_PATH_REQUIRED");
-});
-
-test("rejects verify stages that bypass review", () => {
-  const workflow = validWorkflow();
-  workflow.stages[5]!.needs = ["build"];
-  workflow.stages[5]!.input = ["implementation-result"];
-  expectCompileError(workflow, "WSSPEC_COMPILE_REVIEW_PATH_REQUIRED");
-});
-
-test("rejects kind-specific outputs served by an overly broad executor", () => {
-  const workflow = validWorkflow();
-  workflow.stages[0]!.output = ["specification", "design"];
-  expectCompileError(workflow, "WSSPEC_EXECUTOR_CONTRACT_MISMATCH");
+  const close = legacyWorkflow();
+  close.stages[6]!.needs = ["review"];
+  expectLegacyError(close, "WSSPEC_COMPILE_VERIFY_PATH_REQUIRED");
 });

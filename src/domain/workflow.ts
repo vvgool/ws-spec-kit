@@ -1,43 +1,63 @@
-export type StageKind = "define" | "design" | "plan" | "implement" | "review" | "verify" | "publish" | "close";
-export type StageOwner = "agent" | "engine";
+import type { ResolvedSkill } from "../registry/skills/types.js";
+import type { ProfileAudit, ProfilePublishing, WorkflowRetry } from "../workflow-package/types.js";
 
-export interface Approval {
+export type SecurityClass = "agent" | "local-read" | "local-write" | "external-read" | "external-write" | "control";
+export type ProfileId = "quick" | "standard" | "governed";
+
+export interface ArtifactRequirement {
+  artifact: string;
   required: boolean;
-  provider?: "interactive";
 }
 
-export interface Stage {
+export interface ArtifactDeclaration {
+  artifact: string;
+  required: boolean;
+  contentLevel?: string;
+}
+
+export interface CompiledStep {
   id: string;
-  kind: StageKind;
-  owner: StageOwner;
   uses: string;
-  needs?: string[];
-  input?: string[];
-  output?: string[];
-  approval?: Approval;
-  gates?: string[];
-  publish?: string[];
-}
-
-export interface Workflow {
-  version: 1;
-  workflow: { id: string };
-  stages: Stage[];
-}
-
-export interface NormalizedStage extends Stage {
+  securityClass: SecurityClass;
   needs: string[];
-  input: string[];
-  output: string[];
-  approval: Approval;
+  enabled: boolean;
+  skills: ResolvedSkill[];
+  inputs: ArtifactRequirement[];
+  outputs: ArtifactDeclaration[];
   gates: string[];
-  publish: string[];
+  approval: boolean;
+  authorizationRequired: boolean;
+  artifactLevel?: string;
+  action?: string;
+  objective?: string;
+  expectedOutcome?: string;
+  when?: string;
+  until?: string;
+  retry?: WorkflowRetry;
+  maxIterations?: number;
+  independentReviewActor?: boolean;
+  steps: CompiledStep[];
+}
+
+export interface ResolvedChangePolicy {
+  kind: "feature" | "documentation-only";
+  allowedPaths: string[];
+  digest: string;
+}
+
+export interface CompiledProfile {
+  id: string;
+  publishing: ProfilePublishing;
+  audit: ProfileAudit;
 }
 
 export interface CompiledWorkflow {
   version: 1;
   id: string;
-  stages: NormalizedStage[];
+  packageRef: string;
+  packageDigest: string;
+  profile: CompiledProfile;
+  steps: CompiledStep[];
   order: string[];
+  changePolicy: ResolvedChangePolicy;
 }
-
