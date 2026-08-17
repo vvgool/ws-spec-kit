@@ -1,5 +1,6 @@
 import { sha256 } from "../domain/digests.js";
 import { appendWorkflowTrustRecord, readWorkflowTrustRecords } from "../storage/workflow-trust.js";
+import { builtinWorkflowPackageProvenance } from "./loader.js";
 import type { WorkflowPackage, WorkflowTrustDecision, WorkflowTrustRecord, WorkflowTrustSummary } from "./types.js";
 import { WorkflowPackageError } from "./types.js";
 
@@ -14,8 +15,8 @@ export interface RecordWorkflowTrustInput {
   pkg: WorkflowPackage;
   decision: "trusted" | "rejected";
   actor: string;
-  expectedPackageDigest?: string;
-  expectedCapabilityDigest?: string;
+  expectedPackageDigest: string;
+  expectedCapabilityDigest: string;
 }
 
 export function workflowCapabilities(pkg: WorkflowPackage): string[] {
@@ -42,7 +43,11 @@ function builtinRecord(pkg: WorkflowPackage): WorkflowTrustRecord {
 }
 
 export async function evaluateWorkflowTrust(input: EvaluateWorkflowTrustInput): Promise<WorkflowTrustDecision> {
-  if (input.pkg.ref.startsWith("builtin://")) return { status: "trusted", record: builtinRecord(input.pkg) };
+  const builtinProvenance = builtinWorkflowPackageProvenance(input.pkg);
+  if (input.pkg.ref.startsWith("builtin://")) {
+    if (builtinProvenance === undefined) throw new WorkflowPackageError("WSSPEC_WORKFLOW_PACKAGE_BUILTIN_PROVENANCE_INVALID", "Builtin Workflow Package 缺少可验证的发布来源。");
+    return { status: "trusted", record: builtinRecord(input.pkg) };
+  }
   const summary = workflowTrustSummary(input.pkg);
   const records = await readWorkflowTrustRecords(input.root);
   const record = [...records].reverse().find((item) => item.packageDigest === summary.packageDigest && item.capabilityDigest === summary.capabilityDigest);
@@ -55,8 +60,8 @@ export async function evaluateWorkflowTrust(input: EvaluateWorkflowTrustInput): 
 export async function recordWorkflowTrust(input: RecordWorkflowTrustInput): Promise<WorkflowTrustRecord> {
   if (input.pkg.ref.startsWith("builtin://")) throw new WorkflowPackageError("WSSPEC_WORKFLOW_TRUST_BUILTIN_MANAGED", "内置 Workflow Package 只能使用内置信任来源。");
   const summary = workflowTrustSummary(input.pkg);
-  if (input.expectedPackageDigest !== undefined && input.expectedPackageDigest !== summary.packageDigest) throw new WorkflowPackageError("WSSPEC_WORKFLOW_TRUST_CHANGED", "Workflow Package 内容已变化，请重新确认。");
-  if (input.expectedCapabilityDigest !== undefined && input.expectedCapabilityDigest !== summary.capabilityDigest) throw new WorkflowPackageError("WSSPEC_WORKFLOW_TRUST_CHANGED", "Workflow Package 能力已变化，请重新确认。");
+  if (input.expectedPackageDigest !== summary.packageDigest) throw new WorkflowPackageError("WSSPEC_WORKFLOW_TRUST_CHANGED", "Workflow Package 内容已变化，请重新确认。");
+  if (input.expectedCapabilityDigest !== summary.capabilityDigest) throw new WorkflowPackageError("WSSPEC_WORKFLOW_TRUST_CHANGED", "Workflow Package 能力已变化，请重新确认。");
   if (input.actor === "") throw new WorkflowPackageError("WSSPEC_WORKFLOW_TRUST_ACTOR_INVALID", "信任决定必须记录操作者。");
   return appendWorkflowTrustRecord(input.root, { packageRef: input.pkg.ref, packageDigest: summary.packageDigest, capabilityDigest: summary.capabilityDigest, decision: input.decision, actor: input.actor, decidedAt: new Date().toISOString() });
 }

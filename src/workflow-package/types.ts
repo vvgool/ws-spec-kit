@@ -1,25 +1,33 @@
 export interface WorkflowManifest {
   version: 1;
   id: string;
-  entry: string;
+  description?: string;
+  entry: "workflow.yaml";
   profiles: string[];
-  skills?: string[];
-  capabilities?: string[];
-  externalSideEffects?: string[];
-  [key: string]: unknown;
+  skills: string[];
+  capabilities: string[];
+  externalSideEffects: string[];
+  connectors: string[];
 }
 
+export interface WorkflowStep { id: string; skills: string[] }
+export interface WorkflowGate { id: string; evidence: "trusted" | "attested"; command: string[] }
+export interface WorkflowChangePolicy { kind: "feature" | "documentation-only"; allowedPaths: string[] }
 export interface WorkflowDefinition {
   version: 1;
   id: string;
-  [key: string]: unknown;
+  steps: WorkflowStep[];
+  gates: WorkflowGate[];
+  changePolicy?: WorkflowChangePolicy;
 }
 
 export interface ProfileDefinition {
   version: 1;
   id: string;
   workflow: string;
-  [key: string]: unknown;
+  design?: boolean;
+  reviewIterations?: number;
+  audit?: "standard" | "complete";
 }
 
 export interface WorkflowPackageFile {
