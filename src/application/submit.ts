@@ -112,7 +112,7 @@ async function validateResult(input: SubmitInput, state: ApplicationState, step:
     throw new ApplicationSubmitError("WSSPEC_DOCUMENTATION_SCOPE_VIOLATION", "实际 Git diff 越出 documentation-only 路径边界。 ");
   }
   if (!sameStrings(changed, input.result.modifiedFiles)) {
-    throw new ApplicationSubmitError("WSSPEC_MODIFIED_FILES_MISMATCH", "SubmitResult.modifiedFiles 与实际 Git diff 不一致。 ");
+    throw new ApplicationSubmitError("WSSPEC_MODIFIED_FILES_MISMATCH", "提交结果的 modifiedFiles 与实际 Git diff 不一致。 ");
   }
   const declaredOutputs = new Set(step.outputs.map((output) => output.artifact));
   const undeclared = input.result.artifacts.find((artifact) => !declaredOutputs.has(artifact.artifactType));
@@ -136,7 +136,7 @@ function approvalAction(state: ApplicationState, request: Awaited<ReturnType<typ
       kind: "step",
       requestId: request.requestId,
       workItemId: state.item.workItemId,
-      title: `Approve ${request.stageId}`,
+      title: `审批 ${request.stageId}`,
       digest: request.contentHash,
     },
   };

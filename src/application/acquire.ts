@@ -64,7 +64,7 @@ function pendingApproval(projection: RuntimeProjection, workItemId: string): Age
       kind: "step",
       requestId: approval.requestId,
       workItemId: workItemId as `WSS-${string}`,
-      title: `Approve ${approval.stageId}`,
+      title: `审批 ${approval.stageId}`,
       digest: approval.contentHash,
     },
   };
@@ -132,7 +132,7 @@ export async function acquireNextLocked(input: {
   const { state, actor, dependencies } = input;
   let projection = { ...input.projection, stages: { ...input.projection.stages }, claims: { ...input.projection.claims }, contexts: { ...input.projection.contexts } };
   if (projection.workItem.status === "closed" || projection.workItem.status === "cancelled") {
-    return { projection, action: completed(state.item.workItemId, projection.workItem.status, "Workflow is terminal") };
+    return { projection, action: completed(state.item.workItemId, projection.workItem.status, "Workflow 已结束。") };
   }
   const approval = pendingApproval(projection, state.item.workItemId);
   if (approval !== undefined) return { projection, action: approval };
@@ -142,7 +142,7 @@ export async function acquireNextLocked(input: {
     if (new Date(claim.expiresAt) > now) {
       return {
         projection,
-        action: { action: "blocked", problems: [{ code: "WSSPEC_STAGE_ALREADY_CLAIMED", message: `Step ${stepId} already has an active lease`, retryable: true }] },
+        action: { action: "blocked", problems: [{ code: "WSSPEC_STAGE_ALREADY_CLAIMED", message: `步骤 ${stepId} 已有活动 Lease。`, retryable: true }] },
       };
     }
     const current = projection.stages[stepId];
@@ -169,15 +169,15 @@ export async function acquireNextLocked(input: {
     if (exhausted !== undefined) {
       return {
         projection,
-        action: { action: "blocked", problems: [{ code: "WSSPEC_STEP_RETRY_EXHAUSTED", message: `Step ${exhausted.id} exhausted its retry limit`, retryable: false }] },
+        action: { action: "blocked", problems: [{ code: "WSSPEC_STEP_RETRY_EXHAUSTED", message: `步骤 ${exhausted.id} 已耗尽重试次数。`, retryable: false }] },
       };
     }
     const unfinished = Object.values(projection.stages).some(({ status }) => !["succeeded", "succeeded_with_warnings", "skipped", "cancelled"].includes(status));
     return {
       projection,
       action: unfinished
-        ? { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_BLOCKED", message: "No executable Step is ready", retryable: true }] }
-        : completed(state.item.workItemId, "closed", "Workflow completed"),
+        ? { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_BLOCKED", message: "没有可执行的步骤。", retryable: true }] }
+        : completed(state.item.workItemId, "closed", "Workflow 已完成。"),
     };
   }
   await revalidateGlobalSkillLock({
@@ -206,7 +206,7 @@ export async function acquireNextLocked(input: {
       evidence: { ...projection.evidence, [applicationCloseEvidenceKey]: applicationClose },
       readOnly: true,
     };
-    return { projection, action: completed(state.item.workItemId, "closed", "Workflow completed") };
+    return { projection, action: completed(state.item.workItemId, "closed", "Workflow 已完成。") };
   }
   const attemptId = `attempt-${crypto.randomUUID()}`;
   const token = crypto.randomUUID();

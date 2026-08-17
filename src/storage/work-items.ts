@@ -186,9 +186,14 @@ async function readProjectContracts(root: string, application?: CreateWorkItemIn
   }
   const workflowText = await readFile(path.join(root, ".wsspec", "workflow.yaml"), "utf8");
   const configText = await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8");
-  validate("builtin.workflow.v1", parse(workflowText));
-  const config = validate<ParsedConfig>("builtin.project-config.v1", parse(configText));
-  return { workflowText, configText, config };
+  validate("builtin.workflow-selection.v1", parse(workflowText));
+  const config = validate<Record<string, unknown>>("builtin.application-project-config.v1", parse(configText));
+  const git = config.git as { worktrees?: { root?: string; branchPrefix?: string } } | undefined;
+  return {
+    workflowText,
+    configText,
+    config: { git: { worktrees: { root: git?.worktrees?.root ?? ".worktrees", branchPrefix: git?.worktrees?.branchPrefix ?? "wspec/" } } },
+  };
 }
 
 async function snapshotSchemas(target: string): Promise<string> {

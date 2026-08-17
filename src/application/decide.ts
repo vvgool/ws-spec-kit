@@ -64,8 +64,8 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
       expectedCapabilityDigest: input.expectedCapabilityDigest,
     });
     return input.decision === "trusted"
-      ? { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_TRUST_RECORDED", message: "Workflow trust recorded; retry start", retryable: true }] }
-      : { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_TRUST_REJECTED", message: "Workflow package rejected", retryable: false }] };
+      ? { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_TRUST_RECORDED", message: "已记录 Workflow 信任决定，请重新执行 start。", retryable: true }] }
+      : { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_TRUST_REJECTED", message: "Workflow Package 已被拒绝。", retryable: false }] };
   }
 
   try {

@@ -306,6 +306,10 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     if (error instanceof ControlPlaneStorageError) throw error;
     if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  const events = await readEvents(resolved.directory).catch((error: unknown) => {
+    if (error instanceof EventStoreError) throw new ControlPlaneStorageError(error.code, error.message);
+    throw error;
+  });
   const snapshotRoot = path.join(resolved.repositoryRoot, resolved.worktree, ".wsspec", "work-items", input.workItemId, "snapshot");
   let stageIds: string[];
   let initialWorkItem: WorkItemState | undefined;
@@ -334,13 +338,10 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     if (anchor !== undefined) {
       throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "已锚定 Work Item 缺少 Application 快照，拒绝降级恢复。");
     }
-    const workflow = parse(await readFile(path.join(snapshotRoot, "workflow.yaml"), "utf8")) as { stages?: Array<{ id?: string }> };
-    stageIds = workflow.stages?.map((stage) => stage.id).filter((id): id is string => typeof id === "string") ?? [];
+    stageIds = durableProjection === undefined
+      ? [...new Set(events.map((event) => event.stageId).filter((stageId): stageId is string => stageId !== null))]
+      : Object.keys(durableProjection.stages);
   }
-  const events = await readEvents(resolved.directory).catch((error: unknown) => {
-    if (error instanceof EventStoreError) throw new ControlPlaneStorageError(error.code, error.message);
-    throw error;
-  });
   if (durableProjection !== undefined) {
     const anchoredEvent = durableProjection.lastSequence === 0 ? undefined : events[durableProjection.lastSequence - 1];
     if (

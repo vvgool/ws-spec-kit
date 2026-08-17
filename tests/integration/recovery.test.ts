@@ -9,19 +9,7 @@ import { initRepository } from "../../src/storage/repository.js";
 import { createWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
-const workflow = `version: 1
-workflow:
-  id: recovery-test
-stages:
-  - id: define
-    kind: define
-    owner: agent
-    uses: specification.write
-    output: [specification]
-    approval:
-      required: true
-      provider: interactive
-`;
+const workflow = "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n";
 
 const config = `version: 1
 trigger:

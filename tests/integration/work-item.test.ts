@@ -11,15 +11,7 @@ import { initRepository } from "../../src/storage/repository.js";
 import { WorkItemError, createWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
-const workflow = `version: 1
-workflow:
-  id: verified-delivery
-stages:
-  - id: close
-    kind: close
-    owner: engine
-    uses: work-item.close
-`;
+const workflow = "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n";
 
 const config = `version: 1
 trigger:
@@ -78,7 +70,7 @@ test("creates an isolated Work Item with immutable prompt source and snapshots",
   assert.equal(await git(root, "show-ref", "--verify", "refs/heads/wspec/WSS-20260816-001").then(() => true), true);
   await access(path.join(itemRoot, "snapshot", "workflow.yaml"));
   await access(path.join(itemRoot, "snapshot", "config.yaml"));
-  await access(path.join(itemRoot, "snapshot", "schemas", "builtin-workflow-v1.schema.json"));
+  await access(path.join(itemRoot, "snapshot", "schemas", "builtin-workflow-selection-v1.schema.json"));
 
   const commonDir = await git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const locator = JSON.parse(

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -45,4 +45,44 @@ test("workflow use 先校验后请求信任，未确认时不修改项目选择"
   assert.match(blocked.trust.packageDigest, /^sha256:/);
   assert.match(blocked.trust.capabilityDigest, /^sha256:/);
   assert.equal(await readFile(path.join(root, ".wsspec", "workflow.yaml"), "utf8"), before);
+});
+
+test("workflow 子命令拒绝多余参数，非法 profile 不创建信任请求", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const target = path.join(root, ".wsspec", "workflows", "feature-delivery");
+  await runWorkflowCommand({ root, argv: ["eject", "builtin://workflows/feature-delivery", target] });
+  const invalid = (error: unknown): boolean => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ARGUMENT_INVALID";
+  await assert.rejects(runWorkflowCommand({ root, argv: ["list", "--bogus", "value"] }), invalid);
+  await assert.rejects(runWorkflowCommand({ root, argv: ["show", "builtin://workflows/feature-delivery", "extra"] }), invalid);
+  await assert.rejects(runWorkflowCommand({ root, argv: ["use", "project://workflows/feature-delivery", "--profile", "invalid-profile"], interactive: true, actor: "reviewer" }), invalid);
+  const common = await (await import("../integration/helpers/git.js")).git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
+  await assert.rejects(readFile(path.join(common, "wsspec", "trust", "workflow-packages.pending.ndjson"), "utf8"), /ENOENT/);
+});
+
+test("workflow use 未指定 Profile 时保留当前项目选择", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  await writeFile(path.join(root, ".wsspec", "workflow.yaml"), "version: 1\nactiveWorkflow:\n  ref: builtin://workflows/feature-delivery\n  version: 1\nprofile: governed\n", "utf8");
+  const selected = await runWorkflowCommand({ root, argv: ["use", "builtin://workflows/feature-delivery"] }) as { profile: string };
+  assert.equal(selected.profile, "governed");
+});
+
+test("workflow validate 按 Provider 从宿主 Global Skill 根解析绑定", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-provider-home-"));
+  const target = path.join(root, ".wsspec", "workflows", "feature-delivery");
+  await runWorkflowCommand({ root, argv: ["eject", "builtin://workflows/feature-delivery", target] });
+  const workflow = path.join(target, "workflow.yaml");
+  await writeFile(workflow, (await readFile(workflow, "utf8")).replaceAll("builtin://skills/requirement-exploration", "global://vendor/test"), "utf8");
+  const globalSkill = path.join(home, ".agents", "skills", "vendor", "test");
+  await mkdir(globalSkill, { recursive: true });
+  await writeFile(path.join(globalSkill, "SKILL.md"), "# 测试 Skill\n", "utf8");
+
+  const validated = await runWorkflowCommand({ root, home, argv: ["validate", "project://workflows/feature-delivery", "--provider", "codex"] }) as { valid: boolean };
+  assert.equal(validated.valid, true);
+  await assert.rejects(
+    runWorkflowCommand({ root, home, argv: ["validate", "project://workflows/feature-delivery", "--provider", "generic"] }),
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SKILL_NOT_FOUND",
+  );
 });

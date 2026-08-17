@@ -45,4 +45,14 @@ test("公开 CLI 只暴露 Application 命令并将旧命令拒绝为未知命�
     assert.equal(result.code, 1, legacy);
     assert.match(`${result.stdout}${result.stderr}`, /WSSPEC_COMMAND_UNKNOWN/, legacy);
   }
+
+  const target = await runCli(root, ["agent", "install", "codex", "--target", path.join(home, "ignored"), "--dry-run"], home);
+  assert.equal(target.code, 1);
+  assert.match(target.stdout, /WSSPEC_ARGUMENT_INVALID/);
+
+  for (const args of [["init", "extra"], ["start", "extra", "--prompt", "需求"], ["acquire", "WSS-EXTRA", "extra", "--actor", "agent"]]) {
+    const result = await runCli(root, args, home);
+    assert.equal(result.code, 1, args.join(" "));
+    assert.match(result.stdout, /WSSPEC_ARGUMENT_INVALID/, args.join(" "));
+  }
 });

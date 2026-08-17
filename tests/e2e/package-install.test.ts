@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -26,7 +26,7 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
   const catalog = await execute(process.execPath, [
     "--input-type=module",
     "--eval",
-    "import { loadBuiltinCatalog } from './node_modules/ws-spec-kit/dist/resources/catalog.js'; console.log((await loadBuiltinCatalog()).workflows.length)",
+    "import { loadBuiltinCatalog } from 'ws-spec-kit/resources/catalog'; console.log((await loadBuiltinCatalog()).workflows.length)",
   ], { cwd: consumerDirectory });
 
   assert.equal(JSON.parse(version.stdout).version, "0.1.0-alpha.1");
@@ -35,4 +35,20 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
   assert.match(help.stdout, /wspec init/);
   assert.doesNotMatch(help.stdout, /issues|knowledge|wspec next|wspec claim|wspec context|wspec complete/);
   assert.equal(catalog.stdout.trim(), "2");
+});
+
+test("打包产物不包含旧 Workflow、Project Config 协议或旧编排器", async () => {
+  await execute("npm", ["run", "build"], { cwd: repositoryRoot });
+  const packed = await execute("npm", ["pack", "--dry-run", "--json"], { cwd: repositoryRoot });
+  const entries = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
+  const paths = new Set(entries[0]?.files.map((file) => file.path));
+  const definitions = await readFile(path.join(repositoryRoot, "dist", "schemas", "definitions.js"), "utf8");
+
+  for (const legacyPath of [
+    "schemas/builtin-workflow-v1.schema.json",
+    "schemas/builtin-project-config-v1.schema.json",
+    "dist/engine/orchestrator.js",
+    "dist/engine/orchestrator.d.ts",
+  ]) assert.equal(paths.has(legacyPath), false, `不应发布 ${legacyPath}`);
+  assert.doesNotMatch(definitions, /builtin\.workflow\.v1|builtin\.project-config\.v1/);
 });

@@ -13,7 +13,7 @@ import { createGitRepository, git } from "./helpers/git.js";
 async function prepare() {
   const root = await createGitRepository();
   await initRepository(root);
-  await writeFile(path.join(root, ".wsspec/workflow.yaml"), "version: 1\nworkflow: { id: lock }\nstages:\n  - { id: define, kind: define, owner: agent, uses: artifact.generate, output: [specification], approval: { required: true, provider: interactive } }\n");
+  await writeFile(path.join(root, ".wsspec/workflow.yaml"), "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n");
   await writeFile(path.join(root, ".wsspec/config.yaml"), "version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test: { command: [npm, test], cwd: worktree, timeoutSeconds: 60, required: true, evidence: trusted }\n");
   await git(root, "add", "."); await git(root, "commit", "-m", "lock fixture");
   const workItemId = "WSS-LOCK";
