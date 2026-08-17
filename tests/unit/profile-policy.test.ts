@@ -71,7 +71,7 @@ test("risk remains unknown before evidence exists and documentation-only evidenc
   }), { risk: "low", minimum: "quick", matchedRules: ["documentation-only"], affectedSteps: ["clarify", "plan", "review-fix", "verify-document"] });
 });
 
-test("custom project rules match all declared selectors and return sorted affected Steps", () => {
+test("custom project rules match all declared selectors and use the fixed Workflow invalidation map", () => {
   const result = evaluateRiskRules({
     ...neutralRisk,
     issueLabels: ["regulated-ledger"],
@@ -83,13 +83,12 @@ test("custom project rules match all declared selectors and return sorted affect
       paths: ["src/billing/**"],
       actions: ["write-ledger"],
       minimum: "governed",
-      affectedSteps: ["verify-green", "design", "verify-green"],
     }],
   });
 
   assert.equal(result.minimum, "governed");
   assert.ok(result.matchedRules.includes("payment-write"));
-  assert.deepEqual(result.affectedSteps, ["design", "verify-green"]);
+  assert.deepEqual(result.affectedSteps, ["close", "commit", "design", "plan", "review-fix", "verify-green"]);
 });
 
 test("documentation risk always returns documentation Workflow affected Steps", () => {
@@ -104,4 +103,36 @@ test("documentation risk always returns documentation Workflow affected Steps", 
   assert.equal(result.minimum, "governed");
   assert.ok(result.affectedSteps.includes("verify-document"));
   assert.ok(!result.affectedSteps.includes("verify-green"));
+});
+
+test("documentation custom governed rules return only documentation Workflow Steps", () => {
+  const result = evaluateRiskRules({
+    ...neutralRisk,
+    workflow: "documentation-only",
+    issueLabels: ["regulated-docs"],
+    affectedPaths: ["docs/policy.md"],
+    fileTypes: ["md"],
+    rules: [{ id: "regulated-docs", labels: ["regulated-docs"], minimum: "governed" }],
+  });
+
+  assert.deepEqual(result.affectedSteps, ["clarify", "close", "commit", "plan", "review-fix", "verify-document"]);
+  assert.ok(!result.affectedSteps.includes("verify-green"));
+});
+
+test("custom risk rules cannot inject affected Step IDs", () => {
+  assert.throws(() => evaluateRiskRules({
+    ...neutralRisk,
+    workflow: "documentation-only",
+    issueLabels: ["regulated-docs"],
+    rules: [{
+      id: "invalid-steps",
+      labels: ["regulated-docs"],
+      minimum: "governed",
+      affectedSteps: ["verify-green"],
+    }],
+  } as unknown as RiskEvaluationInput), (error: unknown) => error instanceof Error
+    && "code" in error
+    && "path" in error
+    && error.code === "WSSPEC_RISK_RULE_INVALID"
+    && error.path === "/rules/0/affectedSteps");
 });

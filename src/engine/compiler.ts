@@ -23,6 +23,11 @@ export interface CompileProfile {
   documentationAllowedPaths?: string[];
 }
 
+export interface ProjectGatePolicy {
+  requiredGateIds: readonly string[];
+  configuredGateIds: readonly string[];
+}
+
 export interface ResolveChangePolicyInput {
   workflowId: string;
   policy?: WorkflowChangePolicy;
@@ -405,10 +410,18 @@ function dependencyClosure(id: string, byId: ReadonlyMap<string, CompiledStep>):
   return result;
 }
 
-function producedArtifacts(step: CompiledStep): Array<{ artifact: string; enabled: boolean }> {
+interface ProducedArtifact {
+  artifact: string;
+  enabled: boolean;
+  guaranteed: boolean;
+}
+
+function producedArtifacts(step: CompiledStep, parentEnabled = true, parentGuaranteed = true): ProducedArtifact[] {
+  const enabled = parentEnabled && step.enabled;
+  const guaranteedPath = parentGuaranteed && enabled && step.when === undefined;
   return [
-    ...step.outputs.map(({ artifact }) => ({ artifact, enabled: step.enabled })),
-    ...step.steps.flatMap((child) => producedArtifacts(child).map((output) => ({ ...output, enabled: step.enabled && output.enabled }))),
+    ...step.outputs.map(({ artifact, required }) => ({ artifact, enabled, guaranteed: guaranteedPath && required })),
+    ...step.steps.flatMap((child) => producedArtifacts(child, enabled, guaranteedPath)),
   ];
 }
 
@@ -421,7 +434,8 @@ function validateArtifactDependencies(steps: readonly CompiledStep[], path: stri
     for (const input of current.inputs) {
       if (!input.required) continue;
       const candidates = produced.filter(({ artifact }) => artifact === input.artifact);
-      if (candidates.some(({ enabled }) => enabled)) continue;
+      if (candidates.some(({ guaranteed }) => guaranteed)) continue;
+      if (candidates.some(({ enabled }) => enabled)) fail("WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED", `${path}/${current.id}/inputs/${input.artifact}`, "必需输入只能由无条件且必需的输出满足。");
       if (candidates.length > 0) fail("WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED", `${path}/${current.id}/inputs/${input.artifact}`, "启用 Step 消费了已跳过 Step 的必需输出。");
       fail("WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER", `${path}/${current.id}/inputs/${input.artifact}`, "必需输入没有依赖闭包内的生产者。");
     }
@@ -518,6 +532,45 @@ function validateGates(workflow: WorkflowPackage["workflow"], steps: readonly Co
   if (gates.size !== workflow.gates.length) fail("WSSPEC_COMPILE_DUPLICATE_GATE", "/gates", "Gate ID 必须唯一。");
   for (const step of flatten(steps)) {
     for (const gate of step.gates) if (!gates.has(gate)) fail("WSSPEC_COMPILE_UNKNOWN_GATE", `/steps/${step.id}/gates/${gate}`, "Profile 引用了未知 Gate。");
+  }
+}
+
+function validateProjectGatePolicy(workflow: WorkflowPackage["workflow"], policy: ProjectGatePolicy): ProjectGatePolicy {
+  const source = record(policy, "/gatePolicy", new Set(["requiredGateIds", "configuredGateIds"]), "WSSPEC_COMPILE_GATE_POLICY_INVALID");
+  const parseIds = (field: "requiredGateIds" | "configuredGateIds"): string[] => {
+    const value = source[field];
+    if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || id === "")) fail("WSSPEC_COMPILE_GATE_POLICY_INVALID", `/gatePolicy/${field}`, `${field} 必须是 Gate ID 数组。`);
+    const ids = value as string[];
+    if (new Set(ids).size !== ids.length) fail("WSSPEC_COMPILE_GATE_POLICY_INVALID", `/gatePolicy/${field}`, `${field} 不能包含重复 Gate ID。`);
+    return [...ids];
+  };
+  const requiredGateIds = parseIds("requiredGateIds");
+  const configuredGateIds = parseIds("configuredGateIds");
+  const registry = new Set(workflow.gates.map(({ id }) => id));
+  for (const [field, ids] of [["requiredGateIds", requiredGateIds], ["configuredGateIds", configuredGateIds]] as const) {
+    for (const [index, id] of ids.entries()) {
+      if (!registry.has(id)) fail("WSSPEC_COMPILE_GATE_POLICY_UNKNOWN", `/gatePolicy/${field}/${index}`, `Gate policy 引用了 Workflow registry 中不存在的 ${id}。`);
+    }
+  }
+  const configured = new Set(configuredGateIds);
+  for (const [index, id] of requiredGateIds.entries()) {
+    if (!configured.has(id)) fail("WSSPEC_COMPILE_GATE_POLICY_INVALID", `/gatePolicy/requiredGateIds/${index}`, `必需 Gate ${id} 不在 configuredGateIds 中。`);
+  }
+  return { requiredGateIds, configuredGateIds };
+}
+
+function validateProfileGatePolicy(profileId: string, steps: readonly CompiledStep[], policy: ProjectGatePolicy): void {
+  if (profileId !== "standard" && profileId !== "governed") return;
+  const effectiveGates = new Set(flatten(steps)
+    .filter((step) => step.enabled
+      && step.uses === "command.execute"
+      && step.action?.startsWith("quality.") === true
+      && step.expectedOutcome !== "test-failure")
+    .flatMap(({ gates }) => gates));
+  const required = profileId === "standard" ? policy.requiredGateIds : policy.configuredGateIds;
+  const code = profileId === "standard" ? "WSSPEC_COMPILE_REQUIRED_GATE_MISSING" : "WSSPEC_COMPILE_CONFIGURED_GATE_MISSING";
+  for (const gateId of required) {
+    if (!effectiveGates.has(gateId)) fail(code, `/profiles/${profileId}/gates/${gateId}`, `${profileId} 的有效验证集合缺少 Gate ${gateId}。`);
   }
 }
 
@@ -635,7 +688,8 @@ export function resolveChangePolicy(input: ResolveChangePolicyInput): ResolvedCh
   return Object.freeze({ kind, allowedPaths: frozenPaths, digest: sha256(`${JSON.stringify({ version: 1, kind, allowedPaths })}\n`) });
 }
 
-export function compileWorkflow(pkg: WorkflowPackage, selected: CompileProfile): CompiledWorkflow {
+export function compileWorkflow(pkg: WorkflowPackage, selected: CompileProfile, projectGatePolicy: ProjectGatePolicy): CompiledWorkflow {
+  const gatePolicy = validateProjectGatePolicy(pkg.workflow, projectGatePolicy);
   for (const [index, skill] of selected.skills.entries()) validateResolvedSkill(skill, index);
   for (const [index, step] of pkg.workflow.steps.entries()) validateStepShape(step, `/steps/${index}`);
   const sourceSteps = pkg.workflow.steps.flatMap((step) => [step, ...allSourceSteps(step.steps ?? [])]);
@@ -666,6 +720,7 @@ export function compileWorkflow(pkg: WorkflowPackage, selected: CompileProfile):
     }
     if (changePolicy.kind === "feature") validateFeatureSafety(pkg.workflow, pkg.ref, profileId, compiledSteps, byId);
     else validateDocumentationSafety(pkg.workflow, compiledSteps, byId);
+    validateProfileGatePolicy(profileId, compiledSteps, gatePolicy);
     validateExpressions(pkg.workflow.steps, compiledSteps);
     validateArtifactDependencies(compiledSteps, "/steps");
     if (profileId === selected.id) {

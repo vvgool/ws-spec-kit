@@ -3,9 +3,10 @@ import test from "node:test";
 
 import {
   CompileError,
-  compileWorkflow,
+  compileWorkflow as compileWorkflowWithPolicy,
   resolveChangePolicy,
   type CompileProfile,
+  type ProjectGatePolicy,
 } from "../../src/engine/compiler.js";
 import { resolveSkill } from "../../src/registry/skills/resolver.js";
 import type { ResolvedSkill } from "../../src/registry/skills/types.js";
@@ -60,6 +61,19 @@ function profile(pkg: WorkflowPackage, id: string): ProfileDefinition {
   const found = pkg.profiles.get(id);
   assert.ok(found, `missing fixture profile ${id}`);
   return found;
+}
+
+function defaultGatePolicy(pkg: WorkflowPackage): ProjectGatePolicy {
+  const minimum = pkg.workflow.workflow.id === "documentation-delivery" ? "docs.integrity" : "test";
+  return { requiredGateIds: [minimum], configuredGateIds: [minimum] };
+}
+
+function compileWorkflow(
+  pkg: WorkflowPackage,
+  selected: CompileProfile,
+  gatePolicy: ProjectGatePolicy = defaultGatePolicy(pkg),
+): ReturnType<typeof compileWorkflowWithPolicy> {
+  return compileWorkflowWithPolicy(pkg, selected, gatePolicy);
 }
 
 function expectCompileError(run: () => unknown, code: `WSSPEC_${string}`): void {
@@ -191,6 +205,46 @@ test("rejects nested required inputs produced only by a disabled sibling Step", 
   expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED");
 });
 
+test("rejects required inputs produced only by optional or conditional top-level outputs", async () => {
+  const optional = await fixture();
+  optional.pkg.ref = "project://workflows/feature-delivery";
+  for (const profileId of ["quick", "standard", "governed"]) {
+    profile(optional.pkg, profileId).steps.plan!.artifacts!.tasks!.required = false;
+  }
+  expectCompileError(() => compileWorkflow(optional.pkg, optional.profile), "WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED");
+
+  const conditional = await fixture();
+  conditional.pkg.ref = "project://workflows/feature-delivery";
+  step(conditional.pkg, "plan").when = "${bindings.issue.exists}";
+  expectCompileError(() => compileWorkflow(conditional.pkg, conditional.profile), "WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED");
+});
+
+test("rejects a nested required input produced only by an optional loop output", async () => {
+  const { pkg, profile: selected } = await fixture();
+  pkg.ref = "project://workflows/feature-delivery";
+  step(pkg, "review").outputs = ["review-result", "review-evidence"];
+  step(pkg, "verify").needs = ["review"];
+  step(pkg, "verify").inputs = ["review-evidence"];
+  for (const profileId of ["quick", "standard", "governed"]) {
+    profile(pkg, profileId).steps.review = { artifacts: { "review-evidence": { required: false } } };
+  }
+
+  expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED");
+});
+
+test("accepts a required input when another ancestor guarantees the same Artifact", async () => {
+  const { pkg, profile: selected } = await fixture();
+  pkg.ref = "project://workflows/feature-delivery";
+  step(pkg, "clarify").outputs = ["specification", "tasks"];
+  for (const profileId of ["quick", "standard", "governed"]) {
+    profile(pkg, profileId).steps.plan!.artifacts!.tasks!.required = false;
+  }
+
+  const compiled = compileWorkflow(pkg, selected);
+
+  assert.equal(compiled.profile.id, "standard");
+});
+
 test("rejects required inputs without a producer in the dependency closure", async () => {
   const { pkg, profile } = await fixture();
   step(pkg, "verify-green").inputs = ["red-evidence", "unknown-result"];
@@ -294,6 +348,57 @@ test("Package Manifest must disclose every Executor capability, connector and ex
   const sideEffect = await fixture();
   sideEffect.pkg.manifest.externalSideEffects = sideEffect.pkg.manifest.externalSideEffects.filter((item) => item !== "issue-close");
   expectCompileError(() => compileWorkflow(sideEffect.pkg, sideEffect.profile), "WSSPEC_COMPILE_MANIFEST_SIDE_EFFECT_MISSING");
+});
+
+test("Gate policy rejects unknown IDs and required Gates outside configured Gates", async () => {
+  const unknown = await fixture();
+  expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile, {
+    requiredGateIds: ["lint"],
+    configuredGateIds: ["lint"],
+  }), "WSSPEC_COMPILE_GATE_POLICY_UNKNOWN");
+
+  const inconsistent = await fixture();
+  inconsistent.pkg.workflow.gates.push({ id: "lint", evidence: "trusted", command: ["wspec", "gate", "lint"] });
+  expectCompileError(() => compileWorkflow(inconsistent.pkg, inconsistent.profile, {
+    requiredGateIds: ["lint"],
+    configuredGateIds: [],
+  }), "WSSPEC_COMPILE_GATE_POLICY_INVALID");
+});
+
+test("Standard requires every project required Gate in its effective verification set", async () => {
+  const { pkg, profile: selected } = await fixture();
+  pkg.workflow.gates.push({ id: "lint", evidence: "trusted", command: ["wspec", "gate", "lint"] });
+  profile(pkg, "standard").steps.intake = { gates: ["lint"] };
+  profile(pkg, "governed").steps.intake = { gates: ["lint"] };
+
+  expectCompileError(() => compileWorkflow(pkg, selected, {
+    requiredGateIds: ["test", "lint"],
+    configuredGateIds: ["test", "lint"],
+  }), "WSSPEC_COMPILE_REQUIRED_GATE_MISSING");
+});
+
+test("Governed requires every configured Gate even when all Profiles omit it", async () => {
+  const { pkg, profile: selected } = await fixture("feature-delivery", "governed");
+  pkg.workflow.gates.push({ id: "lint", evidence: "trusted", command: ["wspec", "gate", "lint"] });
+
+  expectCompileError(() => compileWorkflow(pkg, selected, {
+    requiredGateIds: ["test"],
+    configuredGateIds: ["test", "lint"],
+  }), "WSSPEC_COMPILE_CONFIGURED_GATE_MISSING");
+});
+
+test("Gate policy accepts required and configured Gates on effective verification Steps", async () => {
+  const { pkg, profile: selected } = await fixture();
+  pkg.workflow.gates.push({ id: "lint", evidence: "trusted", command: ["wspec", "gate", "lint"] });
+  profile(pkg, "standard").steps["verify-green"]!.gates = ["test", "lint"];
+  profile(pkg, "governed").steps["verify-green"]!.gates = ["test", "lint"];
+
+  const compiled = compileWorkflow(pkg, selected, {
+    requiredGateIds: ["test", "lint"],
+    configuredGateIds: ["test", "lint"],
+  });
+
+  assert.deepEqual(compiled.steps.find(({ id }) => id === "verify-green")?.gates, ["test", "lint"]);
 });
 
 test("feature delivery cannot disable its Red/Green safety kernel or trusted test Gate", async () => {
@@ -401,10 +506,29 @@ test("documentation glob narrowing rejects broader wildcard placement", () => {
   }
 });
 
-const legacyConfig = { quality: { gates: { test: { required: true } } } };
+const legacyConfig = {
+  version: 1,
+  trigger: { mode: "suggest" },
+  git: { worktrees: { enabled: true, root: ".worktrees", branchPrefix: "wspec/" } },
+  runtime: { claimTtlSeconds: 1800, maxStageRetries: 3 },
+  quality: {
+    gates: {
+      test: {
+        command: ["npm", "test"],
+        cwd: "worktree",
+        timeoutSeconds: 900,
+        required: true,
+        evidence: "trusted",
+      },
+    },
+  },
+  publishing: { targets: {} },
+};
 
-function legacyWorkflow(): LegacyWorkflowSnapshot {
+function legacyWorkflow(): LegacyWorkflowSnapshot & { version: 1; workflow: { id: string } } {
   return {
+    version: 1,
+    workflow: { id: "verified-delivery" },
     stages: [
       { id: "define", kind: "define", owner: "agent", uses: "artifact.generate", output: ["specification"], approval: { required: true, provider: "interactive" } },
       { id: "design", kind: "design", owner: "agent", uses: "artifact.generate", needs: ["define"], input: ["specification"], output: ["design"], approval: { required: true, provider: "interactive" } },
@@ -462,4 +586,28 @@ test("legacy new preflight preserves complete semantic validation and stable cod
   const close = legacyWorkflow();
   close.stages[6]!.needs = ["review"];
   expectLegacyError(close, "WSSPEC_COMPILE_VERIFY_PATH_REQUIRED");
+});
+
+test("legacy preflight preserves strict v1 Schema codes and paths before semantic validation", () => {
+  const expectSchemaError = (workflow: unknown, config: unknown, code: string, expectedPath: string): void => {
+    assert.throws(() => validateLegacyWorkflowSnapshot(workflow, config), (error: unknown) => error instanceof Error
+      && "code" in error
+      && "path" in error
+      && error.code === code
+      && error.path === expectedPath);
+  };
+
+  expectSchemaError({ ...legacyWorkflow(), version: 999 }, legacyConfig, "WSSPEC_SCHEMA_INVALID_VALUE", "/version");
+  expectSchemaError(legacyWorkflow(), { ...legacyConfig, version: 999 }, "WSSPEC_SCHEMA_INVALID_VALUE", "/version");
+  expectSchemaError({ ...legacyWorkflow(), rogue: true }, legacyConfig, "WSSPEC_SCHEMA_UNKNOWN_FIELD", "/rogue");
+
+  const stage = legacyWorkflow();
+  Object.assign(stage.stages[0]!, { rogue: true });
+  expectSchemaError(stage, legacyConfig, "WSSPEC_SCHEMA_UNKNOWN_FIELD", "/stages/0/rogue");
+
+  const approval = legacyWorkflow();
+  Object.assign(approval.stages[0]!.approval!, { rogue: true });
+  expectSchemaError(approval, legacyConfig, "WSSPEC_SCHEMA_UNKNOWN_FIELD", "/stages/0/approval/rogue");
+
+  expectSchemaError(legacyWorkflow(), { ...legacyConfig, rogue: true }, "WSSPEC_SCHEMA_UNKNOWN_FIELD", "/rogue");
 });

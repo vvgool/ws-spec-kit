@@ -9,7 +9,6 @@ export interface RiskRule {
   fileTypes?: string[];
   actions?: string[];
   minimum: ProfileId;
-  affectedSteps?: string[];
 }
 
 export interface RiskEvaluationInput {
@@ -31,17 +30,48 @@ export interface RiskEvaluation {
 }
 
 const strength: Record<ProfileId, number> = { quick: 0, standard: 1, governed: 2 };
-const governedSteps = ["design", "plan", "review-fix", "verify-green", "commit", "close"];
+const featureInvalidation: Record<ProfileId, readonly string[]> = {
+  quick: ["clarify", "plan", "review-fix", "verify-green"],
+  standard: ["design", "plan", "review-fix", "verify-green"],
+  governed: ["design", "plan", "review-fix", "verify-green", "commit", "close"],
+};
+const documentationInvalidation: Record<ProfileId, readonly string[]> = {
+  quick: ["clarify", "plan", "review-fix", "verify-document"],
+  standard: ["clarify", "plan", "review-fix", "verify-document"],
+  governed: ["clarify", "plan", "review-fix", "verify-document", "commit", "close"],
+};
+const riskRuleKeys = new Set(["id", "labels", "requirementRisks", "paths", "fileTypes", "actions", "minimum"]);
 
 const builtinRules: RiskRule[] = [
-  { id: "sensitive-label", labels: ["security", "permissions", "payment", "payments", "privacy", "release"], minimum: "governed", affectedSteps: governedSteps },
-  { id: "high-requirement", requirementRisks: ["high"], minimum: "governed", affectedSteps: governedSteps },
-  { id: "medium-requirement", requirementRisks: ["medium"], minimum: "standard", affectedSteps: ["design", "plan", "review-fix", "verify-green"] },
-  { id: "low-requirement", requirementRisks: ["low"], minimum: "quick", affectedSteps: ["clarify", "plan", "review-fix", "verify-green"] },
-  { id: "sensitive-path", paths: ["src/auth/**", "src/permissions/**", "migrations/**", "schema/**"], minimum: "governed", affectedSteps: governedSteps },
-  { id: "sensitive-file-type", fileTypes: ["sql", "pem", "key"], minimum: "governed", affectedSteps: governedSteps },
-  { id: "sensitive-action", actions: ["deploy", "release", "external-write", "database-migrate"], minimum: "governed", affectedSteps: governedSteps },
+  { id: "sensitive-label", labels: ["security", "permissions", "payment", "payments", "privacy", "release"], minimum: "governed" },
+  { id: "high-requirement", requirementRisks: ["high"], minimum: "governed" },
+  { id: "medium-requirement", requirementRisks: ["medium"], minimum: "standard" },
+  { id: "low-requirement", requirementRisks: ["low"], minimum: "quick" },
+  { id: "sensitive-path", paths: ["src/auth/**", "src/permissions/**", "migrations/**", "schema/**"], minimum: "governed" },
+  { id: "sensitive-file-type", fileTypes: ["sql", "pem", "key"], minimum: "governed" },
+  { id: "sensitive-action", actions: ["deploy", "release", "external-write", "database-migrate"], minimum: "governed" },
 ];
+
+export class RiskPolicyError extends Error {
+  constructor(readonly code: "WSSPEC_RISK_RULE_INVALID", readonly path: string, message: string) {
+    super(`${code} ${path}: ${message}`);
+    this.name = "RiskPolicyError";
+  }
+}
+
+function validateCustomRule(rule: RiskRule, index: number): void {
+  const path = `/rules/${index}`;
+  if (rule === null || typeof rule !== "object" || Array.isArray(rule)) throw new RiskPolicyError("WSSPEC_RISK_RULE_INVALID", path, "Risk rule 必须是对象。");
+  const source = rule as unknown as Record<string, unknown>;
+  const unknown = Object.keys(source).find((key) => !riskRuleKeys.has(key));
+  if (unknown !== undefined) throw new RiskPolicyError("WSSPEC_RISK_RULE_INVALID", `${path}/${unknown}`, `Risk rule 不接受字段 ${unknown}。`);
+  if (typeof rule.id !== "string" || rule.id === "" || !Object.hasOwn(strength, rule.minimum)) throw new RiskPolicyError("WSSPEC_RISK_RULE_INVALID", path, "Risk rule 缺少有效 id 或 minimum。");
+  for (const field of ["labels", "paths", "fileTypes", "actions"] as const) {
+    const values = rule[field];
+    if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== "string" || value === ""))) throw new RiskPolicyError("WSSPEC_RISK_RULE_INVALID", `${path}/${field}`, `${field} 必须是非空字符串数组。`);
+  }
+  if (rule.requirementRisks !== undefined && (!Array.isArray(rule.requirementRisks) || rule.requirementRisks.some((risk) => !["low", "medium", "high"].includes(risk)))) throw new RiskPolicyError("WSSPEC_RISK_RULE_INVALID", `${path}/requirementRisks`, "requirementRisks 包含未知风险等级。");
+}
 
 function normalize(value: string): string {
   return value.trim().toLowerCase();
@@ -87,6 +117,7 @@ function documentationOnly(input: RiskEvaluationInput): boolean {
 }
 
 export function evaluateRiskRules(input: RiskEvaluationInput): RiskEvaluation {
+  for (const [index, rule] of (input.rules ?? []).entries()) validateCustomRule(rule, index);
   const rules = [...builtinRules, ...(input.rules ?? [])];
   const matched = rules.filter((rule) => matchesRule(rule, input));
   const isDocumentation = input.workflow === "documentation-only" || documentationOnly(input);
@@ -108,14 +139,11 @@ export function evaluateRiskRules(input: RiskEvaluationInput): RiskEvaluation {
     return { risk: hasEvidence ? "medium" : null, minimum: "standard", matchedRules: [], affectedSteps: [] };
   }
   const minimum = matched.reduce<ProfileId>((current, rule) => strength[rule.minimum] > strength[current] ? rule.minimum : current, "quick");
-  const customRuleIds = new Set((input.rules ?? []).map(({ id }) => id));
-  const documentationSteps = minimum === "governed"
-    ? ["clarify", "plan", "review-fix", "verify-document", "commit", "close"]
-    : ["clarify", "plan", "review-fix", "verify-document"];
+  const affectedSteps = isDocumentation ? documentationInvalidation[minimum] : featureInvalidation[minimum];
   return {
     risk: minimum === "quick" ? "low" : minimum === "standard" ? "medium" : "high",
     minimum,
     matchedRules: [...new Set(matched.map(({ id }) => id))].sort(),
-    affectedSteps: [...new Set(matched.flatMap((rule) => isDocumentation && !customRuleIds.has(rule.id) ? documentationSteps : (rule.affectedSteps ?? [])))].sort(),
+    affectedSteps: [...affectedSteps].sort(),
   };
 }

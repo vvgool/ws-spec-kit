@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
+import { validate } from "../schemas/index.js";
 import { readControlPlane } from "../storage/control-plane.js";
 import { closeWorkItem } from "./archive.js";
 import { transitionRuntime } from "./scheduler.js";
@@ -76,11 +77,8 @@ function legacyDependencyClosure(stageId: string, byId: ReadonlyMap<string, Lega
 }
 
 export function validateLegacyWorkflowSnapshot(value: unknown, configValue: unknown): LegacyWorkflowSnapshot {
-  if (value === null || typeof value !== "object" || !Array.isArray((value as { stages?: unknown }).stages)) legacyFail("WSSPEC_LEGACY_WORKFLOW_INVALID", "/stages/0", "stages 必须是数组。");
-  if (configValue === null || typeof configValue !== "object") legacyFail("WSSPEC_LEGACY_WORKFLOW_INVALID", "/stages/0", "Project Config 必须是对象。");
-  const config = configValue as Partial<LegacyProjectConfigSnapshot>;
-  if (config.quality?.gates === null || typeof config.quality?.gates !== "object" || Array.isArray(config.quality.gates)) legacyFail("WSSPEC_LEGACY_WORKFLOW_INVALID", "/stages/0", "Project Config 缺少 quality.gates。");
-  const workflow = value as LegacyWorkflowSnapshot;
+  const workflow = validate<LegacyWorkflowSnapshot>("builtin.workflow.v1", value);
+  const config = validate<LegacyProjectConfigSnapshot>("builtin.project-config.v1", configValue);
   const byId = new Map<string, LegacyStage>();
   for (const [index, stage] of workflow.stages.entries()) {
     const stagePath = `/stages/${index}`;
