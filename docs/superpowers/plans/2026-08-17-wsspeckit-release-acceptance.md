@@ -2,7 +2,7 @@
 
 > **Agent 执行要求：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 逐任务执行；前三份计划门禁全部通过后开始。
 
-**目标：** 在 Codex、Claude、Cursor 和 Generic Agent 中验证中文 Driver Skill、项目自定义 Workflow、跨会话恢复与真实 GitHub/GitLab/飞书交付，并产出可审计的 npm 发布候选。
+**目标：** 在 Codex、Claude、Cursor 中完成真实中文 Driver Skill 与跨会话恢复验收，对 Generic Adapter 完成安装和统一协议契约验收，并验证项目自定义 Workflow 与真实 GitHub/GitLab/飞书交付，产出可审计的 npm 发布候选。
 
 **架构：** 自动化契约验证、真实宿主 Smoke、真实外部平台验收和发布包验收分层执行。每层独立记录环境、版本、命令、目标、摘要和结果；任何较低层证据都不能替代较高层。
 
@@ -48,6 +48,8 @@
 启动 Work Item 后修改 Workflow、Project Skill 和 Global Skill：活动 Work Item 的 Workflow/
 Project 快照保持不变，Global 摘要变化阻塞未开始 Step；更新锁或选择 fallback 必须产生决策记录。
 
+增加所有非 Builtin Workflow Package 的信任场景，同时覆盖 `project://` 和外部安装 Package：首次 `workflow use` 返回来源、文件清单摘要、Skill 摘要和副作用能力，未确认时不能启用或 `start`；明确拒绝保持 blocked；确认后相同摘要可复用。随后分别修改普通文件和新增 `external-write` 能力，断言旧信任失效并要求重新确认；仅移动相同摘要 Package 不失效；非交互执行必须返回 `WSSPEC_WORKFLOW_TRUST_REQUIRED`。信任确认后仍要单独申请外部写入授权。
+
 - [ ] **步骤 4：运行并提交**
 
 运行：`node --import tsx --test tests/e2e/custom-workflow.test.ts tests/integration/skill-lock.test.ts && npm run typecheck`
@@ -79,8 +81,10 @@ Codex 目标为 `~/.agents/skills/wsspeckit-driver/SKILL.md`，Claude 为
 
 - [ ] **步骤 2：编写 Driver 循环失败测试**
 
-为每个 Adapter 执行同一 Fixture：新任务 `start`，随后 `acquire/submit`；中断后用新进程
-`inspect/acquire` 恢复。断言 Driver 不调用模型 API、不缓存对话、不把 Artifact 正文塞进协议 JSON。
+为每个 Adapter 分别执行功能与纯文档 Fixture：Driver 为新任务传递明确的 `workflowRef`，随后
+`acquire/submit`；中断后用新进程 `inspect/acquire` 恢复。断言文档任务选择
+`documentation-delivery`、功能任务选择 `feature-delivery`，且 Driver 不调用模型 API、不缓存对话、
+不把 Artifact 正文塞进协议 JSON，也不在创建后切换 Workflow。
 
 - [ ] **步骤 3：运行契约测试**
 
@@ -111,9 +115,9 @@ git commit -m "test: validate agent driver contracts"
 
 - [ ] **步骤 1：实现可重复 Smoke Fixture**
 
-`prepare-agent-smoke.mjs --client <name>` 创建临时 Git 仓库、安装 Driver、启动固定 Quick 文档任务，
+`prepare-agent-smoke.mjs --client <name>` 创建临时 Git 仓库、安装 Driver，并启动固定 Quick TypeScript 代码任务：为现有模块增加一个无副作用纯函数及对应测试。Fixture 预置可运行的测试命令，但不包含目标函数实现；
 输出 work item ID 和中文操作提示。`verify-agent-smoke.mjs` 只读取事件、Artifact、Git diff 和状态，
-断言至少一次真实 `acquire/submit`、紧凑计划、trusted Red/Green Evidence、Review、外部 Close
+断言至少一次真实 `acquire/submit`、紧凑计划、测试先失败后实现、同一 `commandId` 的 trusted Red/Green Evidence、Review、外部 Close
 （存在 Issue Binding 时）和 Work Item Close。
 
 - [ ] **步骤 2：运行真实 Codex 验收**
@@ -235,8 +239,7 @@ git commit -m "test: record live Feishu acceptance"
 
 - [ ] **步骤 3：完成指南和 tarball 安装 E2E**
 
-指南覆盖安装、初始化、五操作协议、三 Profile、自定义 Workflow、四类 Skill、四个 Provider、审批、
-恢复和故障诊断。从 `npm pack` 产物安装到全新临时项目，执行 Quick Fixture和 Driver dry-run。
+指南覆盖安装、初始化、五操作协议、功能/文档两个内置 Workflow、三 Profile、自定义 Workflow、Workflow Package 信任、四类 Skill、四个 Provider、审批、恢复和故障诊断。从 `npm pack` 产物安装到全新临时项目，分别执行功能 Quick Fixture、文档 Quick Fixture 和 Driver dry-run；文档 Fixture 必须有 trusted 文档 Gate 且不存在 TDD Evidence。
 
 - [ ] **步骤 4：运行并提交**
 
@@ -264,7 +267,7 @@ git commit -m "docs: publish the Chinese WSSpecKit guide"
 - [ ] **步骤 1：编写失败的发布基线检查**
 
 检查旧产品名、旧 Schema、旧命令、`WSK-`、`WSPEC_`、旧文档、占位符、未预期 tarball 文件、
-未提交生成物和矩阵字段缺失。逐项校验设计中的 `REQ-01` 至 `REQ-18` 均绑定真实 Task 和 Evidence；
+未提交生成物和矩阵字段缺失。逐项校验设计中的 `REQ-01` 至 `REQ-20` 均绑定真实 Task 和 Evidence；
 负例 Fixture 必须通过显式 allowlist，不得全局忽略。
 
 - [ ] **步骤 2：实现确定性门禁脚本**
@@ -281,8 +284,7 @@ build、pack、干净安装 E2E；任何检查不得用 `|| true` 掩盖失败�
 
 - [ ] **步骤 4：生成并审阅报告**
 
-报告分别列出：静态/单元、Fixture 集成、tarball 干净安装、Codex、Claude、Cursor、GitHub、GitLab、
-飞书。只有声明为首版发布必需的层级全部 `passed` 才给总体 GO；不得把未运行写成“待补但可发布”。
+报告分别列出：静态/单元、Fixture 集成、tarball 干净安装、Generic Adapter 契约、Codex、Claude、Cursor、GitHub、GitLab、飞书。Generic 只代表显式目标目录下的安装和统一协议契约，不得报告为真实客户端；只有声明为首版发布必需的层级全部 `passed` 才给总体 GO，不得把未运行写成“待补但可发布”。
 
 - [ ] **步骤 5：提交**
 
@@ -293,7 +295,7 @@ git commit -m "build: add the WSSpecKit release gate"
 
 ## 完成定义
 
-四份计划的自动门禁全部通过；Quick/Standard/Governed 和项目自定义 Workflow 均完成 E2E；
+四份计划的自动门禁全部通过；功能/文档两个内置 Workflow、Quick/Standard/Governed 和项目自定义 Workflow 均完成 E2E；
 Codex、Claude、Cursor 的真实发现与跨会话恢复有可重复证据；GitHub、GitLab、飞书真实验收各自
-独立报告；`REQ-01` 至 `REQ-18` 的追踪矩阵不存在未绑定或必需证据缺失项。任何 `not_run`
+独立报告；Generic Adapter 的安装和协议契约独立通过；`REQ-01` 至 `REQ-20` 的追踪矩阵不存在未绑定或必需证据缺失项。任何 `not_run`
 或失败都明确降低对应发布结论，发布脚本不执行外部发布动作。

@@ -6,7 +6,7 @@ WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定�
 
 它支持从用户描述、本地文件、GitHub/GitLab Issue、飞书文档等来源获取需求，并将任务编排为代码探索、需求澄清、方案设计、任务计划、TDD 实现、Review-Fix 循环、可信验证、Git 提交、Issue 更新、知识库发布和关闭等阶段。
 
-首版提供完整的内置 Skill Catalog、一个基础功能交付工作流，以及 `quick`、`standard`、`governed` 三种执行 Profile。用户可以在项目内组合、修改或创建 Workflow，也可以引用 WSSpecKit 内置 Skill、用户全局安装的 Skill 和项目自定义 Skill。
+首版提供完整的内置 Skill Catalog、功能交付与文档交付两个基础 Workflow，以及 `quick`、`standard`、`governed` 三种执行 Profile。用户可以在项目内组合、修改或创建 Workflow，也可以引用 WSSpecKit 内置 Skill、用户全局安装的 Skill 和项目自定义 Skill。
 
 ## 2. 设计原则
 
@@ -93,13 +93,18 @@ ws-spec-kit/
 ├── schemas/
 ├── resources/
 │   ├── workflows/
-│   │   └── feature-delivery/
+│   │   ├── feature-delivery/
+│   │   │   ├── manifest.yaml
+│   │   │   ├── workflow.yaml
+│   │   │   ├── profiles/
+│   │   │   │   ├── quick.yaml
+│   │   │   │   ├── standard.yaml
+│   │   │   │   └── governed.yaml
+│   │   │   └── workflow.lock
+│   │   └── documentation-delivery/
 │   │       ├── manifest.yaml
 │   │       ├── workflow.yaml
-│   │       ├── profiles/
-│   │       │   ├── quick.yaml
-│   │       │   ├── standard.yaml
-│   │       │   └── governed.yaml
+│   │       ├── profiles/{quick,standard,governed}.yaml
 │   │       └── workflow.lock
 │   ├── skills/
 │   │   ├── driver/SKILL.md
@@ -115,7 +120,10 @@ ws-spec-kit/
 │   │   ├── verification/SKILL.md
 │   │   ├── git-commit/SKILL.md
 │   │   ├── issue-update/SKILL.md
-│   │   └── wiki-publish/SKILL.md
+│   │   ├── wiki-publish/SKILL.md
+│   │   ├── documentation-exploration/SKILL.md
+│   │   ├── documentation-editing/SKILL.md
+│   │   └── documentation-review/SKILL.md
 │   ├── templates/
 │   └── connectors/
 └── package.json
@@ -237,7 +245,27 @@ skills:
 └── tests/
 ```
 
-`manifest.yaml` 声明 Workflow 版本、所需 WSSpecKit 版本、支持的 Profile、能力、Connector 和入口文件。第三方 Workflow Package 首次使用时必须展示来源、文件清单、Skill 摘要和外部副作用能力，并由用户确认信任。
+`manifest.yaml` 声明 Workflow 版本、所需 WSSpecKit 版本、支持的 Profile、能力、Connector 和入口文件。所有非 Builtin Workflow Package，包括 `project://` 和外部安装 Package，首次使用时必须展示来源、文件清单、Skill 摘要和外部副作用能力，并由用户确认信任。
+
+信任决定绑定 Package 内容摘要和能力摘要，而不是只绑定逻辑名称：
+
+```ts
+interface WorkflowTrustRecord {
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  decision: "trusted" | "rejected";
+  actor: string;
+  decidedAt: string;
+}
+```
+
+- Builtin Package 由发布包完整性建立内置信任；所有非 Builtin Package，包括 `project://` 和外部安装 Package，默认不可信。
+- `workflow use` 或 `start` 首次使用未信任 Package 时返回待决策状态；非交互执行默认拒绝，不能静默接受。
+- 确认界面必须展示规范化来源、文件清单摘要、Skill 摘要，以及 `external-read`、`external-write`、Git 等副作用能力。
+- Package 内容摘要或能力摘要变化后，旧信任记录立即失效并要求重新确认；只改变安装路径但摘要不变不触发重新确认。
+- 信任只允许加载 Package，不能替代 Step 审批、外部写入授权或引擎安全策略。
+- 信任决定写入事件和审计记录，但不得记录本机绝对路径、凭据或 Skill 正文。
 
 Package 内 Skill 必须使用 `package://skills/<name>` 引用。Resolver 将其解析为当前
 Package 的 `skills/<name>/SKILL.md`，拒绝绝对路径、父目录逃逸、跨 Package 符号链接和
@@ -289,7 +317,7 @@ Profile 是 Workflow Package 内的显式 overlay。Workflow 定义完整 Step �
 
 Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类别或外部目标，也不能关闭引擎安全内核和功能交付 Workflow 的 TDD Red/Green Gate。每份 Profile 都必须与 Workflow 一起编译；被启用 Step 如果消费了被跳过 Step 的必需输出，编译直接失败。
 
-内置基础工作流提供：
+两个内置 Workflow 都提供：
 
 | Profile | 适用任务 | 流程强度 |
 |---|---|---|
@@ -304,11 +332,12 @@ Profile 不得修改 Step 的 `uses`、Skill 来源、依赖关系、安全类�
 | 设计与计划 | 跳过独立设计；紧凑单任务计划必需 | 完整设计和计划必需 | 完整设计和计划必需 |
 | Artifact 审批 | 无默认审批 | 规格、设计 | 规格、设计、计划 |
 | Review-Fix | 最多 1 轮 | 最多 5 轮 | 最多 5 轮且 Review Actor 独立 |
-| Trusted Gate | `test` | 项目 required Gates | 项目全部 configured Gates |
+| Trusted Gate | 当前 Workflow 的内置最小 Gate | 项目 required Gates 加内置最小 Gate | 项目全部 configured Gates 加内置最小 Gate |
 | Issue/Knowledge | 默认可选 | 默认可选 | 按项目策略，可设为关闭前必需 |
 | 审计 | 标准事件和结果 | 标准事件、Artifact、Evidence | 完整决策、审批、Actor、发布与回读记录 |
 
 所有 Profile 中，Git commit 和外部写入仍受独立的精确授权约束；表中的 Artifact 审批不能替代外部动作授权。
+功能交付的内置最小 Gate 是 `test`，文档交付的内置最小 Gate 是 `docs.integrity`。
 
 示例 overlay：
 
@@ -376,7 +405,7 @@ profilePolicy:
 
 ### 9.4 可验证 TDD
 
-内置基础工作流不能只依赖 Agent 声明“使用了 TDD”。每个实现批次必须形成一组
+内置功能交付 Workflow 不能只依赖 Agent 声明“使用了 TDD”。每个实现批次必须形成一组
 `TddCycleEvidence`：
 
 ```ts
@@ -401,11 +430,11 @@ interface TddCycleEvidence {
   修改测试路径或测试内容会使原 TDD Evidence 失效，并将该任务路由回 `write-tests`，不能直接 Close。
 - Agent 自报命令只能形成 reported Evidence，不能替代 Red/Green trusted Evidence。
 
-Quick、Standard 和 Governed 都要求 TDD Cycle；Profile 只能调整 Artifact 详细程度和额外 Gate，
-不能关闭 Red/Green 底线。纯文档或无可执行代码变更由风险策略选择专用非代码 Workflow，
-而不是在功能交付 Workflow 中跳过 TDD。
+功能交付 Workflow 的 Quick、Standard 和 Governed 都要求 TDD Cycle；Profile 只能调整 Artifact
+详细程度和额外 Gate，不能关闭 Red/Green 底线。纯文档或无可执行代码变更必须选择
+`documentation-delivery`，而不是在功能交付 Workflow 中跳过 TDD。
 
-### 9.5 内置基础工作流
+### 9.5 内置功能交付工作流
 
 ```yaml
 version: 1
@@ -571,6 +600,122 @@ steps:
 `plan` 必须直接根据 `specification` 生成一个包含修改范围、测试先行步骤、验收命令和
 回滚点的紧凑单任务计划。`implement` 在所有 Profile 下都只消费 `tasks`，不存在无计划实现。
 
+### 9.6 内置文档交付工作流
+
+`documentation-delivery` 用于仅修改 Markdown/TXT、文档站点内容、模板或知识页面，禁止修改
+生产代码、可执行脚本、依赖、构建配置和数据库文件。它不伪造 TDD Evidence。发布包提供固定 argv
+的 `docs.integrity` Gate，至少检查 UTF-8、非空正文、冲突标记和允许路径；项目可以追加 Markdown
+lint、链接检查或文档构建。至少一个 trusted 文档 Gate 通过后才能关闭。
+
+项目通过 `documentation.allowedPaths` 声明文档路径；默认值为 `README*.md`、`CHANGELOG*.md`、
+`docs/**/*.md`、`docs/**/*.mdx` 和 `docs/**/*.txt`。Compiler 将其解析为不可变
+`ResolvedChangePolicy` 并写入 Work Item 快照和 Work Package。Workflow、Profile 和 Skill 不能
+扩大该范围；Submit 使用实际 Git diff 重新校验，不能依赖 Agent 自报修改文件。
+
+```yaml
+version: 1
+workflow:
+  id: documentation-delivery
+  version: 1
+inputs:
+  requirement:
+    accepts: [user.prompt, local.file, github.issue, gitlab.issue, feishu.document]
+steps:
+  - id: intake
+    uses: connector.execute
+    action: requirement.capture
+    outputs: [requirement-source]
+  - id: explore
+    uses: agent.execute
+    needs: [intake]
+    skills:
+      - ref: builtin://skills/documentation-exploration
+        required: true
+    outputs: [documentation-context]
+  - id: clarify
+    uses: agent.execute
+    needs: [explore]
+    skills:
+      - ref: builtin://skills/requirement-clarification
+        required: true
+    outputs: [specification]
+  - id: plan
+    uses: agent.execute
+    needs: [clarify]
+    skills:
+      - ref: builtin://skills/task-planning
+        required: true
+    outputs: [tasks]
+  - id: edit-document
+    uses: agent.execute
+    needs: [plan]
+    skills:
+      - ref: builtin://skills/documentation-editing
+        required: true
+    outputs: [documentation-result]
+  - id: verify-document
+    uses: command.execute
+    action: quality.docs.integrity
+    needs: [edit-document]
+    outputs: [documentation-evidence]
+  - id: review-fix
+    uses: control.loop
+    needs: [verify-document]
+    until: ${review-result.approved}
+    maxIterations: 5
+    steps:
+      - id: review
+        uses: agent.execute
+        skills:
+          - ref: builtin://skills/documentation-review
+            required: true
+        outputs: [review-result]
+      - id: fix
+        uses: agent.execute
+        when: ${review-result.approved == false}
+        skills:
+          - ref: builtin://skills/documentation-editing
+            required: true
+      - id: verify
+        uses: command.execute
+        action: quality.docs.integrity
+  - id: commit
+    uses: connector.execute
+    action: git.commit
+    needs: [review-fix]
+    approval: required
+  - id: update-issue
+    uses: connector.execute
+    action: issue.update
+    needs: [commit]
+    when: ${bindings.issue.exists}
+  - id: update-wiki
+    uses: connector.execute
+    action: knowledge.publish
+    needs: [update-issue]
+    when: ${bindings.knowledge.exists}
+  - id: close-issue
+    uses: connector.execute
+    action: issue.close
+    needs: [update-wiki]
+    when: ${bindings.issue.exists}
+    approval: required
+  - id: close
+    uses: control.close
+    needs: [close-issue]
+```
+
+三个 Profile 沿用相同强度语义：Quick 使用紧凑规格/单任务计划、最多一轮 Review 和最小文档 Gate；
+Standard 使用完整规格/计划、最多五轮 Review 和项目 required 文档 Gate；Governed 增加规格/计划
+审批、独立 Review Actor、全部 configured 文档 Gate 和完整发布审计。任何 Profile 都不能关闭
+路径限制、至少一个 trusted 文档 Gate、外部写入授权或回读要求。
+
+`wspec start --workflow <ref>` 显式选择 Workflow；未传入时使用项目 `activeWorkflow`。Driver Skill
+可以根据“仅文档变更”的用户意图建议 `builtin://workflows/documentation-delivery`，但必须把最终引用
+显式传给 `start`，Runtime 不使用模型判断，也不会在 Work Item 创建后自动切换 Workflow。若执行中
+出现生产代码、脚本、依赖或构建配置修改，提交立即返回 `WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`；
+用户必须创建新的功能交付 Work Item，不能在原 Work Item 内绕过 TDD。
+
 ## 10. Application Protocol
 
 Driver Skill、CLI 和未来可选的 MCP Adapter 使用同一用例接口：
@@ -580,8 +725,25 @@ interface WSSpecApplication {
   start(input: StartInput): Promise<StartResult>;
   acquire(input: AcquireInput): Promise<AgentAction>;
   submit(input: SubmitInput): Promise<AgentAction>;
-  decide(input: ApprovalDecision): Promise<AgentAction>;
+  decide(input: DecisionInput): Promise<AgentAction>;
   inspect(input: InspectInput): Promise<WorkItemView>;
+}
+
+interface StartInput {
+  source: RequirementSourceInput;
+  workflowRef?: string;
+  profile?: "auto" | "quick" | "standard" | "governed";
+}
+
+type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput;
+
+interface WorkflowTrustDecisionInput {
+  kind: "workflow_trust";
+  requestId: string;
+  decision: "trusted" | "rejected";
+  expectedPackageDigest: string;
+  expectedCapabilityDigest: string;
+  actor: string;
 }
 ```
 
@@ -628,13 +790,17 @@ Driver Skill 的循环是：
 
 ```text
 识别工作流触发
-  -> 新任务 start；已有任务 inspect
+  -> 新任务选择 Workflow 后 start；已有任务 inspect
   -> acquire
   -> 读取当前 Step 绑定的 Skills
   -> 当前 Agent 原生执行
   -> submit
   -> 重复，直到审批、阻塞或完成
 ```
+
+Driver 对明确的纯文档/无代码变更建议 `documentation-delivery`，其他软件功能交付使用
+`feature-delivery`；建议必须转成显式 `StartInput.workflowRef`，用户可以覆盖。Driver 不得把 Workflow
+选择留给 Runtime 猜测，也不得在 Work Item 创建后静默切换。
 
 审批必须暂停并交还用户。会话中断后，新会话通过 `inspect + acquire` 从持久化状态继续；`start` 只创建新 Work Item。
 
@@ -652,7 +818,7 @@ Driver Skill 的循环是：
 └── archive/
 ```
 
-默认选择内置基础工作流：
+默认选择内置功能交付 Workflow：
 
 ```yaml
 version: 1
@@ -667,6 +833,7 @@ profile: auto
 ```text
 wspec workflow list
 wspec workflow show feature-delivery
+wspec workflow show documentation-delivery
 wspec workflow eject feature-delivery
 wspec workflow validate
 wspec workflow use project://workflows/feature-delivery
@@ -744,6 +911,11 @@ Git common-dir 保存共享运行控制面：
 └── runtime.lock
 ```
 
+项目级 Workflow Package 信任记录保存在 Git common-dir 的
+`.git/wsspec/trust/workflow-packages.ndjson`，由文件锁保护并按事件追加。记录只包含逻辑来源、
+Package/能力摘要、决定、Actor 和时间；它不随项目文件提交，也不保存本机绝对路径。`workflow use`
+和 `start` 每次都用当前摘要重新求值，不能仅凭曾经存在 trusted 记录继续执行。
+
 现有事件哈希链、事件先于投影、原子写入、幂等键、锁、投影回放和归档后只读语义继续保留。当前会话结束不影响 Work Item 状态；未完成 Attempt、租约和审批按恢复规则失效或回到可执行状态。
 
 ## 15. 安全边界
@@ -815,7 +987,7 @@ src/
 1. **规格基线**：产品改名、Workflow Language v1、Skill URI、Manifest 和 Application Protocol Schema。
 2. **Application Facade**：在现有内核上实现 `start/acquire/submit/decide/inspect`。
 3. **Skill Catalog**：Builtin、Package、Global、Project 四类 Skill、fallback、摘要和 Skill Lock。
-4. **Workflow Package**：内置基础工作流、项目 Workflow、`list/show/eject/validate/use`。
+4. **Workflow Package**：功能/文档两个内置基础 Workflow、项目 Workflow、`list/show/eject/validate/use`。
 5. **Profile Engine**：三种内置 Profile、overlay 编译、风险策略、单向升级和失效传播。
 6. **有限控制流**：条件、重试和有界 Review-Fix 循环。
 7. **Driver Adapter**：Codex、Claude、Cursor 和 Generic 安装与恢复流程。
@@ -827,9 +999,9 @@ src/
 
 ## 19. 验收标准
 
-- 首次安装后，不依赖第三方 Skill 即可执行内置基础工作流。
+- 首次安装后，不依赖第三方 Skill 即可执行功能/文档两个内置基础 Workflow。
 - 所有发布文档、模板和内置 Skill 正文均为中文，且 CI 扫描不得出现未登记的英文用户文案。
-- 内置基础工作流提供 `quick`、`standard`、`governed`，并由同一 Runtime 执行。
+- 两个内置基础 Workflow 都提供 `quick`、`standard`、`governed`，并由同一 Runtime 执行。
 - `auto` 先以 provisional `quick` 完成采集和探索，再按风险选择 Profile；风险未知使用 `standard`。
 - Profile overlay 不能修改 Step 安全类别、外部目标或关闭安全内核。
 - Profile 升级会补回必需 Step，并失效受影响的审批、结果和 Evidence。
@@ -843,6 +1015,7 @@ src/
 - 用户描述、本地文件、GitHub Issue、GitLab Issue 和飞书文档均能形成不可变需求来源快照。
 - Quick 也必须产出紧凑单任务计划，任何 Profile 都不能直接从规格跳到无计划实现。
 - 功能交付 Workflow 的每个实现批次都有可信 Red/Green Evidence，Profile 不能关闭该要求。
+- 文档交付 Workflow 不生成 TDD Evidence，但必须限制修改范围并至少通过一个 trusted 文档 Gate。
 - Review-Fix 循环能在通过时结束，并在达到 `maxIterations` 时阻塞。
 - Agent 自主管理上下文；Work Package 不默认内嵌工件正文或对话历史。
 - 会话中断后，新 Agent 会话可以从下一可执行 Step 恢复。
@@ -851,12 +1024,13 @@ src/
 - 仓库中不残留旧产品名、旧公开命令、旧 Schema ID、`WSK-` 或 `WSPEC_` 对外协议。
 - 单元、契约、集成、E2E、构建、Schema 漂移和 `npm pack --dry-run` 全部通过。
 - 本地 Fixture、已登录客户端测试和真实 GitHub/GitLab/飞书验收必须分别报告，不能互相替代。
+- 非 Builtin Workflow Package 未确认信任、信任摘要失效或非交互环境尝试默认接受时，必须阻止启用和启动。
 
 ## 20. 需求追踪矩阵
 
 | ID | 用户需求 | 设计落点 | 实施计划 | 必需验收证据 |
 |---|---|---|---|---|
-| `REQ-01` | 当前 Agent 会话由 Skill 驱动 | 4、10、11 | Foundation Task 7-8 | 四宿主协议契约及真实客户端 Smoke |
+| `REQ-01` | 当前 Agent 会话由 Skill 驱动 | 4、10、11 | Foundation Task 7-8；Release Task 2-3 | Codex/Claude/Cursor 真实 Smoke 与 Generic Adapter 契约 |
 | `REQ-02` | Agent 管上下文、Token、模型 | 2、4、10.1 | Foundation Task 2、7 | Work Package Schema 不含会话与模型字段 |
 | `REQ-03` | 用户描述、文件、GitHub/GitLab、飞书输入 | 9.5、13 | Connector Task 2-4 | 五类不可变 Source Artifact |
 | `REQ-04` | 探索代码并澄清需求 | 9.5 `explore/clarify` | Foundation Task 3、Control Task 6 | exploration/specification Artifact |
@@ -874,6 +1048,8 @@ src/
 | `REQ-16` | 跨会话恢复 | 10、11、14 | Foundation Task 7-8；Release Task 2-3 | 新会话 `inspect + acquire` |
 | `REQ-17` | 中文文档和 Skill | 2、6 | Foundation Task 1、3、8-9；Release Task 6 | 中文契约扫描 |
 | `REQ-18` | 不兼容旧协议，直接替换 | 17 | Foundation Task 1-2、8-9 | 旧命令、Schema、文档均不存在 |
+| `REQ-19` | 所有非 Builtin Workflow Package 首次使用需确认信任，内容或能力变化后重新确认 | 8、15 | Foundation Task 4、8；Release Task 1 | Project/外部 Package 首次阻塞、拒绝、确认、摘要失效、非交互拒绝 E2E |
+| `REQ-20` | 纯文档和无可执行代码变更使用专用文档交付 Workflow | 6、9.4、9.6 | Foundation Task 2-3、7；Control Task 6；Release Task 6-7 | 两个内置 Workflow 打包；文档路径边界、trusted 文档 Gate、无 TDD Evidence E2E |
 
 发布门禁维护机器可读的 `docs/acceptance/requirements-traceability.yaml`。每个 `REQ-*` 必须至少
 绑定一个设计章节、一个实施 Task 和一个自动或真实验收证据；缺失、重复 ID、指向不存在 Task、

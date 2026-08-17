@@ -110,11 +110,11 @@ git commit -m "refactor: establish WSSpecKit identity"
 
 **接口：**
 - 输入：Task 1 的 `WorkItemId`。
-- 输出：`WSSpecApplication`、`AgentAction`、`WorkPackage`、五类 Application 输入类型。
+- 输出：`WSSpecApplication`、`AgentAction`、`WorkPackage`、五类 Application 输入类型和 `DecisionInput`。
 
 - [ ] **步骤 1：编写四类 AgentAction 的失败契约测试**
 
-覆盖 `execute`、`await_approval`、`blocked`、`completed`，并验证 Work Package 拒绝 `conversationHistory`、`prompt` 和未知字段。
+覆盖 `execute`、`await_approval`、`blocked`、`completed`，验证 `StartInput.workflowRef` 可以显式选择 Workflow、缺省时使用项目 `activeWorkflow`，验证 `DecisionInput` 只能是 Step/外部动作审批或 Workflow Package 信任决定，并验证 Work Package 拒绝 `conversationHistory`、`prompt` 和未知字段。
 
 ```ts
 test("Work Package 拒绝 Agent 对话上下文", () => {
@@ -144,8 +144,25 @@ export interface WSSpecApplication {
   start(input: StartInput): Promise<StartResult>;
   acquire(input: AcquireInput): Promise<AgentAction>;
   submit(input: SubmitInput): Promise<AgentAction>;
-  decide(input: ApprovalDecision): Promise<AgentAction>;
+  decide(input: DecisionInput): Promise<AgentAction>;
   inspect(input: InspectInput): Promise<WorkItemView>;
+}
+
+export interface StartInput {
+  source: RequirementSourceInput;
+  workflowRef?: string;
+  profile?: "auto" | "quick" | "standard" | "governed";
+}
+
+export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput;
+
+export interface WorkflowTrustDecisionInput {
+  kind: "workflow_trust";
+  requestId: string;
+  decision: "trusted" | "rejected";
+  expectedPackageDigest: string;
+  expectedCapabilityDigest: string;
+  actor: string;
 }
 ```
 
@@ -174,12 +191,14 @@ git commit -m "feat: define WSSpecKit application protocol"
 
 **文件：**
 - 创建：`resources/catalog.yaml`
-- 创建：`resources/workflows/feature-delivery/{manifest.yaml,workflow.yaml}`
-- 创建：`resources/workflows/feature-delivery/profiles/{quick,standard,governed}.yaml`
+- 创建：`resources/workflows/{feature-delivery,documentation-delivery}/{manifest.yaml,workflow.yaml}`
+- 创建：`resources/workflows/{feature-delivery,documentation-delivery}/profiles/{quick,standard,governed}.yaml`
 - 创建：`resources/skills/*/SKILL.md`
 - 创建：`src/resources/catalog.ts`
+- 创建：`src/engine/docs-integrity.ts`
 - 修改：`src/storage/repository.ts`
 - 创建：`tests/contract/builtin-resources.test.ts`
+- 创建：`tests/unit/docs-integrity.test.ts`
 - 修改：`tests/integration/repository.test.ts`
 
 **接口：**
@@ -188,7 +207,7 @@ git commit -m "feat: define WSSpecKit application protocol"
 
 - [ ] **步骤 1：编写失败的资源与中文约束测试**
 
-验证每个 Builtin Skill 均有 `id`、`version`、中文 `description` 和中文正文；内置 Workflow 引用的 Skill 必须全部存在；`wspec init` 必须创建 `repository.yaml`、`config.yaml`、`workflow.yaml`。
+验证每个 Builtin Skill 均有 `id`、`version`、中文 `description` 和中文正文；两个内置 Workflow 引用的 Skill 必须全部存在；功能交付包含可信 Red/Green Gate，文档交付包含 `documentation-exploration`、`documentation-editing`、`documentation-review` 和包内固定 argv 的 `docs.integrity` trusted Gate，且禁止生产代码路径；`wspec init` 必须创建 `repository.yaml`、`config.yaml`、`workflow.yaml`。
 
 ```ts
 assert.equal(parseYaml(await read(root, ".wsspec/workflow.yaml")).profile, "auto");
@@ -197,13 +216,13 @@ assert.match(skillBody, /[\u4e00-\u9fff]/u);
 
 - [ ] **步骤 2：运行测试，确认资源和完整初始化缺失**
 
-运行：`node --import tsx --test tests/contract/builtin-resources.test.ts tests/integration/repository.test.ts`
+运行：`node --import tsx --test tests/contract/builtin-resources.test.ts tests/unit/docs-integrity.test.ts tests/integration/repository.test.ts`
 
 预期：失败，因为当前 init 只生成仓库身份且没有资源目录。
 
-- [ ] **步骤 3：创建内置基础 Workflow、三种 Profile 和 Skill Catalog**
+- [ ] **步骤 3：创建两个内置基础 Workflow、三种 Profile 和 Skill Catalog**
 
-每个 Skill 必须用中文明确目标、输入、输出、停止条件和禁止副作用。Builtin Skill 不得依赖用户额外安装 Superpowers。
+创建 `feature-delivery` 与 `documentation-delivery`。后者只允许文档路径，使用文档探索、文档编辑、文档 Review 和确定性文档 Gate，不生成 `TddCycleEvidence`。发布包内置 `docs.integrity` 固定命令，检查 UTF-8、非空正文、冲突标记和允许路径，确保未安装 Markdown 工具时仍可执行 Quick；Standard/Governed 可以叠加项目 Gate。每个 Skill 必须用中文明确目标、输入、输出、停止条件和禁止副作用。Builtin Skill 不得依赖用户额外安装 Superpowers。
 
 - [ ] **步骤 4：使用原子写入完成 init**
 
@@ -219,14 +238,14 @@ profile: auto
 
 - [ ] **步骤 5：运行资源、初始化和安装包测试**
 
-运行：`node --import tsx --test tests/contract/builtin-resources.test.ts tests/integration/repository.test.ts tests/e2e/package-install.test.ts`
+运行：`node --import tsx --test tests/contract/builtin-resources.test.ts tests/unit/docs-integrity.test.ts tests/integration/repository.test.ts tests/e2e/package-install.test.ts`
 
 预期：全部通过，安装后的包能定位 `resources/`。
 
 - [ ] **步骤 6：提交**
 
 ```bash
-git add resources src/resources src/storage/repository.ts tests/contract/builtin-resources.test.ts tests/integration/repository.test.ts
+git add resources src/resources src/engine/docs-integrity.ts src/storage/repository.ts tests/contract/builtin-resources.test.ts tests/unit/docs-integrity.test.ts tests/integration/repository.test.ts
 git commit -m "feat: bundle Chinese builtin workflows and skills"
 ```
 
@@ -234,11 +253,14 @@ git commit -m "feat: bundle Chinese builtin workflows and skills"
 
 **文件：**
 - 创建：`src/workflow-package/{types,loader,lock}.ts`
+- 创建：`src/workflow-package/trust.ts`
+- 创建：`src/storage/workflow-trust.ts`
 - 创建：`tests/unit/workflow-package.test.ts`
+- 创建：`tests/integration/workflow-package-trust.test.ts`
 
 **接口：**
 - 输入：Task 3 的 Builtin Catalog。
-- 输出：`loadWorkflowPackage(input): Promise<WorkflowPackage>`、`lockWorkflowPackage(pkg): WorkflowPackageLock`。
+- 输出：`loadWorkflowPackage(input): Promise<WorkflowPackage>`、`lockWorkflowPackage(pkg): WorkflowPackageLock`、`evaluateWorkflowTrust(input): WorkflowTrustDecision`、`recordWorkflowTrust(input): Promise<WorkflowTrustRecord>`。
 
 - [ ] **步骤 1：编写失败的 Package 测试**
 
@@ -250,6 +272,8 @@ await assert.rejects(
   /WSSPEC_WORKFLOW_PACKAGE_PATH_INVALID/,
 );
 ```
+
+同时覆盖 Project/第三方 Package 首次使用返回 `approval_required`、明确拒绝后保持 blocked、确认后相同摘要可复用、Package 内容或副作用能力变化使信任失效、仅搬迁相同摘要 Package 不失效，以及非交互环境不得默认接受。Builtin Package 必须通过明确的内置信任来源进入，不得复用用户信任记录伪装 Builtin。
 
 - [ ] **步骤 2：运行测试，确认 Loader 尚不存在**
 
@@ -271,18 +295,45 @@ export interface WorkflowPackage {
   packageSkills: Map<string, { entrypoint: string; digest: string }>;
   contentDigest: string;
 }
+
+export interface WorkflowTrustRecord {
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  decision: "trusted" | "rejected";
+  actor: string;
+  decidedAt: string;
+}
+
+export interface WorkflowTrustSummary {
+  packageRef: string;
+  packageDigest: string;
+  capabilityDigest: string;
+  fileDigests: Array<{ path: string; digest: string }>;
+  skillDigests: Array<{ ref: string; digest: string }>;
+  capabilities: string[];
+}
+
+export type WorkflowTrustDecision =
+  | { status: "trusted"; record: WorkflowTrustRecord }
+  | { status: "approval_required"; summary: WorkflowTrustSummary }
+  | { status: "rejected"; record: WorkflowTrustRecord };
 ```
 
-- [ ] **步骤 4：运行 Package 与类型测试**
+- [ ] **步骤 4：实现信任摘要、决策和失效规则**
 
-运行：`node --import tsx --test tests/unit/workflow-package.test.ts && npm run typecheck`
+能力摘要必须由 Manifest 中规范化的执行能力和外部副作用集合生成；展示内容包含逻辑来源、文件清单摘要、Skill 摘要和能力，不包含本机绝对路径或正文。信任记录追加到 Git common-dir 的 `.git/wsspec/trust/workflow-packages.ndjson` 并使用文件锁保护，不能授予 Step 或外部动作权限。未提供交互决策通道时返回 `WSSPEC_WORKFLOW_TRUST_REQUIRED`，不能通过配置全局跳过。
+
+- [ ] **步骤 5：运行 Package、信任与类型测试**
+
+运行：`node --import tsx --test tests/unit/workflow-package.test.ts tests/integration/workflow-package-trust.test.ts && npm run typecheck`
 
 预期：全部通过。
 
-- [ ] **步骤 5：提交**
+- [ ] **步骤 6：提交**
 
 ```bash
-git add src/workflow-package tests/unit/workflow-package.test.ts
+git add src/workflow-package src/storage/workflow-trust.ts tests/unit/workflow-package.test.ts tests/integration/workflow-package-trust.test.ts
 git commit -m "feat: load and lock workflow packages"
 ```
 
@@ -373,11 +424,11 @@ git commit -m "feat: resolve and lock workflow skills"
 
 **接口：**
 - 输入：Task 4-5 的 Workflow Package 和 Skill。
-- 输出：`compileWorkflow(pkg, profile): CompiledWorkflow`、`selectProfile(input): ResolvedProfile`、`evaluateProfileUpgrade(input): ProfileDecision`。
+- 输出：`compileWorkflow(pkg, profile): CompiledWorkflow`、`resolveChangePolicy(input): ResolvedChangePolicy`、`selectProfile(input): ResolvedProfile`、`evaluateProfileUpgrade(input): ProfileDecision`。
 
 - [ ] **步骤 1：编写失败的编译器测试**
 
-覆盖重复 ID、循环、未知依赖、非法表达式、未知 Executor、必需 Skill 缺失、启用 Step 消费已跳过必需输出，以及 Profile 修改 `uses`、依赖、安全类别、外部目标或关闭 TDD Red/Green Gate。
+覆盖重复 ID、循环、未知依赖、非法表达式、未知 Executor、必需 Skill 缺失、启用 Step 消费已跳过必需输出，以及 Profile 修改 `uses`、依赖、安全类别、外部目标或关闭 TDD Red/Green Gate。文档 Workflow 必须编译 `documentation-only` Change Policy；空路径、绝对路径、父目录逃逸和生产代码兜底路径均失败，Profile 与 Skill 不能扩大范围。
 
 - [ ] **步骤 2：编写失败的 Profile 选择测试**
 
@@ -412,9 +463,17 @@ export interface CompiledStep {
   inputs: ArtifactRequirement[];
   outputs: ArtifactDeclaration[];
 }
+
+export interface ResolvedChangePolicy {
+  kind: "feature" | "documentation-only";
+  allowedPaths: string[];
+  digest: string;
+}
 ```
 
-安全类别由 Registry Manifest 决定，Workflow YAML 无权覆盖。
+安全类别由 Registry Manifest 决定，Workflow YAML 无权覆盖。文档路径从项目
+`documentation.allowedPaths` 解析，缺省使用设计规格中的五类路径；结果写入 `CompiledWorkflow`，
+后续 Profile、Workflow Step 和 Skill 均无权扩大。
 
 - [ ] **步骤 5：实现确定性风险规则和单向升级结果**
 
@@ -457,7 +516,7 @@ assert.equal(action.workPackage.stepId, "intake");
 assert.equal("conversationHistory" in action.workPackage, false);
 ```
 
-同时覆盖 Prompt/本地文件采集、幂等重试、旧 Attempt 提交和第二个 Git worktree 恢复。Profile 运行时升级由下一份计划实现，本任务只持久化初始 Profile 决策。
+同时覆盖 Prompt/本地文件采集、显式 `workflowRef` 选择 `feature-delivery` 或 `documentation-delivery`、缺省读取 `activeWorkflow`、未知 Workflow 拒绝、文档 Workflow 实际 Git diff 越界拒绝、幂等重试、旧 Attempt 提交和第二个 Git worktree 恢复。Profile 运行时升级由下一份计划实现，本任务只持久化初始 Profile 决策。
 
 - [ ] **步骤 2：运行测试，确认 Application Factory 缺失**
 
@@ -480,7 +539,7 @@ export interface StepExecutor {
 
 - [ ] **步骤 4：实现 Start、快照、原子 Acquire/Submit 和 Decide**
 
-Start 快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、Schema、配置、来源和基线摘要。Acquire 在一次控制面变更中创建 Attempt、内部 Lease 和 Work Package；Submit 独立校验身份、摘要、路径和 Artifact。新增 `src/application/decide.ts`，复用真实 TTY 审批边界，并在批准、拒绝和请求过期后返回下一条 `AgentAction`。
+Start 解析显式 `workflowRef` 或项目 `activeWorkflow`，并快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、Schema、配置、来源、`ResolvedChangePolicy` 和基线摘要；创建后禁止切换 Workflow。Acquire 在一次控制面变更中创建 Attempt、内部 Lease 和 Work Package；Submit 独立校验身份、摘要、实际 Git diff 路径和 Artifact，文档范围越界返回 `WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`。新增 `src/application/decide.ts`，复用真实 TTY 审批边界，并在批准、拒绝和请求过期后返回下一条 `AgentAction`。
 
 - [ ] **步骤 5：运行 Application、恢复、锁和类型测试**
 
@@ -514,7 +573,7 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 - [ ] **步骤 1：编写失败的 CLI 与安装测试**
 
-验证帮助只暴露 `init/start/acquire/submit/decide/inspect/workflow/agent install`；旧命令和不存在的 `resume` 返回 `WSSPEC_COMMAND_UNKNOWN`；`workflow list/show/eject/validate/use` 均有正反例；所有帮助、错误和 Driver Skill 正文为中文。测试必须使用临时 HOME，不能写入真实用户 Skill 目录。
+验证帮助只暴露 `init/start/acquire/submit/decide/inspect/workflow/agent install`；`start --workflow` 能显式选择两个内置 Workflow；旧命令和不存在的 `resume` 返回 `WSSPEC_COMMAND_UNKNOWN`；`workflow list/show/eject/validate/use` 均有正反例；首次 `workflow use` 非 Builtin Package 返回信任摘要并要求通过 `decide` 明确确认，拒绝或非交互执行保持 blocked，摘要变化后要求重新确认；所有帮助、错误和 Driver Skill 正文为中文。测试必须使用临时 HOME，不能写入真实用户 Skill 目录。
 
 - [ ] **步骤 2：运行测试，确认旧 CLI 仍存在**
 
@@ -526,15 +585,18 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 每个命令只解析参数、调用一个 Application 方法并输出稳定 JSON；CLI 模块不得包含业务状态转换。
 
-`workflow eject` 必须原子复制 Builtin Package，目标存在时拒绝覆盖；`workflow use` 必须先完成 Package、Profile 和 Skill 编译校验再更新 `.wsspec/workflow.yaml`。
+`workflow eject` 必须原子复制 Builtin Package，目标存在时拒绝覆盖；`workflow use` 必须先完成 Package、Profile 和 Skill 编译校验，再调用 Task 4 的信任判定。只有摘要匹配的 trusted 决策才能更新 `.wsspec/workflow.yaml`；`start` 必须重复校验信任，防止启用后 Package 被修改。
 
 - [ ] **步骤 4：实现中文 Driver Skill 生成与原子安装**
 
 所有客户端共享同一中文循环说明：
 
 ```text
-新任务 start / 已有任务 inspect -> acquire -> 读取绑定 Skill -> 当前 Agent 执行 -> submit -> 重复
+新任务判断功能/文档 Workflow 并显式 start / 已有任务 inspect -> acquire -> 读取绑定 Skill -> 当前 Agent 执行 -> submit -> 重复
 ```
+
+Driver 仅在需求明确为纯文档或无代码变更时建议 `documentation-delivery`，其余默认
+`feature-delivery`；必须传递 `workflowRef`，允许用户覆盖，不能在创建后自动切换。
 
 安装时展示精确目标，拒绝覆盖无关 Skill，并支持 `--dry-run`。
 
@@ -583,7 +645,7 @@ git commit -m "feat: expose the Chinese WSSpecKit driver protocol"
 Skill URI 和错误码，逐项断言参考文档包含对应标识。另用 `rg` 断言旧产品名、旧命令和
 旧 Schema ID 只允许出现在负例测试夹具中。
 
-需求追踪测试读取设计规格中的 `REQ-01` 至 `REQ-18`，断言 ID 唯一且连续，每项都包含设计落点、
+需求追踪测试读取设计规格中的 `REQ-01` 至 `REQ-20`，断言 ID 唯一且连续，每项都包含设计落点、
 实施 Task 和验收证据；计划中引用的 Task 标题必须真实存在。
 
 - [ ] **步骤 2：运行测试，确认旧文档造成失败**
@@ -594,8 +656,8 @@ Skill URI 和错误码，逐项断言参考文档包含对应标识。另用 `rg
 
 - [ ] **步骤 3：删除旧文档并写入中文参考文档**
 
-四份参考文档分别覆盖五个 Application 操作、Workflow Language v1、四类 Skill 解析与
-锁定、Connector/Provider/审批/回读契约。文档中的 JSON/YAML 示例必须通过契约测试解析，
+四份参考文档分别覆盖五个 Application 操作、Workflow Language v1、四类 Skill 解析、
+Workflow Package 信任与锁定、Connector/Provider/审批/回读契约。文档中的 JSON/YAML 示例必须通过契约测试解析，
 不复制已经失效的旧类型。
 
 - [ ] **步骤 4：运行文档与完整基础门禁**

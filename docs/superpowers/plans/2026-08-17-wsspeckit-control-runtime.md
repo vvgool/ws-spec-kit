@@ -2,7 +2,7 @@
 
 > **Agent 执行要求：** 使用 `superpowers:subagent-driven-development` 或 `superpowers:executing-plans`，在基础计划全部门禁通过后逐任务执行。
 
-**目标：** 实现 `when`、重试、有界 Review-Fix 循环、Profile 运行时升级、审批、可信 Gate 和 Close，使内置基础工作流在纯本地环境完整运行。
+**目标：** 实现 `when`、重试、有界 Review-Fix 循环、Profile 运行时升级、审批、可信 Gate 和 Close，使功能/文档两个内置 Workflow 在纯本地环境完整运行。
 
 **架构：** Compiler 生成不可变执行图，Runtime 只通过事件推进 Step/Loop/Work Item 投影。Profile Policy 返回决策与影响集合，Runtime 负责失效传播；表达式引擎只解释有限 AST，不执行任意代码。
 
@@ -188,6 +188,7 @@ export interface TddCycleEvidence {
 - 创建：`tests/e2e/standard-workflow.test.ts`
 - 创建：`tests/e2e/governed-workflow.test.ts`
 - 创建：`tests/e2e/profile-upgrade.test.ts`
+- 创建：`tests/e2e/documentation-workflow.test.ts`
 
 **接口：**
 - 输入：本计划全部 Runtime 能力。
@@ -197,10 +198,11 @@ export interface TddCycleEvidence {
 - [ ] 编写 Standard E2E：完整规格/设计/计划、审批、Review-Fix 两轮、required Gates、close。
 - [ ] 编写 Governed E2E：独立 Review Actor、完整 Gate、完整审计；外部目标使用可回读本地 Fixture。
 - [ ] 编写运行中由 Quick 升级到 Governed 的 E2E，验证新增前置 Step 和失效传播。
-- [ ] 对四条 E2E 分别在 `acquire` 后、循环 submit 后和 Profile 升级事件后终止进程，再由 `inspect + acquire` 恢复，断言循环预算、Profile、Attempt 和审批不重置。
+- [ ] 编写 Documentation E2E：显式选择 `builtin://workflows/documentation-delivery`，完成紧凑规格/计划、文档编辑、trusted `docs.integrity`、Review-Fix 和 Close；断言不存在 `write-tests/verify-red/implement/verify-green` Step 与 `TddCycleEvidence`。再尝试修改生产代码、脚本、依赖和构建配置，分别断言 `WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`，且不能在原 Work Item 内切换到功能交付绕过 TDD。
+- [ ] 对五条 E2E 分别在 `acquire` 后、循环 submit 后和 Profile 升级事件后终止进程，再由 `inspect + acquire` 恢复，断言 Workflow 引用、循环预算、Profile、Attempt 和审批不重置。
 - [ ] 运行：`npm run lint && npm run typecheck && npm test && npm run build`，预期全部通过。
 - [ ] 提交：`git commit -m "test: cover all workflow risk profiles"`。
 
 ## 完成门禁
 
-三个 Profile 必须由同一 Runtime 执行；崩溃恢复后循环次数、重试预算、Profile、TDD Evidence 和审批保持一致；不存在无界循环、自动降级、跳过 Red/Green 或 Agent 自报 trusted Evidence 的路径。
+两个内置 Workflow 和三个 Profile 必须由同一 Runtime 执行；崩溃恢复后 Workflow 引用、循环次数、重试预算、Profile、Evidence 和审批保持一致；功能交付不存在跳过 Red/Green 的路径，文档交付不存在越过文档路径边界或缺少 trusted 文档 Gate 的路径；不存在无界循环、自动降级或 Agent 自报 trusted Evidence 的路径。
