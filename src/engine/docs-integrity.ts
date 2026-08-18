@@ -3,18 +3,30 @@ import path from "node:path";
 
 export interface DocumentationProblem { code: string; file: string; message: string }
 
-function matches(file: string, pattern: string): boolean {
-  if (pattern === file || pattern === "**") return true;
-  if (pattern.startsWith("*.")) return !file.includes("/") && file.endsWith(pattern.slice(1));
-  if (pattern.endsWith("/**")) return file.startsWith(pattern.slice(0, -3) + "/");
-  return false;
+function glob(pattern: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index]!;
+    if (character === "*" && pattern[index + 1] === "*") {
+      if (pattern[index + 2] === "/") {
+        source += "(?:.*/)?";
+        index += 2;
+      } else {
+        source += ".*";
+        index += 1;
+      }
+    } else if (character === "*") source += "[^/]*";
+    else if (character === "?") source += "[^/]";
+    else source += character.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  }
+  return new RegExp(`${source}$`, "u");
 }
 
 export async function checkDocumentationIntegrity(input: { root: string; files: string[]; allowedPaths: string[] }): Promise<{ ok: boolean; problems: DocumentationProblem[] }> {
   const problems: DocumentationProblem[] = [];
   for (const file of input.files) {
     const normalized = file.replaceAll("\\", "/");
-    if (normalized.startsWith("/") || normalized.split("/").includes("..") || !input.allowedPaths.some((allowed) => matches(normalized, allowed))) {
+    if (normalized.startsWith("/") || normalized.split("/").includes("..") || !input.allowedPaths.some((allowed) => glob(allowed).test(normalized))) {
       problems.push({ code: "WSSPEC_DOCUMENTATION_SCOPE_VIOLATION", file, message: "文件不在文档工作流允许路径内。" });
       continue;
     }

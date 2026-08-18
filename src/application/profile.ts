@@ -75,7 +75,7 @@ export function applyProfileDecision(
   const stages = { ...projection.stages };
   for (const stepId of stepIds) {
     const stage = stages[stepId];
-    if (stage !== undefined && !["succeeded", "succeeded_with_warnings", "cancelled"].includes(stage.status)) {
+    if (stage !== undefined && stage.status !== "cancelled") {
       stages[stepId] = { status: "invalidated" };
     }
   }

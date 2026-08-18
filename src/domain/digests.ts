@@ -19,7 +19,9 @@ export function sha256(content: string | Uint8Array): string {
 export async function computeWorkspaceSnapshot(cwd: string): Promise<TreeEntry[]> {
   const root = await repositoryRoot(cwd);
   const output = await runGitRaw(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
-  const paths = output.split("\0").filter(Boolean).sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  const paths = output.split("\0")
+    .filter((candidate) => candidate !== "" && !candidate.startsWith(".wsspec/work-items/") && !candidate.startsWith(".wsspec/archive/"))
+    .sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
   const entries: TreeEntry[] = [];
 
   for (const relativePath of paths) {

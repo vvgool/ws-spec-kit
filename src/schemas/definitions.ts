@@ -23,6 +23,7 @@ export type SchemaId = (typeof schemaIds)[number];
 type JsonSchema = Record<string, unknown>;
 
 const idPattern = "^[a-z][a-z0-9-]{0,62}$";
+const gateIdPattern = "^[a-z][a-z0-9.-]{0,62}$";
 const stepInstanceIdPattern = "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$";
 const digestPattern = "^sha256:.+$";
 const repositoryIdPattern = "^repo-[0-9A-HJKMNP-TV-Z]{26}$";
@@ -184,7 +185,7 @@ const workPackageSchema: JsonSchema = {
       items: {
         type: "object", additionalProperties: false, required: ["id", "evidence", "required"],
         properties: {
-          id: { type: "string", pattern: idPattern },
+          id: { type: "string", pattern: gateIdPattern },
           evidence: { enum: ["trusted", "attested", "reported"] }, required: { type: "boolean" },
         },
       },
@@ -504,7 +505,7 @@ export const schemas = {
     properties: {
       evidenceId: { type: "string", minLength: 1 },
       level: { enum: ["trusted", "attested", "reported"] },
-      gateId: { type: "string", pattern: "^[a-z][a-z0-9.-]{0,62}$" },
+      gateId: { type: "string", pattern: gateIdPattern },
       codeRevision: { type: "string", minLength: 1 },
       baselineTreeDigest: { type: "string", pattern: digestPattern },
       workspaceTreeDigest: { type: "string", pattern: digestPattern },

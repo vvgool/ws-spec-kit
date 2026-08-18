@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,19 @@ test("文档完整性 Gate 接受允许路径内的 UTF-8 正文", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-docs-"));
   await writeFile(path.join(root, "README.md"), "# 使用说明\n\n有效正文。\n");
   assert.deepEqual(await checkDocumentationIntegrity({ root, files: ["README.md"], allowedPaths: ["README.md", "docs/**"] }), { ok: true, problems: [] });
+});
+
+test("文档完整性 Gate 按标准 glob 接受 docs 根目录和子目录 Markdown", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-docs-"));
+  await mkdir(path.join(root, "docs", "guides"), { recursive: true });
+  await writeFile(path.join(root, "docs", "local-guide.md"), "# Local Guide\n");
+  await writeFile(path.join(root, "docs", "guides", "advanced.md"), "# Advanced\n");
+
+  assert.deepEqual(await checkDocumentationIntegrity({
+    root,
+    files: ["docs/local-guide.md", "docs/guides/advanced.md"],
+    allowedPaths: ["docs/**/*.md"],
+  }), { ok: true, problems: [] });
 });
 
 test("文档完整性 Gate 拒绝空正文、冲突标记、非法 UTF-8 和越界路径", async () => {

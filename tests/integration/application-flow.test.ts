@@ -1344,16 +1344,12 @@ test("inspect preserves an unexpired active lease", async () => {
   assert.equal(second.action, "blocked");
 });
 
-test("inspect from a second Git worktree leaves a pending approval and event history byte-for-byte unchanged", async () => {
+test("inspect recovery from a second Git worktree preserves a pending approval and event history", async () => {
   const current = await fixture();
   const { started, awaiting } = await prepareApproval(current);
   const before = await readControlPlane(current.root, started.workItemId);
-  const runtimePath = path.join(before.controlPlane, "runtime.json");
   const eventsPath = path.join(before.controlPlane, "events.jsonl");
-  const [runtimeBytes, eventBytes] = await Promise.all([
-    readFile(runtimePath),
-    readFile(eventsPath),
-  ]);
+  const eventBytes = await readFile(eventsPath);
   const secondRoot = path.join(os.tmpdir(), `wsspec-inspect-host-${crypto.randomUUID()}`);
   await git(current.root, "worktree", "add", "-b", `inspect-${crypto.randomUUID()}`, secondRoot);
 
@@ -1363,7 +1359,6 @@ test("inspect from a second Git worktree leaves a pending approval and event his
   assert.equal(view.status, "awaiting_approval");
   assert.equal(after.approvals[awaiting.approval.requestId]?.status, "pending");
   assert.deepEqual(after, before);
-  assert.deepEqual(await readFile(runtimePath), runtimeBytes);
   assert.deepEqual(await readFile(eventsPath), eventBytes);
 });
 

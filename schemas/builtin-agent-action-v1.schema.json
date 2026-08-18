@@ -218,7 +218,7 @@
                 "properties": {
                   "id": {
                     "type": "string",
-                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                    "pattern": "^[a-z][a-z0-9.-]{0,62}$"
                   },
                   "evidence": {
                     "enum": [

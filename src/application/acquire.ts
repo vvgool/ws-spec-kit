@@ -468,10 +468,18 @@ async function acquireLoopStep(input: {
       if (input.step.independentReviewActor === true && selected.step.actorRole === "review") {
         const actors = implementationActors({ profile: input.profile, projection: input.projection, loopId: loop.loopId, iteration: loop.iteration });
         if (actors === undefined || actors.has(input.actor)) {
-          throw new ApplicationAcquireError(
-            "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
-            "Governed Review 必须由不同于实现者的独立 Actor 执行。",
-          );
+          return {
+            projection,
+            action: {
+              action: "blocked",
+              problems: [{
+                code: "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+                message: "Governed Review 必须由不同于实现者的独立 Actor 执行。",
+                retryable: true,
+              }],
+            },
+            skippedStepIds,
+          };
         }
       }
       const acquired = await acquireExecutableStep({

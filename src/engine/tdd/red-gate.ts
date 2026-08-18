@@ -4,6 +4,7 @@ import { access, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import * as canonicalizeModule from "canonicalize";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../../domain/digests.js";
 import { validate } from "../../schemas/index.js";
@@ -17,6 +18,8 @@ import {
   type TrustedEvidence,
 } from "./types.js";
 import { VerificationError } from "./types.js";
+
+const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
 const summaryLimit = 8_192;
 const captureLimit = summaryLimit * 4;
@@ -288,7 +291,9 @@ async function reportFailures(report: NodeTestReport, worktree: string, testPath
 }
 
 function evidenceId(unsigned: Omit<TrustedEvidence, "evidenceId">): string {
-  return `evidence-${sha256(`${JSON.stringify(unsigned)}\n`).slice("sha256:".length)}`;
+  const encoded = canonicalize(unsigned);
+  if (encoded === undefined) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "TDD Evidence 无法规范化。");
+  return `evidence-${sha256(encoded).slice("sha256:".length)}`;
 }
 
 export function parseTrustedEvidence(value: unknown): TrustedEvidence | undefined {

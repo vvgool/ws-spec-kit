@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import * as canonicalizeModule from "canonicalize";
 
 import { loadApplicationState, type SnapshotProfile } from "../../src/application/state.js";
 import { sha256 } from "../../src/domain/digests.js";
@@ -24,6 +25,8 @@ import {
 } from "./helpers/control-runtime.js";
 import { git } from "./helpers/git.js";
 
+const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
+
 function trustedTddEvidence(phase: "red" | "green", overrides: Partial<TrustedEvidence> = {}): TrustedEvidence {
   const unsigned: Omit<TrustedEvidence, "evidenceId"> = {
     level: "trusted" as const,
@@ -43,7 +46,7 @@ function trustedTddEvidence(phase: "red" | "green", overrides: Partial<TrustedEv
     ...overrides,
   };
   return {
-    evidenceId: `evidence-${sha256(`${JSON.stringify(unsigned)}\n`).slice("sha256:".length)}`,
+    evidenceId: `evidence-${sha256(canonicalize(unsigned)!).slice("sha256:".length)}`,
     ...unsigned,
   };
 }

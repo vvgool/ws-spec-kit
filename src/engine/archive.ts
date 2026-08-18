@@ -1,3 +1,5 @@
+import * as canonicalizeModule from "canonicalize";
+
 import { approvalBindingDigest } from "./approvals.js";
 import { completedReviewActors, implementationActors } from "./actor-roles.js";
 import { parseLoopStepInstanceId } from "./control/loop.js";
@@ -14,6 +16,8 @@ import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import type { ProjectGatePolicy } from "./compiler.js";
 import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
+
+const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
 export interface CloseDecision {
   allowed: boolean;
@@ -214,7 +218,8 @@ function externalReceiptSatisfied(input: CloseChecklistInput, target: "issue" | 
 }
 
 function sameValues(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const encoded = canonicalize(left);
+  return encoded !== undefined && encoded === canonicalize(right);
 }
 
 function closeRedEvidence(input: CloseChecklistInput): TrustedEvidence | undefined {

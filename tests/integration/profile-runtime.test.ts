@@ -202,7 +202,7 @@ test("applyProfileDecision 禁止降级并一次性失效受影响结果、Claim
   assert.equal(upgraded.profile.selected, "governed");
   assert.equal(upgraded.stages.intake?.status, "succeeded");
   assert.equal(upgraded.stages.design?.status, "invalidated");
-  assert.equal(upgraded.stages.plan?.status, "succeeded");
+  assert.equal(upgraded.stages.plan?.status, "invalidated");
   assert.deepEqual(upgraded.contexts.intake, projection.contexts.intake);
   assert.equal(upgraded.contexts.plan, undefined);
   assert.equal(upgraded.contexts["review-fix:1:review"], undefined);
@@ -279,10 +279,10 @@ test("Governed Review 要求 reviewActor 与 implementationActor 不同", async 
     mutate: (current) => ({ projection: { ...current, contexts: { ...current.contexts, implement: { actor: "codex", result: { status: "completed" } } } }, value: null }),
   });
 
-  await assert.rejects(
-    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" }),
-    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
-  );
+  const blocked = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" });
+  assert.equal(blocked.action, "blocked");
+  if (blocked.action !== "blocked") throw new Error("expected independent review handoff");
+  assert.equal(blocked.problems[0]?.code, "WSSPEC_INDEPENDENT_REVIEW_REQUIRED");
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
   assert.equal(review.stepId, "review-fix:1:review");
 });
@@ -314,10 +314,10 @@ test("Governed 后续 Review 不能由上一轮 Fix Actor 执行", async () => {
     }),
   });
 
-  await assert.rejects(
-    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" }),
-    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
-  );
+  const blocked = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" });
+  assert.equal(blocked.action, "blocked");
+  if (blocked.action !== "blocked") throw new Error("expected independent review handoff");
+  assert.equal(blocked.problems[0]?.code, "WSSPEC_INDEPENDENT_REVIEW_REQUIRED");
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
   assert.equal(review.stepId, "review-fix:2:review");
 });
@@ -528,11 +528,11 @@ test("Governed Review 拒绝原实现者和所有历史 completed Fix Actor，�
   await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
 
   for (const actor of ["original-implementer", "old-fixer", "latest-fixer"]) {
-    await assert.rejects(
-      fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor }),
-      (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
-      actor,
-    );
+    const blocked = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor });
+    assert.equal(blocked.action, "blocked", actor);
+    if (blocked.action !== "blocked") throw new Error(`expected independent review handoff for ${actor}`);
+    assert.equal(blocked.problems[0]?.code, "WSSPEC_INDEPENDENT_REVIEW_REQUIRED", actor);
+    assert.equal(blocked.problems[0]?.retryable, true, actor);
   }
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }));
   assert.equal(review.stepId, "review-fix:3:review");
@@ -571,10 +571,11 @@ test("Governed Review 在 Acquire 阶段按 actorRole 支持重命名 Workflow",
     }),
   });
 
-  await assert.rejects(
-    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "original-implementer" }),
-    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
-  );
+  const blocked = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "original-implementer" });
+  assert.equal(blocked.action, "blocked");
+  if (blocked.action !== "blocked") throw new Error("expected independent review handoff");
+  assert.equal(blocked.problems[0]?.code, "WSSPEC_INDEPENDENT_REVIEW_REQUIRED");
+  assert.equal(blocked.problems[0]?.retryable, true);
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }));
   assert.equal(review.stepId, "audit-cycle:1:audit-work");
 });
@@ -603,8 +604,9 @@ test("Governed Review 在已完成实现记录缺少 actor 时 fail closed", asy
     }),
   });
 
-  await assert.rejects(
-    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }),
-    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
-  );
+  const blocked = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" });
+  assert.equal(blocked.action, "blocked");
+  if (blocked.action !== "blocked") throw new Error("expected independent review handoff");
+  assert.equal(blocked.problems[0]?.code, "WSSPEC_INDEPENDENT_REVIEW_REQUIRED");
+  assert.equal(blocked.problems[0]?.retryable, true);
 });
