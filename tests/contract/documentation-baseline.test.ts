@@ -4,6 +4,10 @@ import path from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
+import { parseSkillLock } from "../../src/registry/skills/lock.js";
+import { validate, type SchemaId } from "../../src/schemas/index.js";
+import { parseProfileV1, parseWorkflowV1 } from "../../src/workflow-package/workflow-v1.js";
+
 const root = path.resolve(import.meta.dirname, "../..");
 const legacyDocuments = [
   "docs/specs/2026-08-16-wiesen-spec-kit-requirements.md",
@@ -24,23 +28,15 @@ const referenceDocuments = {
   skills: "docs/reference/skill-resolution.md",
   connectors: "docs/reference/connector-contracts.md",
 } as const;
-const publicCommands = ["init", "start", "acquire", "submit", "decide", "inspect", "workflow", "agent install"] as const;
-const applicationOperations = ["start", "acquire", "submit", "decide", "inspect"] as const;
-const publicErrorCodes = [
-  "WSSPEC_COMMAND_UNKNOWN",
-  "WSSPEC_ARGUMENT_REQUIRED",
-  "WSSPEC_ARGUMENT_INVALID",
-  "WSSPEC_SCHEMA_REQUIRED_FIELD",
-  "WSSPEC_SCHEMA_UNKNOWN_FIELD",
-  "WSSPEC_SCHEMA_INVALID_VALUE",
-  "WSSPEC_SCHEMA_UNSUPPORTED_VERSION",
-  "WSSPEC_WORKFLOW_TRUST_REQUIRED",
-  "WSSPEC_WORKFLOW_TRUST_REJECTED",
-  "WSSPEC_SKILL_NOT_FOUND",
-  "WSSPEC_SKILL_AMBIGUOUS",
-  "WSSPEC_SKILL_LOCK_CHANGED",
-  "WSSPEC_SOURCE_TYPE_UNSUPPORTED",
-  "WSSPEC_INTERACTIVE_TTY_REQUIRED",
+const publicErrorSources = [
+  "src/adapters/cli/output.ts",
+  "src/cli/commands/core.ts",
+  "src/application/start.ts",
+  "src/application/acquire.ts",
+  "src/application/submit.ts",
+  "src/application/decide.ts",
+  "src/application/inspect.ts",
+  "src/schemas/index.ts",
 ] as const;
 
 async function files(directory: string): Promise<string[]> {
@@ -61,11 +57,29 @@ function escapeRegularExpression(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
-function examples(document: string): Array<{ language: "json" | "yaml"; value: string }> {
-  return [...document.matchAll(/^```(json|yaml)\n([\s\S]*?)^```$/gmu)].map((match) => ({
+function examples(document: string): Array<{ language: "json" | "yaml"; contract: string; value: string }> {
+  return [...document.matchAll(/^```(json|yaml) contract=([^\s]+)\n([\s\S]*?)^```$/gmu)].map((match) => ({
     language: match[1]! as "json" | "yaml",
-    value: match[2]!,
+    contract: match[2]!,
+    value: match[3]!,
   }));
+}
+
+function commands(cliMain: string): string[] {
+  return [...cliMain.matchAll(/"wspec ([^"]+)"/gu)].map((match) => {
+    const words = match[1]!.split(" ");
+    return words[0] === "agent" ? "agent install" : words[0]!;
+  });
+}
+
+function applicationOperations(protocol: string): Array<{ name: string; result: string }> {
+  return [...protocol.matchAll(/^  ([a-z]+)\(input: [A-Za-z]+\): Promise<([A-Za-z]+)>;/gmu)]
+    .map((match) => ({ name: match[1]!, result: match[2]! }));
+}
+
+async function publicErrorCodes(): Promise<string[]> {
+  const sources = await Promise.all(publicErrorSources.map(async (filename) => readFile(path.join(root, filename), "utf8")));
+  return [...new Set(sources.flatMap((source) => [...source.matchAll(/WSSPEC_[A-Z_]+/gu)].map((match) => match[0])))].sort();
 }
 
 test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill URI 与错误码", async () => {
@@ -78,7 +92,15 @@ test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill U
     .map(async (filename) => JSON.parse(await readFile(path.join(root, "schemas", filename), "utf8")) as { $id: string }));
   const schemaIds = schemas.map(({ $id }) => $id).sort();
   const applicationReference = reference.application;
-  for (const value of [...schemaIds, ...publicCommands, ...applicationOperations]) assert.match(applicationReference, new RegExp(escapeRegularExpression(value), "u"), value);
+  const [cliMain, protocol] = await Promise.all([
+    readFile(path.join(root, "src/cli/main.ts"), "utf8"),
+    readFile(path.join(root, "src/protocol/application.ts"), "utf8"),
+  ]);
+  for (const value of [...schemaIds, ...commands(cliMain)]) assert.match(applicationReference, new RegExp(escapeRegularExpression(value), "u"), value);
+  for (const operation of applicationOperations(protocol)) {
+    const pattern = ["### `", operation.name, "`[\\s\\S]*?输入[\\s\\S]*?输出[\\s\\S]*?`", operation.result, "`"].join("");
+    assert.match(applicationReference, new RegExp(pattern, "u"), operation.name);
+  }
 
   const workflowReferences = `${reference.workflow}\n${reference.connectors}`;
   for (const value of ["builtin://workflows/feature-delivery", "builtin://workflows/documentation-delivery", "package://skills/"]) assert.match(workflowReferences, new RegExp(escapeRegularExpression(value), "u"), value);
@@ -89,16 +111,37 @@ test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill U
     for (const match of (await readFile(filename, "utf8")).matchAll(/builtin:\/\/skills\/[a-z0-9-]+/gu)) skillUris.add(match[0]);
   }
   for (const uri of skillUris) assert.match(reference.skills, new RegExp(escapeRegularExpression(uri), "u"), uri);
-  for (const code of publicErrorCodes) assert.match(`${reference.application}\n${reference.workflow}\n${reference.skills}\n${reference.connectors}`, new RegExp(code, "u"), code);
+  for (const code of await publicErrorCodes()) assert.match(`${reference.application}\n${reference.workflow}\n${reference.skills}\n${reference.connectors}`, new RegExp(code, "u"), code);
 });
 
-test("公开参考中的 JSON 和 YAML 示例都可解析", async () => {
+test("公开参考中的每个结构化示例都标注并通过正式契约", async () => {
   for (const [name, document] of Object.entries(await documents())) {
     const blocks = examples(document);
     assert.ok(blocks.length > 0, `${name} 缺少结构化示例`);
+    assert.equal(blocks.length, [...document.matchAll(/^```(?:json|yaml)/gmu)].length, `${name} 存在未标注契约的示例`);
     for (const block of blocks) {
       const value = block.language === "json" ? JSON.parse(block.value) : parseYaml(block.value);
       assert.notEqual(value, undefined, `${name} 的 ${block.language} 示例为空`);
+      if (block.contract.startsWith("schema:")) {
+        validate(block.contract.slice("schema:".length) as SchemaId, value);
+      } else if (block.contract === "workflow-v1") {
+        assert.deepEqual(
+          parseWorkflowV1(value),
+          parseWorkflowV1(parseYaml(await readFile(path.join(root, "resources/workflows/documentation-delivery/workflow.yaml"), "utf8"))),
+        );
+      } else if (block.contract === "profile-v1") {
+        parseProfileV1(value);
+      } else if (block.contract === "skill-lock-v1") {
+        parseSkillLock(value);
+      } else if (block.contract === "builtin-documentation-manifest") {
+        assert.deepEqual(value, parseYaml(await readFile(path.join(root, "resources/workflows/documentation-delivery/manifest.yaml"), "utf8")));
+      } else if (block.contract === "normalized-requirement-source") {
+        assert.deepEqual(Object.keys(value as object).sort(), ["body", "metadata", "stableId", "title", "type"]);
+      } else if (block.contract === "connector-write-intent") {
+        assert.deepEqual(Object.keys(value as object).sort(), ["action", "authorization", "readBack", "target"]);
+      } else {
+        assert.fail(`${name} 使用未知示例契约 ${block.contract}`);
+      }
     }
   }
 });

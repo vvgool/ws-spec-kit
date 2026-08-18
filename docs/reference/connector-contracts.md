@@ -6,7 +6,7 @@
 
 来源类型分为 `user.prompt`、`local.file`、`github.issue`、`gitlab.issue`、`feishu.document`。每个来源必须先规范化为不可变 Source Artifact，保留稳定身份、捕获时间、内容摘要和允许的元数据；Work Package 只引用 Artifact，不复制来源正文。
 
-```json
+```json contract=normalized-requirement-source
 {
   "type": "user.prompt",
   "stableId": "prompt:local-01",
@@ -22,7 +22,7 @@ Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日�
 
 外部动作必须先生成精确授权，再执行，再回读。授权至少绑定 actor、稳定目标、动作、内容摘要、幂等键和有效期；配置开启、Workflow capability 或 Agent 建议都不是授权。审批必须由真实交互式 TTY 完成，否则返回 `WSSPEC_INTERACTIVE_TTY_REQUIRED`。
 
-```json
+```json contract=schema:builtin.application-decision-input.v1
 {
   "kind": "approval",
   "root": "/workspace/demo",
@@ -40,7 +40,7 @@ Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日�
 
 Provider 写入后必须重新读取稳定目标，校验目标身份与预期内容摘要，并将回读证据写入审计记录。进程中断或远端结果未知时不得盲目重试；应按幂等键回读后进入对账。Issue 更新、知识发布、外部 Issue Close 和 Work Item Close 必须串行，任何必需外部关闭失败都不得关闭 Work Item。
 
-```yaml
+```yaml contract=connector-write-intent
 action: issue.update
 target:
   provider: github

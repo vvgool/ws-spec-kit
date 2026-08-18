@@ -16,7 +16,7 @@ Skill Resolver 按显式 URI 解析可执行说明，并将选择结果快照到
 - `builtin://skills/documentation-editing`
 - `builtin://skills/documentation-review`
 
-```yaml
+```yaml contract=skill-lock-v1
 version: 1
 skills:
   - requested: builtin://skills/tdd-implementation
