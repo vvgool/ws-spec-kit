@@ -33,7 +33,7 @@ export interface StageContext {
   expectedOutputs: Array<{ artifactType: string; schemaVersion: 1 }>;
   allowedPaths: string[];
   gates: string[];
-  resultSchema: "builtin.stage-result.v1";
+  resultSchema: "builtin.submit-result.v1";
 }
 
 export class ClaimError extends Error {
@@ -100,7 +100,7 @@ export async function buildStageContext(claim: Claim): Promise<StageContext> {
     claimToken: claim.claimToken, claimExpiresAt: claim.expiresAt, ...manifest.execution,
     inputWorkspaceTreeDigest: claim.inputWorkspaceTreeDigest, objective: stage.uses, inputs: [],
     expectedOutputs: (stage.output ?? []).map((artifactType) => ({ artifactType, schemaVersion: 1 as const })),
-    allowedPaths: claim.allowedPaths, gates: stage.gates ?? [], resultSchema: "builtin.stage-result.v1" as const,
+    allowedPaths: claim.allowedPaths, gates: stage.gates ?? [], resultSchema: "builtin.submit-result.v1" as const,
   };
   const content = canonicalize(unsigned);
   if (content === undefined) throw new ClaimError("WSSPEC_CONTEXT_INVALID", "Context 无法规范化。");

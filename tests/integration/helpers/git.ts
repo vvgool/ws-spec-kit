@@ -15,7 +15,7 @@ export async function createGitRepository(): Promise<string> {
   const root = path.join(os.tmpdir(), `wspec-git-${crypto.randomUUID()}`);
   await mkdir(root, { recursive: true });
   await git(root, "init", "-b", "main");
-  await git(root, "config", "user.name", "WiesenSpecKit Test");
+  await git(root, "config", "user.name", "WSSpecKit Test");
   await git(root, "config", "user.email", "wspec@example.invalid");
   await writeFile(path.join(root, ".gitignore"), ".worktrees/\n", "utf8");
   await writeFile(path.join(root, "README.md"), "# Fixture\n", "utf8");

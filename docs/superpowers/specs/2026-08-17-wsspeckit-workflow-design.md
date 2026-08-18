@@ -1000,7 +1000,7 @@ src/
 ## 19. 验收标准
 
 - 首次安装后，不依赖第三方 Skill 即可执行功能/文档两个内置基础 Workflow。
-- 所有发布文档、模板和内置 Skill 正文均为中文，且 CI 扫描不得出现未登记的英文用户文案。
+- 所有发布文档、模板和内置 Skill 正文均为中文；Driver Skill 固定提示 Agent 默认使用中文，但仓库不进行文案静态扫描。
 - 两个内置基础 Workflow 都提供 `quick`、`standard`、`governed`，并由同一 Runtime 执行。
 - `auto` 先以 provisional `quick` 完成采集和探索，再按风险选择 Profile；风险未知使用 `standard`。
 - Profile overlay 不能修改 Step 安全类别、外部目标或关闭安全内核。
@@ -1041,12 +1041,12 @@ src/
 | `REQ-09` | Issue 更新、知识发布、Issue Close、Work Item Close | 9.5、13 | Connector Task 3-7 | 串行事件、各外部回读和最终 Close |
 | `REQ-10` | Step 可绑定对应 Skill | 7、9 | Foundation Task 5-6 | 多 Skill Binding 编译与 Work Package |
 | `REQ-11` | Workflow Package 自带 Skill | 7、8 | Foundation Task 4-5 | `package://` 搬迁、逃逸、快照测试 |
-| `REQ-12` | 包内提供全部基础中文 Skill | 6 | Foundation Task 3 | Catalog 完整性和中文扫描 |
+| `REQ-12` | 包内提供全部基础中文 Skill | 6 | Foundation Task 3 | Catalog 完整性和内置 Skill 资源契约 |
 | `REQ-13` | 项目自定义 Workflow | 8、12 | Foundation Task 4、8；Release Task 1 | eject/modify/validate/use E2E |
 | `REQ-14` | 使用用户全局安装 Skill | 7.3 | Foundation Task 5；Release Task 1 | 四宿主目录、歧义、fallback 测试 |
 | `REQ-15` | Quick/Standard/Governed 按风险升级 | 9.3 | Foundation Task 6；Control Task 3、6 | 三 Profile 和升级恢复 E2E |
 | `REQ-16` | 跨会话恢复 | 10、11、14 | Foundation Task 7-8；Release Task 2-3 | 新会话 `inspect + acquire` |
-| `REQ-17` | 中文文档和 Skill | 2、6 | Foundation Task 1、3、8-9；Release Task 6 | 中文契约扫描 |
+| `REQ-17` | 中文文档和 Skill | 2、6 | Foundation Task 1、3、8-9；Release Task 6 | Driver 中文输出提示与参考文档契约 |
 | `REQ-18` | 不兼容旧协议，直接替换 | 17 | Foundation Task 1-2、8-9 | 旧命令、Schema、文档均不存在 |
 | `REQ-19` | 所有非 Builtin Workflow Package 首次使用需确认信任，内容或能力变化后重新确认 | 8、15 | Foundation Task 4、8；Release Task 1 | Project/外部 Package 首次阻塞、拒绝、确认、摘要失效、非交互拒绝 E2E |
 | `REQ-20` | 纯文档和无可执行代码变更使用专用文档交付 Workflow | 6、9.4、9.6 | Foundation Task 2-3、7；Control Task 6；Release Task 6-7 | 两个内置 Workflow 打包；文档路径边界、trusted 文档 Gate、无 TDD Evidence E2E |

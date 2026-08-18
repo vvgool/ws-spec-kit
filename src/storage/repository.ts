@@ -39,7 +39,7 @@ async function readIdentityFile(root: string): Promise<{ version: 1; repositoryI
     content = await readFile(filename, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new RepositoryError("WSSPEC_REPOSITORY_NOT_INITIALIZED", "当前 Git 仓库尚未初始化 WiesenSpecKit。");
+      throw new RepositoryError("WSSPEC_REPOSITORY_NOT_INITIALIZED", "当前 Git 仓库尚未初始化 WSSpecKit。");
     }
     throw error;
   }
@@ -78,7 +78,7 @@ export async function loadRepository(cwd: string): Promise<RepositoryIdentity> {
     root = await repositoryRoot(cwd);
     commonDir = await gitCommonDir(cwd);
   } catch {
-    throw new RepositoryError("WSSPEC_GIT_REPOSITORY_REQUIRED", "WiesenSpecKit M1 只能在 Git 仓库中运行。");
+    throw new RepositoryError("WSSPEC_GIT_REPOSITORY_REQUIRED", "WSSpecKit 只能在 Git 仓库中运行。");
   }
   const file = await readIdentityFile(root);
   const identity: RepositoryIdentity = { ...file, repositoryRoot: root, commonDir };
@@ -91,7 +91,7 @@ export async function isRepositoryInitialized(cwd: string): Promise<boolean> {
   try {
     root = await repositoryRoot(cwd);
   } catch {
-    throw new RepositoryError("WSSPEC_GIT_REPOSITORY_REQUIRED", "WiesenSpecKit M1 只能在 Git 仓库中运行。");
+    throw new RepositoryError("WSSPEC_GIT_REPOSITORY_REQUIRED", "WSSpecKit 只能在 Git 仓库中运行。");
   }
   try {
     await readIdentityFile(root);
