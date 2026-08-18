@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.tdd-node-test-report.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "adapter",
+    "summary",
+    "failures"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "adapter": {
+      "const": "node-test"
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success",
+        "tests",
+        "passed",
+        "failed",
+        "cancelled",
+        "skipped",
+        "todo"
+      ],
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "tests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cancelled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "todo": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "file",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "assertion",
+              "syntax",
+              "dependency",
+              "other"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

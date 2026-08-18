@@ -68,6 +68,7 @@ export function createDefaultExecutorRegistry(): ExecutorRegistry {
   return new ExecutorRegistry()
     .register(executor("agent.execute", "agent"))
     .register(executor("connector.execute/requirement.capture", "external-read"))
+    .register(executor("command.execute/quality.test", "local-write"))
     .register(executor("control.loop", "control"))
     .register(executor("control.close", "control"));
 }

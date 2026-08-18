@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.tdd-cycle-evidence.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "taskId",
+    "testPaths",
+    "testPathRules",
+    "commandId",
+    "redEvidenceId",
+    "greenEvidenceId"
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^WSS-[A-Za-z0-9-]+$"
+    },
+    "testPaths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "testPathRules": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "node",
+          "java",
+          "ruby",
+          "dotnet"
+        ]
+      }
+    },
+    "commandId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "redEvidenceId": {
+      "type": "string",
+      "pattern": "^evidence-[a-f0-9]{64}$"
+    },
+    "greenEvidenceId": {
+      "type": "string",
+      "pattern": "^evidence-[a-f0-9]{64}$"
+    },
+    "refactorEvidenceId": {
+      "type": "string",
+      "pattern": "^evidence-[a-f0-9]{64}$"
+    }
+  }
+}

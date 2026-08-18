@@ -1,9 +1,58 @@
 import * as canonicalizeModule from "canonicalize";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { parse } from "yaml";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import { validate } from "../schemas/index.js";
 import { mutateControlPlane } from "./scheduler.js";
 import { loadApplicationState, selectedProfile, type SnapshotStep } from "../application/state.js";
+import { fixedGateCommandDigest, isTestPath, parseTrustedEvidence, testFileManifest } from "./tdd/red-gate.js";
+import { testPathRules, type FixedTestGate, type TddCycleEvidence, type TrustedEvidence } from "./tdd/types.js";
+import { VerificationError } from "./tdd/types.js";
+
+export { VerificationError } from "./tdd/types.js";
+
+export const tddRedEvidenceKey = (taskId: string): string => `tdd:${taskId}:red`;
+export const tddCycleEvidenceKey = (taskId: string): string => `tdd:${taskId}:cycle`;
+export const tddGreenEvidenceKey = (taskId: string, evidenceId: string): string => `tdd:${taskId}:green:${evidenceId}`;
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+export async function fixedTestGateForState(state: Pick<import("../application/state.js").ApplicationState, "itemRoot">): Promise<FixedTestGate> {
+  const config = object(parse(await readFile(path.join(state.itemRoot, "snapshot", "config.yaml"), "utf8")));
+  const gate = object(object(object(config?.quality)?.gates)?.test);
+  const configuredPathRules = object(config?.testing)?.pathRules;
+  const argv = gate?.command;
+  const timeoutSeconds = gate?.timeoutSeconds;
+  const inheritEnv = gate?.inheritEnv;
+  const env = gate?.env;
+  const reporter = object(gate?.reporter);
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((value) => typeof value === "string")
+    || typeof timeoutSeconds !== "number" || !Number.isInteger(timeoutSeconds) || timeoutSeconds < 1
+    || (inheritEnv !== undefined && (!Array.isArray(inheritEnv) || !inheritEnv.every((value) => typeof value === "string")))
+    || (env !== undefined && object(env) === undefined)
+    || !Array.isArray(configuredPathRules) || configuredPathRules.length === 0
+    || !configuredPathRules.every((value) => typeof value === "string" && (testPathRules as readonly string[]).includes(value))
+    || reporter?.type !== "node-test" || reporter.version !== 1) {
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 快照缺少固定且完整的 test Gate。 ");
+  }
+  return {
+    commandId: "test",
+    argv: argv as string[],
+    cwd: "worktree",
+    timeoutMs: timeoutSeconds * 1_000,
+    inheritEnv: (inheritEnv ?? []) as string[],
+    env: Object.fromEntries(Object.entries(object(env) ?? {}).map(([name, value]) => {
+      if (typeof value !== "string") throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", `Test Gate env ${name} 必须是字符串。`);
+      return [name, value];
+    })),
+    testPathRules: configuredPathRules as FixedTestGate["testPathRules"],
+    reporter: { type: "node-test", version: 1 },
+  };
+}
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
@@ -25,17 +74,49 @@ export interface GateEvidence extends UnsignedGateEvidence {
   recordHash: string;
 }
 
-export class VerificationError extends Error {
-  constructor(readonly code: `WSSPEC_${string}`, message: string) {
-    super(`${code}: ${message}`);
-    this.name = "VerificationError";
-  }
-}
-
 export function evidenceRecordHash(evidence: UnsignedGateEvidence): string {
   const encoded = canonicalize(evidence);
   if (encoded === undefined) throw new VerificationError("WSSPEC_EVIDENCE_INVALID", "Evidence 无法规范化。");
   return sha256(encoded);
+}
+
+export function assertImplementHasTrustedRed(input: {
+  taskId: string;
+  commandId: string;
+  gate?: FixedTestGate;
+  worktree: string;
+  redEvidence: TrustedEvidence | undefined;
+  requireWorkspaceMatch?: boolean;
+}): Promise<void> {
+  const evidence = parseTrustedEvidence(input.redEvidence);
+  if (evidence === undefined || evidence.phase !== "red" || evidence.taskId !== input.taskId) {
+    throw new VerificationError("WSSPEC_TDD_RED_REQUIRED", "acquire implement 前必须存在引擎产生的可信 Red Evidence。 ");
+  }
+  return Promise.all([
+    testFileManifest(input.worktree, evidence.testPaths, evidence.testPathRules),
+    computeWorkspaceTreeDigest(input.worktree),
+    input.gate === undefined ? Promise.resolve(evidence.commandDigest) : fixedGateCommandDigest(input.gate, input.worktree),
+  ]).then(([manifest, workspaceDigest, commandDigest]) => {
+    if (evidence.commandId !== input.commandId || evidence.commandDigest !== commandDigest) {
+      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 的命令、环境或可执行文件已变化。 ");
+    }
+    if (manifest.digest !== evidence.testPathsDigest || (input.requireWorkspaceMatch === true && workspaceDigest !== evidence.workspaceDigest)) {
+      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red 测试内容已修改或删除。 ");
+    }
+  });
+}
+
+export function evaluateReviewFixEvidence(input: {
+  modifiedFiles: readonly string[];
+  cycle: TddCycleEvidence;
+}): { action: "append-green"; commandId: string } | { action: "restart-cycle"; nextStepId: "write-tests" } {
+  const tests = new Set(input.cycle.testPaths);
+  return input.modifiedFiles.some((filename) => {
+    const normalized = filename.replaceAll("\\", "/");
+    return tests.has(normalized) || isTestPath(normalized, input.cycle.testPathRules);
+  })
+    ? { action: "restart-cycle", nextStepId: "write-tests" }
+    : { action: "append-green", commandId: input.cycle.commandId };
 }
 
 export function evidenceProjectionKey(stageId: string, gateId: string): string {

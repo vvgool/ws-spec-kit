@@ -28,6 +28,8 @@ import {
   stepFailureProblem,
 } from "../engine/control/retry.js";
 import { rebindAdditionalGlobalRoots } from "../storage/project-config.js";
+import { assertImplementHasTrustedRed, fixedTestGateForState, tddRedEvidenceKey } from "../engine/verification.js";
+import type { TrustedEvidence } from "../engine/tdd/types.js";
 import type { ApplicationSnapshot, ApplicationState, SnapshotProfile, SnapshotStep } from "./state.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
 
@@ -166,6 +168,15 @@ function inputArtifacts(input: {
   for (const requirement of input.step.inputs) {
     if (seen.has(requirement.artifact)) continue;
     seen.add(requirement.artifact);
+    if (requirement.artifact === "red-evidence") {
+      const red = input.projection.evidence[tddRedEvidenceKey(input.projection.workItemId)] as TrustedEvidence | undefined;
+      if (red?.level === "trusted" && red.phase === "red" && red.taskId === input.projection.workItemId) continue;
+    }
+    if (requirement.artifact === "red-test-result" && input.step.id === "verify-red") {
+      const writeTests = input.projection.contexts["write-tests"] as { result?: { modifiedFiles?: unknown } } | undefined;
+      const modifiedFiles = writeTests?.result?.modifiedFiles;
+      if (Array.isArray(modifiedFiles) && modifiedFiles.length > 0 && modifiedFiles.every((filename) => typeof filename === "string")) continue;
+    }
     let artifact: ArtifactReference | undefined;
     if (requirement.artifact === "requirement-source") {
       artifact = input.snapshot.source;
@@ -583,6 +594,17 @@ export async function acquireNextLocked(input: {
         : completed(state.item.workItemId, "closed", "Workflow 已完成。"),
       skippedStepIds: promoted.skippedStepIds,
     };
+  }
+  if (step.id === "implement") {
+    const gate = await fixedTestGateForState(state);
+    await assertImplementHasTrustedRed({
+      taskId: state.item.workItemId,
+      commandId: gate.commandId,
+      gate,
+      worktree: state.worktree,
+      redEvidence: projection.evidence[tddRedEvidenceKey(state.item.workItemId)] as TrustedEvidence | undefined,
+      requireWorkspaceMatch: true,
+    });
   }
   const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
     root: input.root,

@@ -141,8 +141,46 @@
                 "additionalProperties": {
                   "type": "string"
                 }
+              },
+              "reporter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "version"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "node-test"
+                  },
+                  "version": {
+                    "const": 1
+                  }
+                }
               }
             }
+          }
+        }
+      }
+    },
+    "testing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pathRules"
+      ],
+      "properties": {
+        "pathRules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "node",
+              "java",
+              "ruby",
+              "dotnet"
+            ]
           }
         }
       }

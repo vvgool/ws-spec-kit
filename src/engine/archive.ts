@@ -1,7 +1,16 @@
 import { approvalBindingDigest } from "./approvals.js";
 import { completedReviewActors, implementationActors } from "./actor-roles.js";
 import { parseLoopStepInstanceId } from "./control/loop.js";
-import { evidenceProjectionKey, isFreshGateEvidence, type EvidenceLevel } from "./verification.js";
+import {
+  evidenceProjectionKey,
+  isFreshGateEvidence,
+  tddCycleEvidenceKey,
+  tddGreenEvidenceKey,
+  tddRedEvidenceKey,
+  type EvidenceLevel,
+} from "./verification.js";
+import { parseTddCycleEvidence, parseTrustedEvidence } from "./tdd/red-gate.js";
+import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import type { ProjectGatePolicy } from "./compiler.js";
 import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
@@ -204,6 +213,46 @@ function externalReceiptSatisfied(input: CloseChecklistInput, target: "issue" | 
   });
 }
 
+function sameValues(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function closeRedEvidence(input: CloseChecklistInput): TrustedEvidence | undefined {
+  const red = parseTrustedEvidence(input.projection.evidence[tddRedEvidenceKey(input.projection.workItemId)]);
+  return red?.phase === "red" && red.taskId === input.projection.workItemId ? red : undefined;
+}
+
+function greenMatchesRed(green: TrustedEvidence, red: TrustedEvidence): boolean {
+  return green.phase === "green"
+    && green.taskId === red.taskId
+    && green.commandId === red.commandId
+    && green.commandDigest === red.commandDigest
+    && green.testPathsDigest === red.testPathsDigest
+    && sameValues(green.testPaths, red.testPaths)
+    && sameValues(green.testFiles, red.testFiles)
+    && sameValues(green.testPathRules, red.testPathRules);
+}
+
+function completeTddCycle(input: CloseChecklistInput): boolean {
+  const red = closeRedEvidence(input);
+  const cycle = parseTddCycleEvidence(input.projection.evidence[tddCycleEvidenceKey(input.projection.workItemId)]);
+  if (red === undefined || cycle === undefined
+    || cycle.taskId !== input.projection.workItemId
+    || cycle.redEvidenceId !== red.evidenceId
+    || cycle.commandId !== red.commandId
+    || !sameValues(cycle.testPaths, red.testPaths)
+    || !sameValues(cycle.testPathRules, red.testPathRules)) return false;
+  const green = parseTrustedEvidence(input.projection.evidence[tddGreenEvidenceKey(input.projection.workItemId, cycle.greenEvidenceId)]);
+  if (green === undefined || green.evidenceId !== cycle.greenEvidenceId || !greenMatchesRed(green, red)) return false;
+  let latest = green;
+  if (cycle.refactorEvidenceId !== undefined) {
+    const refactor = parseTrustedEvidence(input.projection.evidence[tddGreenEvidenceKey(input.projection.workItemId, cycle.refactorEvidenceId)]);
+    if (refactor === undefined || refactor.evidenceId !== cycle.refactorEvidenceId || !greenMatchesRed(refactor, red)) return false;
+    latest = refactor;
+  }
+  return latest.workspaceDigest === input.workspaceTreeDigest;
+}
+
 export function closeChecklist(input: CloseChecklistInput): CloseDecision {
   const missing: CloseDecision["missing"] = [];
   const missingKeys = new Set<string>();
@@ -224,6 +273,8 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
   for (const instance of effectiveStepInstances(input.profile, input.projection)) {
     const artifacts = completedArtifacts(instance);
     for (const output of instance.step.outputs.filter(({ required }) => required)) {
+      if (output.artifact === "red-evidence" && closeRedEvidence(input) !== undefined) continue;
+      if (output.artifact === "tdd-evidence" && completeTddCycle(input)) continue;
       if (!artifacts.some(({ artifactType }) => artifactType === output.artifact)) {
         addMissing("artifact", output.artifact);
       }

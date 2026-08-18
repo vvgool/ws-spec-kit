@@ -85,6 +85,13 @@ export const applicationPublicErrorGroups = {
     "WSSPEC_CLOSE_CHECKLIST_INCOMPLETE", "WSSPEC_EVIDENCE_ATTEMPT_MISMATCH", "WSSPEC_EVIDENCE_HASH_MISMATCH",
     "WSSPEC_EVIDENCE_INVALID", "WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT", "WSSPEC_EVIDENCE_STALE", "WSSPEC_GATE_NOT_REQUIRED",
   ],
+  tdd: [
+    "WSSPEC_TDD_EVIDENCE_INVALIDATED", "WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "WSSPEC_TDD_GATE_EXECUTION_FAILED",
+    "WSSPEC_TDD_GREEN_NOT_OBSERVED", "WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE", "WSSPEC_TDD_RED_NOT_OBSERVED",
+    "WSSPEC_TDD_RED_SYNTAX_FAILURE", "WSSPEC_TDD_REPORT_INVALID", "WSSPEC_TDD_REPORTER_UNSUPPORTED",
+    "WSSPEC_TDD_RED_REQUIRED", "WSSPEC_TDD_RED_SCOPE_INVALID", "WSSPEC_TDD_RED_TIMEOUT", "WSSPEC_TDD_STEP_INVALID",
+    "WSSPEC_TDD_TEST_PATH_INVALID",
+  ],
   start: ["WSSPEC_START_ROLLBACK_FAILED"],
   acquire: [
     "WSSPEC_LOOP_CONFIGURATION_INVALID", "WSSPEC_LOOP_MAX_ITERATIONS_REACHED", "WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING",
@@ -152,8 +159,8 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
     "compiler", "executor", "source", "workItem", "runtime", "start",
   ],
-  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "verification"],
-  submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "verification"],
+  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "verification", "tdd"],
+  submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "verification", "tdd"],
   decide: [
     "internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit",
     "approval", "verification", "workflowPackage", "workflowTrust",

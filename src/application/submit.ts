@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import { verifyArtifact } from "../domain/artifacts.js";
-import { computeWorkspaceSnapshot, type TreeEntry } from "../domain/digests.js";
+import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { deriveInitialStages } from "./initial-stages.js";
 import { applyProfileDecision, type ProfileDecision } from "./profile.js";
@@ -21,6 +21,20 @@ import type { ArtifactReference } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
 import { validate } from "../schemas/index.js";
 import { recoverControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
+import { recordGreenEvidenceDetails } from "../engine/tdd/green-gate.js";
+import { recordRedEvidence } from "../engine/tdd/red-gate.js";
+import { VerificationError, type TddCycleEvidence, type TrustedEvidence } from "../engine/tdd/types.js";
+import {
+  assertImplementHasTrustedRed,
+  evaluateReviewFixEvidence,
+  evidenceProjectionKey,
+  evidenceRecordHash,
+  fixedTestGateForState,
+  tddCycleEvidenceKey,
+  tddGreenEvidenceKey,
+  tddRedEvidenceKey,
+  type GateEvidence,
+} from "../engine/verification.js";
 import { acquireNextLocked, type AcquireDependencies, type ApplicationAttemptRecord, type ApplicationStepResult } from "./acquire.js";
 import { loadApplicationState, selectedProfile, type ApplicationState, type SnapshotStep } from "./state.js";
 
@@ -134,7 +148,47 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
   }
 }
 
-async function validateResult(input: SubmitInput, state: ApplicationState, target: ExecutionTarget, projection: RuntimeProjection, now: Date): Promise<void> {
+function engineTddStep(step: SnapshotStep, internal = false, hasCycle = false): boolean {
+  return (step.id === "verify-red" && step.action === "quality.test")
+    || (step.id === "verify-green" && step.action === "quality.test")
+    || (internal && hasCycle && step.id === "verify" && step.action === "quality.verify");
+}
+
+const invalidRedCodes = new Set([
+  "WSSPEC_TDD_RED_NOT_OBSERVED",
+  "WSSPEC_TDD_RED_SYNTAX_FAILURE",
+  "WSSPEC_TDD_REPORT_INVALID",
+]);
+
+const retryableRedInfrastructureCodes = new Set([
+  "WSSPEC_TDD_GATE_EXECUTION_FAILED",
+  "WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE",
+  "WSSPEC_TDD_RED_TIMEOUT",
+]);
+
+function restartTddCycle(projection: RuntimeProjection, workItemId: string): RuntimeProjection {
+  const resetIds = new Set(["write-tests", "verify-red", "implement", "verify-green", "review-fix"]);
+  const stages = { ...projection.stages };
+  for (const stepId of resetIds) {
+    if (stepId === "write-tests" || stages[stepId] !== undefined) stages[stepId] = { status: stepId === "write-tests" ? "ready" : "pending" };
+  }
+  const outsideCycle = ([key]: [string, unknown]): boolean => !resetIds.has(key) && !key.startsWith("review-fix:");
+  const loops = { ...projection.loops };
+  delete loops["review-fix"];
+  const evidence = Object.fromEntries(Object.entries(projection.evidence).filter(([key]) => !key.startsWith(`tdd:${workItemId}:`)));
+  delete evidence[evidenceProjectionKey("verify-green", "test")];
+  return {
+    ...projection,
+    stages,
+    claims: Object.fromEntries(Object.entries(projection.claims).filter(outsideCycle)),
+    contexts: Object.fromEntries(Object.entries(projection.contexts).filter(outsideCycle)),
+    retries: Object.fromEntries(Object.entries(projection.retries).filter(outsideCycle)),
+    loops,
+    evidence,
+  };
+}
+
+async function validateResult(input: SubmitInput, state: ApplicationState, target: ExecutionTarget, projection: RuntimeProjection, now: Date): Promise<string[]> {
   const claim = projection.claims[target.stageId];
   const context = projection.contexts[target.stageId] as ApplicationAttemptRecord | undefined;
   if (claim?.stageId !== input.stepId || claim.attemptId !== input.attemptId || claim.claimToken !== input.leaseToken || context?.workPackage.stepId !== input.stepId || context.workPackage.attemptId !== input.attemptId || context.workPackage.lease.token !== input.leaseToken) {
@@ -150,19 +204,24 @@ async function validateResult(input: SubmitInput, state: ApplicationState, targe
   if (!sameStrings(changed, input.result.modifiedFiles)) {
     throw new ApplicationSubmitError("WSSPEC_MODIFIED_FILES_MISMATCH", "提交结果的 modifiedFiles 与实际 Git diff 不一致。 ");
   }
+  const hasCycle = projection.evidence[tddCycleEvidenceKey(state.item.workItemId)] !== undefined;
+  if (engineTddStep(target.step, target.internal, hasCycle) && changed.length !== 0) {
+    throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "引擎管理的 TDD 验证 Attempt 不允许修改 workspace。 ");
+  }
   const declaredOutputs = new Set(target.step.outputs.map((output) => output.artifact));
   const undeclared = input.result.artifacts.find((artifact) => !declaredOutputs.has(artifact.artifactType));
   if (undeclared !== undefined) {
     throw new ApplicationSubmitError("WSSPEC_UNDECLARED_ARTIFACT", `Artifact ${undeclared.artifactType} 未在 Step outputs 中声明。 `);
   }
   for (const artifact of input.result.artifacts) await verifySubmittedArtifact(state, { ...target.step, id: input.stepId }, input.attemptId, artifact);
-  if (input.result.status === "completed") {
+  if (input.result.status === "completed" && !engineTddStep(target.step, target.internal, hasCycle)) {
     for (const output of target.step.outputs.filter((candidate) => candidate.required)) {
       if (!input.result.artifacts.some((artifact) => artifact.artifactType === output.artifact)) {
         throw new ApplicationSubmitError("WSSPEC_REQUIRED_ARTIFACT_MISSING", `缺少必需 Artifact ${output.artifact}。 `);
       }
     }
   }
+  return changed;
 }
 
 function approvalAction(state: ApplicationState, request: Awaited<ReturnType<typeof prepareArtifactApproval>>): AgentAction {
@@ -273,12 +332,79 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       }
       const profile = selectedProfile(runtimeState.snapshot);
       const target = executionTarget(profile, current, input.stepId);
-      await validateResult(input, runtimeState, target, current, dependencies.now());
+      const changed = await validateResult(input, runtimeState, target, current, dependencies.now());
       const executorStep = { ...target.step, id: target.stageId };
-      const result = trustedSubmitResult(
-        input.result,
-        await dependencies.executors.assertStep(executorStep as never).validate(executorStep as never, input.result, current),
-      );
+      const hasCycle = current.evidence[tddCycleEvidenceKey(runtimeState.item.workItemId)] !== undefined;
+      const gate = engineTddStep(target.step, target.internal, hasCycle) || target.step.id === "implement"
+        ? await fixedTestGateForState(runtimeState)
+        : undefined;
+      if (target.step.id === "implement") {
+        await assertImplementHasTrustedRed({
+          taskId: runtimeState.item.workItemId,
+          commandId: gate!.commandId,
+          gate: gate!,
+          worktree: runtimeState.worktree,
+          redEvidence: current.evidence[tddRedEvidenceKey(runtimeState.item.workItemId)] as TrustedEvidence | undefined,
+        });
+      }
+      let trustedTddEvidence: TrustedEvidence | undefined;
+      let trustedTddCycle: TddCycleEvidence | undefined;
+      let result: ApplicationStepResult;
+      if (target.step.id === "verify-red") {
+        const writeTests = current.contexts["write-tests"] as ApplicationAttemptRecord | undefined;
+        try {
+          trustedTddEvidence = await recordRedEvidence({
+            taskId: runtimeState.item.workItemId,
+            step: target.step as never,
+            gate: gate!,
+            worktree: runtimeState.worktree,
+            workspaceDigest: await computeWorkspaceTreeDigest(runtimeState.worktree),
+            modifiedFiles: writeTests?.result?.modifiedFiles ?? [],
+            testPaths: writeTests?.result?.modifiedFiles ?? [],
+          });
+          result = { ...input.result, status: "completed", summary: "引擎已记录可信 Red Evidence。", artifacts: [], commands: [], evidence: [] };
+        } catch (error) {
+          if (!(error instanceof VerificationError)) throw error;
+          if (invalidRedCodes.has(error.code)) {
+            const restarted = restartTddCycle(current, runtimeState.item.workItemId);
+            const next = await acquireNextLocked({ state: runtimeState, projection: restarted, actor: current.claims[target.stageId]!.actor, root: input.root, dependencies });
+            return { projection: next.projection, value: next.action };
+          }
+          if (!retryableRedInfrastructureCodes.has(error.code)) throw error;
+          result = {
+            ...input.result,
+            status: "failed",
+            failureCode: "WSSPEC_STEP_FAILED",
+            summary: error.message,
+            artifacts: [],
+            commands: [],
+            evidence: [],
+            externalWrites: [],
+            remainingRisks: [],
+          };
+        }
+      } else if (target.step.id === "verify-green" || (target.internal && hasCycle && target.step.id === "verify" && target.step.action === "quality.verify")) {
+        const redEvidence = current.evidence[tddRedEvidenceKey(runtimeState.item.workItemId)] as TrustedEvidence | undefined;
+        if (redEvidence === undefined) throw new ApplicationSubmitError("WSSPEC_TDD_RED_REQUIRED", "verify-green 缺少可信 Red Evidence。 ");
+        const previousCycle = current.evidence[tddCycleEvidenceKey(runtimeState.item.workItemId)] as TddCycleEvidence | undefined;
+        const green = await recordGreenEvidenceDetails({
+          taskId: runtimeState.item.workItemId,
+          step: target.step as never,
+          gate: gate!,
+          worktree: runtimeState.worktree,
+          workspaceDigest: await computeWorkspaceTreeDigest(runtimeState.worktree),
+          redEvidence,
+          ...(target.internal && previousCycle !== undefined ? { previousCycle } : {}),
+        });
+        trustedTddEvidence = green.evidence;
+        trustedTddCycle = green.cycle;
+        result = { ...input.result, status: "completed", summary: "引擎已记录可信 Green Evidence。", artifacts: [], commands: [], evidence: [] };
+      } else {
+        result = trustedSubmitResult(
+          input.result,
+          await dependencies.executors.assertStep(executorStep as never).validate(executorStep as never, input.result, current),
+        );
+      }
       if (target.internal && target.step.approval) {
         throw new ApplicationSubmitError("WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED", "循环内部 Step 暂不支持审批。 ");
       }
@@ -300,6 +426,32 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         contexts: { ...current.contexts, [target.stageId]: record },
         retries: { ...current.retries },
       };
+      if (target.step.id === "verify-red" && trustedTddEvidence !== undefined) {
+        projection.evidence = { ...projection.evidence, [tddRedEvidenceKey(runtimeState.item.workItemId)]: trustedTddEvidence };
+      } else if ((target.step.id === "verify-green" || (target.internal && target.step.id === "verify")) && trustedTddEvidence !== undefined && trustedTddCycle !== undefined) {
+        const verifyGreen = target.step.id === "verify-green"
+          ? active.workPackage
+          : (projection.contexts["verify-green"] as ApplicationAttemptRecord | undefined)?.workPackage;
+        if (verifyGreen === undefined) throw new ApplicationSubmitError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Review-Fix 复验缺少原始 verify-green Attempt。 ");
+        const unsignedGate = {
+          evidenceId: trustedTddEvidence.evidenceId,
+          level: "trusted" as const,
+          gateId: "test",
+          codeRevision: runtimeState.item.execution.baselineRevision,
+          baselineTreeDigest: runtimeState.item.execution.baselineTreeDigest,
+          workspaceTreeDigest: trustedTddEvidence.workspaceDigest,
+          configDigest: runtimeState.item.execution.configDigest,
+          attemptId: verifyGreen.attemptId,
+          result: "passed" as const,
+        };
+        const gateEvidence: GateEvidence = { ...unsignedGate, recordHash: evidenceRecordHash(unsignedGate) };
+        projection.evidence = {
+          ...projection.evidence,
+          [tddCycleEvidenceKey(runtimeState.item.workItemId)]: trustedTddCycle,
+          [tddGreenEvidenceKey(runtimeState.item.workItemId, trustedTddEvidence.evidenceId)]: trustedTddEvidence,
+          [evidenceProjectionKey("verify-green", "test")]: gateEvidence,
+        };
+      }
       if (target.internal) projection.contexts[target.stepInstanceId] = record;
       delete projection.claims[target.stageId];
       const currentRetry = result.status === "failed"
@@ -350,6 +502,26 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         };
       }
       delete projection.retries[target.stepInstanceId];
+      if (target.internal && target.step.id === "fix") {
+        const cycle = projection.evidence[tddCycleEvidenceKey(runtimeState.item.workItemId)] as TddCycleEvidence | undefined;
+        if (cycle !== undefined && evaluateReviewFixEvidence({ modifiedFiles: changed, cycle }).action === "restart-cycle") {
+          const resetIds = ["write-tests", "verify-red", "implement", "verify-green", target.stageId];
+          projection.stages = { ...projection.stages };
+          projection.contexts = { ...projection.contexts };
+          for (const stepId of resetIds) {
+            if (projection.stages[stepId] !== undefined) projection.stages[stepId] = { status: stepId === "write-tests" ? "ready" : "pending" };
+            delete projection.contexts[stepId];
+          }
+          projection.contexts = Object.fromEntries(Object.entries(projection.contexts).filter(([key]) => !key.startsWith(`${target.stageId}:`)));
+          projection.loops = { ...projection.loops };
+          delete projection.loops[target.stageId];
+          projection.retries = Object.fromEntries(Object.entries(projection.retries).filter(([key]) => !key.startsWith(`${target.stageId}:`)));
+          projection.evidence = Object.fromEntries(Object.entries(projection.evidence).filter(([key]) => !key.startsWith(`tdd:${runtimeState.item.workItemId}:`)));
+          delete projection.evidence[evidenceProjectionKey("verify-green", "test")];
+          const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
+          return { projection: next.projection, value: next.action };
+        }
+      }
       if (invalidatesTarget) {
         const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
         return { projection: next.projection, value: next.action };

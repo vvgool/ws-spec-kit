@@ -73,11 +73,16 @@
 | `builtin.artifact.v1` | 可版本化 Artifact 的身份、路径和摘要。 |
 | `builtin.evidence.v1` | Gate 的可信 Evidence 记录。 |
 | `builtin.submit-result.v1` | Step 的状态、执行摘要、修改文件、Artifact、命令和风险。 |
+| `builtin.tdd-trusted-evidence.v1` | 引擎执行 Red 或 Green Gate 后形成的单次可信 TDD Evidence。 |
+| `builtin.tdd-cycle-evidence.v1` | 绑定同一命令、测试路径和 Red/Green Evidence 的完整 TDD Cycle。 |
+| `builtin.tdd-node-test-report.v1` | 引擎注入的 `node:test` reporter 产生的受限结构化结果。 |
 | `builtin.work-item.v1` | Work Item 身份、来源、绑定和快照执行信息。 |
 | `builtin.work-package.v1` | Agent 执行所需的目标、Skill、约束、输出和 Gate。 |
 | `builtin.workflow-selection.v1` | 当前启用 Workflow 与 Profile。 |
 
 完整 `builtin.application-project-config.v1` 属于当前宿主，附加 Global 根必须同时提供稳定 `id` 与本机 `path`。Work Item 的 `snapshot/config.yaml` 改用 `builtin.application-project-config-snapshot.v1`，只持久化逻辑 `id`，恢复时再由当前宿主配置重绑定路径。
+
+首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`；引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
 
 ```yaml contract=schema:builtin.application-project-config-snapshot.v1
 version: 1
@@ -123,6 +128,7 @@ skills:
 | `workItem` | `WSSPEC_CONTROL_PLANE_INVALID`、`WSSPEC_WORK_ITEM_ID_CONFLICT`、`WSSPEC_WORK_ITEM_INVALID`、`WSSPEC_WORK_ITEM_LOCATION_INVALID`、`WSSPEC_WORK_ITEM_NOT_FOUND`、`WSSPEC_WORK_ITEM_ROLLBACK_FAILED`、`WSSPEC_WORK_ITEM_ROLLBACK_REFUSED` |
 | `runtime` | `WSSPEC_CONTROL_PLANE_LOCKED`、`WSSPEC_CONTROL_PLANE_READ_ONLY`、`WSSPEC_CONTROL_PLANE_STALE_LOCK`、`WSSPEC_EVENT_CHAIN_INVALID`、`WSSPEC_EVENT_INVALID`、`WSSPEC_IDEMPOTENCY_CONFLICT`、`WSSPEC_INDEPENDENT_REVIEW_REQUIRED`、`WSSPEC_PROFILE_DECISION_STALE`、`WSSPEC_PROFILE_DOWNGRADE_FORBIDDEN`、`WSSPEC_PROJECTION_WRITE_FAILED`、`WSSPEC_RISK_RULE_INVALID`、`WSSPEC_RISK_WORKFLOW_INVALID`、`WSSPEC_LOOP_PROJECTION_INVALID`、`WSSPEC_RETRY_PROJECTION_INVALID`、`WSSPEC_STAGE_NOT_FOUND`、`WSSPEC_STATE_TRANSITION_FORBIDDEN` |
 | `verification` | `WSSPEC_CLOSE_CHECKLIST_INCOMPLETE`、`WSSPEC_EVIDENCE_ATTEMPT_MISMATCH`、`WSSPEC_EVIDENCE_HASH_MISMATCH`、`WSSPEC_EVIDENCE_INVALID`、`WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT`、`WSSPEC_EVIDENCE_STALE`、`WSSPEC_GATE_NOT_REQUIRED` |
+| `tdd` | `WSSPEC_TDD_EVIDENCE_INVALIDATED`、`WSSPEC_TDD_GATE_CONFIGURATION_INVALID`、`WSSPEC_TDD_GATE_EXECUTION_FAILED`、`WSSPEC_TDD_GREEN_NOT_OBSERVED`、`WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE`、`WSSPEC_TDD_RED_NOT_OBSERVED`、`WSSPEC_TDD_RED_REQUIRED`、`WSSPEC_TDD_RED_SCOPE_INVALID`、`WSSPEC_TDD_RED_SYNTAX_FAILURE`、`WSSPEC_TDD_RED_TIMEOUT`、`WSSPEC_TDD_REPORT_INVALID`、`WSSPEC_TDD_REPORTER_UNSUPPORTED`、`WSSPEC_TDD_STEP_INVALID`、`WSSPEC_TDD_TEST_PATH_INVALID` |
 | `start` | `WSSPEC_START_ROLLBACK_FAILED` |
 | `acquire` | `WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
 | `artifact` | `WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
@@ -140,8 +146,8 @@ skills:
 | `agent` | `internal`、`dispatch` |
 | `init` | `internal`、`arguments`、`repository` |
 | `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`source`、`workItem`、`runtime`、`start` |
-| `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`verification` |
-| `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`verification` |
+| `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`verification`、`tdd` |
+| `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`verification`、`tdd` |
 | `decide` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`verification`、`workflowPackage`、`workflowTrust` |
 | `inspect` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem` |
 | `workflow list` | `internal`、`arguments`、`builtin` |

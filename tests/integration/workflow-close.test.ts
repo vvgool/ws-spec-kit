@@ -4,7 +4,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { loadApplicationState, type SnapshotProfile } from "../../src/application/state.js";
+import { sha256 } from "../../src/domain/digests.js";
 import { closeChecklist } from "../../src/engine/archive.js";
+import type { TrustedEvidence } from "../../src/engine/tdd/types.js";
 import {
   evidenceProjectionKey,
   evidenceRecordHash,
@@ -21,6 +23,30 @@ import {
   worktreeFor,
 } from "./helpers/control-runtime.js";
 import { git } from "./helpers/git.js";
+
+function trustedTddEvidence(phase: "red" | "green", overrides: Partial<TrustedEvidence> = {}): TrustedEvidence {
+  const unsigned: Omit<TrustedEvidence, "evidenceId"> = {
+    level: "trusted" as const,
+    phase,
+    taskId: "WSS-CLOSE",
+    stepId: phase === "red" ? "verify-red" : "verify-green",
+    commandId: "test",
+    commandDigest: "sha256:command",
+    exitCode: phase === "red" ? 1 : 0,
+    failedTests: phase === "red" ? ["feature is red"] : [],
+    testPaths: ["tests/feature.test.mjs"],
+    testFiles: [{ path: "tests/feature.test.mjs", digest: "sha256:test" }],
+    testPathsDigest: "sha256:test-paths",
+    testPathRules: ["node"],
+    workspaceDigest: phase === "red" ? "sha256:red-workspace" : "sha256:workspace",
+    summary: phase === "red" ? "feature is red" : "all tests passed",
+    ...overrides,
+  };
+  return {
+    evidenceId: `evidence-${sha256(`${JSON.stringify(unsigned)}\n`).slice("sha256:".length)}`,
+    ...unsigned,
+  };
+}
 
 function evidence(input: Partial<GateEvidence> = {}): GateEvidence {
   const unsigned = {
@@ -172,6 +198,70 @@ test("Close 逐项分类 step、artifact、approval、evidence 和 external rece
     { category: "evidence", id: "test" },
     { category: "external-receipt", id: "issue" },
     { category: "external-receipt", id: "knowledge" },
+  ]);
+});
+
+test("Close requires a schema-valid linked Red and Green TDD evidence chain", () => {
+  const selected = profile("quick", []);
+  selected.order = ["verify-red", "verify-green", "close"];
+  selected.steps = [
+    {
+      id: "verify-red", uses: "command.execute", securityClass: "local-write", needs: [], enabled: true,
+      skills: [], inputs: [], outputs: [{ artifact: "red-evidence", required: true }], gates: [], approval: false,
+      authorizationRequired: false, action: "quality.test", expectedOutcome: "test-failure", steps: [],
+    },
+    {
+      id: "verify-green", uses: "command.execute", securityClass: "local-write", needs: ["verify-red"], enabled: true,
+      skills: [], inputs: [{ artifact: "red-evidence", required: true }], outputs: [{ artifact: "tdd-evidence", required: true }],
+      gates: [], approval: false, authorizationRequired: false, action: "quality.test", expectedOutcome: "success", steps: [],
+    },
+    {
+      id: "close", uses: "control.close", securityClass: "control", needs: ["verify-green"], enabled: true,
+      skills: [], inputs: [], outputs: [], gates: [], approval: false, authorizationRequired: false, steps: [],
+    },
+  ];
+  const current = projection({
+    stages: { "verify-red": { status: "succeeded" }, "verify-green": { status: "succeeded" }, close: { status: "ready" } },
+    contexts: {
+      "verify-red": { workPackage: { attemptId: "attempt-red" }, result: { status: "completed", artifacts: [] } },
+      "verify-green": { workPackage: { attemptId: "attempt-green" }, result: { status: "completed", artifacts: [] } },
+    },
+    evidence: { "tdd:WSS-CLOSE:red": {}, "tdd:WSS-CLOSE:cycle": {} },
+  });
+  const input = {
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  };
+
+  assert.deepEqual(closeChecklist(input).missing.filter(({ category }) => category === "artifact"), [
+    { category: "artifact", id: "red-evidence" },
+    { category: "artifact", id: "tdd-evidence" },
+  ]);
+
+  const red = trustedTddEvidence("red");
+  const green = trustedTddEvidence("green");
+  const cycle = {
+    taskId: "WSS-CLOSE",
+    testPaths: [...red.testPaths],
+    testPathRules: [...red.testPathRules],
+    commandId: red.commandId,
+    redEvidenceId: red.evidenceId,
+    greenEvidenceId: green.evidenceId,
+  };
+  current.evidence = {
+    "tdd:WSS-CLOSE:red": red,
+    "tdd:WSS-CLOSE:cycle": cycle,
+    [`tdd:WSS-CLOSE:green:${green.evidenceId}`]: green,
+  };
+  assert.equal(closeChecklist(input).allowed, true);
+
+  current.evidence[`tdd:WSS-CLOSE:green:${green.evidenceId}`] = trustedTddEvidence("green", { commandDigest: "sha256:other" });
+  assert.deepEqual(closeChecklist(input).missing.filter(({ category }) => category === "artifact"), [
+    { category: "artifact", id: "tdd-evidence" },
   ]);
 });
 
