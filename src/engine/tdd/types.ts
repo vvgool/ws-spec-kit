@@ -49,6 +49,28 @@ export interface TddCycleEvidence {
   refactorEvidenceId?: string;
 }
 
+export const tddVerificationCodes = [
+  "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+  "WSSPEC_TDD_GATE_CONFIGURATION_INVALID",
+  "WSSPEC_TDD_GATE_EXECUTION_FAILED",
+  "WSSPEC_TDD_GREEN_NOT_OBSERVED",
+  "WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE",
+  "WSSPEC_TDD_RED_NOT_OBSERVED",
+  "WSSPEC_TDD_RED_REQUIRED",
+  "WSSPEC_TDD_RED_SCOPE_INVALID",
+  "WSSPEC_TDD_RED_SYNTAX_FAILURE",
+  "WSSPEC_TDD_RED_TIMEOUT",
+  "WSSPEC_TDD_REPORT_INVALID",
+  "WSSPEC_TDD_REPORTER_UNSUPPORTED",
+  "WSSPEC_TDD_STEP_INVALID",
+  "WSSPEC_TDD_TEST_PATH_INVALID",
+] as const;
+export type TddVerificationCode = (typeof tddVerificationCodes)[number];
+
+export function isTddVerificationCode(value: string): value is TddVerificationCode {
+  return (tddVerificationCodes as readonly string[]).includes(value);
+}
+
 export class VerificationError extends Error {
   constructor(readonly code: `WSSPEC_${string}`, message: string) {
     super(`${code}: ${message}`);

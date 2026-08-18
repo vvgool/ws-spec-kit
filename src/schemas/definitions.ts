@@ -564,7 +564,7 @@ export const schemas = {
     $id: "builtin.tdd-node-test-report.v1",
     type: "object",
     additionalProperties: false,
-    required: ["version", "adapter", "summary", "failures"],
+    required: ["version", "adapter", "summary", "failureTotal", "truncated", "failures"],
     properties: {
       version: { const: 1 },
       adapter: { const: "node-test" },
@@ -577,6 +577,8 @@ export const schemas = {
           todo: { type: "integer", minimum: 0 },
         },
       },
+      failureTotal: { type: "integer", minimum: 0 },
+      truncated: { type: "boolean" },
       failures: {
         type: "array", maxItems: 100, items: {
           type: "object", additionalProperties: false, required: ["name", "file", "kind"],

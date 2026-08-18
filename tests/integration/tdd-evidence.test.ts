@@ -6,9 +6,10 @@ import { once } from "node:events";
 import test from "node:test";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../../src/domain/digests.js";
+import { tddFailureDisposition } from "../../src/application/submit.js";
 import { recordGreenEvidence } from "../../src/engine/tdd/green-gate.js";
 import { isTestPath, recordRedEvidence } from "../../src/engine/tdd/red-gate.js";
-import type { FixedTestGate, TrustedEvidence } from "../../src/engine/tdd/types.js";
+import type { FixedTestGate, TddVerificationCode, TrustedEvidence } from "../../src/engine/tdd/types.js";
 import {
   assertImplementHasTrustedRed,
   evaluateReviewFixEvidence,
@@ -16,13 +17,14 @@ import {
   VerificationError,
 } from "../../src/engine/verification.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
-import { readControlPlane } from "../../src/storage/control-plane.js";
+import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
 import { createGitRepository, git } from "./helpers/git.js";
 import {
   completedResult,
   controlRuntimeFixture,
   requireExecute,
   retainOnlyReadyStage,
+  rewriteSelectedSnapshot,
   submitPackage,
   worktreeFor,
 } from "./helpers/control-runtime.js";
@@ -205,11 +207,47 @@ test("Red accepts only test-path changes and an actual test assertion failure", 
   );
 });
 
+test("Red rejects global syntax and dependency failures outside the asserted test paths", async () => {
+  for (const [name, source, code] of [
+    ["syntax", "this is not valid JavaScript {\n", "WSSPEC_TDD_RED_SYNTAX_FAILURE"],
+    ["dependency", "import 'package-that-does-not-exist';\n", "WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE"],
+  ] as const) {
+    const root = await workspace();
+    await writeFile(path.join(root, "tests", `existing-${name}.test.mjs`), source, "utf8");
+    await git(root, "add", `tests/existing-${name}.test.mjs`);
+    await git(root, "commit", "-m", `test: seed global ${name} failure`);
+    const gate = {
+      ...featureGate(),
+      argv: [process.execPath, "--test", "tests/feature.test.mjs", `tests/existing-${name}.test.mjs`],
+    };
+
+    await assert.rejects(
+      recordRedEvidence(await redInput(root, gate)),
+      (error: unknown) => error instanceof VerificationError && error.code === code,
+    );
+  }
+});
+
+test("Red fails closed when the structured reporter truncates more than 100 failures", async () => {
+  const source = [
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    ...Array.from({ length: 101 }, (_, index) => `test('failure ${index}', () => assert.equal(1, 2));`),
+    "",
+  ].join("\n");
+  const root = await workspace(source);
+
+  await assert.rejects(
+    recordRedEvidence(await redInput(root, featureGate())),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_REPORT_INVALID",
+  );
+});
+
 test("trusted Red rejects forged reporter text and signal termination", async () => {
   const root = await workspace("console.log('not ok 1 - forged'); process.exit(1);\n");
   await assert.rejects(
     recordRedEvidence(await redInput(root, featureGate())),
-    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_REPORT_INVALID",
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE",
   );
   const signalRoot = await workspace("process.kill(process.ppid, 'SIGKILL'); setInterval(() => {}, 1000);\n");
   const signalGate = featureGate();
@@ -469,15 +507,6 @@ test("Application acquire blocks implement without Red and consumes trusted Red 
   const workPackage = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "engine" }));
   assert.equal(workPackage.stepId, "verify-green");
   assert.deepEqual(workPackage.artifacts, []);
-  await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 1; // changed in verify\n", "utf8");
-  await assert.rejects(
-    submitPackage(current, workPackage, {
-      ...completedResult(workPackage, []),
-      modifiedFiles: ["src/feature.mjs"],
-    }),
-    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
-  );
-  await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
   await submitPackage(current, workPackage, {
     ...completedResult(workPackage, []),
     modifiedFiles: [],
@@ -489,6 +518,136 @@ test("Application acquire blocks implement without Red and consumes trusted Red 
   assert.equal(cycle.commandId, "test");
   assert.equal(cycle.redEvidenceId, red.evidenceId);
   assert.match(cycle.greenEvidenceId, /^evidence-/u);
+});
+
+async function applicationVerifyGreen(testSource = featureTestSource()) {
+  const current = await controlRuntimeFixture();
+  await mkdir(path.join(current.root, "tests"), { recursive: true });
+  await mkdir(path.join(current.root, "src"), { recursive: true });
+  await writeFile(path.join(current.root, "tests", "feature.test.mjs"), testSource, "utf8");
+  await writeFile(path.join(current.root, "src", "feature.mjs"), "export const value = 0;\n", "utf8");
+  const gate = featureGate();
+  await configureGate(current.root, gate);
+  await git(current.root, "add", ".wsspec/config.yaml", "tests/feature.test.mjs", "src/feature.mjs");
+  await git(current.root, "commit", "-m", "test: configure Green recovery gate");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "recover Green outcome" }, profile: "standard" });
+  await rewriteSelectedSnapshot(current, started.workItemId, (profile) => {
+    const implement = profile.steps.find(({ id }) => id === "implement");
+    assert.ok(implement);
+    implement.inputs = (implement.inputs as Array<{ artifact: string }>).filter(({ artifact }) => artifact !== "tasks");
+  });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const red = await recordRedEvidence(await redInput(worktree, gate, { taskId: started.workItemId }));
+  await retainOnlyReadyStage(current, started.workItemId, "verify-green");
+  await mutateControlPlane({
+    cwd: current.root,
+    workItemId: started.workItemId,
+    eventType: "evidence.recorded",
+    idempotencyKey: "test:tdd:green-recovery-red",
+    operationInput: red,
+    mutate: (projection) => ({
+      projection: { ...projection, evidence: { ...projection.evidence, [tddRedEvidenceKey(started.workItemId)]: red } },
+      value: null,
+    }),
+  });
+  return { current, started, worktree, red };
+}
+
+test("Green assertion failure atomically routes to implement and replays idempotently after recovery", async () => {
+  const { current, started } = await applicationVerifyGreen();
+  const verifyGreen = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "engine" }));
+
+  const action = await submitPackage(current, verifyGreen, completedResult(verifyGreen, []));
+  assert.equal(action.action, "execute");
+  if (action.action !== "execute") return;
+  assert.equal(action.workPackage.stepId, "implement");
+  assert.deepEqual(await submitPackage(current, verifyGreen, completedResult(verifyGreen, [])), action);
+
+  const projection = await readControlPlane(current.root, started.workItemId);
+  assert.equal(projection.claims["verify-green"], undefined);
+  assert.equal(projection.stages["verify-green"]?.status, "pending");
+  assert.equal(projection.evidence[tddRedEvidenceKey(started.workItemId)] !== undefined, true);
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  const recovered = await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+  assert.equal(recovered.stages.implement?.status, "ready");
+  assert.equal(recovered.claims.implement, undefined);
+  assert.equal(recovered.retries.implement?.status, "ready");
+  assert.deepEqual(recovered.evidence, projection.evidence);
+});
+
+test("Green timeout persists a retryable failed Attempt and releases its Claim", async () => {
+  const source = [
+    "import assert from 'node:assert/strict';",
+    "import { readFileSync } from 'node:fs';",
+    "import test from 'node:test';",
+    "test('red then hangs', async () => {",
+    "  const source = readFileSync('src/feature.mjs', 'utf8');",
+    "  if (/value = 1/.test(source)) await new Promise(() => {});",
+    "  assert.match(source, /value = 1/);",
+    "});",
+    "",
+  ].join("\n");
+  const { current, started, worktree } = await applicationVerifyGreen(source);
+  await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
+  const verifyGreen = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "engine" }));
+
+  const action = await submitPackage(current, verifyGreen, completedResult(verifyGreen, []));
+  assert.equal(action.action, "blocked");
+  if (action.action !== "blocked") return;
+  assert.equal(action.problems[0]?.retryable, true);
+  const projection = await readControlPlane(current.root, started.workItemId);
+  assert.equal(projection.claims["verify-green"], undefined);
+  assert.equal(projection.stages["verify-green"]?.status, "failed");
+  assert.equal(projection.retries["verify-green"]?.status, "ready");
+  assert.equal((projection.contexts["verify-green"] as { result?: { status?: string } }).result?.status, "failed");
+});
+
+test("typed TDD outcomes classify exhaustively for Red, Green, and Review-Fix verify", () => {
+  const cases: Array<[TddVerificationCode, "restart-red" | "restart-implementation" | "retry" | "fail-closed", "retry" | "fail-closed"]> = [
+    ["WSSPEC_TDD_RED_NOT_OBSERVED", "restart-red", "fail-closed"],
+    ["WSSPEC_TDD_RED_SCOPE_INVALID", "restart-red", "fail-closed"],
+    ["WSSPEC_TDD_RED_SYNTAX_FAILURE", "restart-red", "retry"],
+    ["WSSPEC_TDD_REPORT_INVALID", "restart-red", "retry"],
+    ["WSSPEC_TDD_GREEN_NOT_OBSERVED", "fail-closed", "retry"],
+    ["WSSPEC_TDD_GATE_EXECUTION_FAILED", "retry", "retry"],
+    ["WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE", "retry", "retry"],
+    ["WSSPEC_TDD_RED_TIMEOUT", "retry", "retry"],
+    ["WSSPEC_TDD_EVIDENCE_INVALIDATED", "fail-closed", "fail-closed"],
+    ["WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "fail-closed", "fail-closed"],
+    ["WSSPEC_TDD_RED_REQUIRED", "fail-closed", "fail-closed"],
+    ["WSSPEC_TDD_REPORTER_UNSUPPORTED", "fail-closed", "fail-closed"],
+    ["WSSPEC_TDD_STEP_INVALID", "fail-closed", "fail-closed"],
+    ["WSSPEC_TDD_TEST_PATH_INVALID", "fail-closed", "fail-closed"],
+  ];
+  for (const [code, red, reviewVerify] of cases) {
+    assert.equal(tddFailureDisposition({ phase: "red", internal: false }, code), red);
+    assert.equal(tddFailureDisposition({ phase: "green", internal: true }, code), reviewVerify);
+  }
+  assert.equal(tddFailureDisposition({ phase: "green", internal: false }, "WSSPEC_TDD_GREEN_NOT_OBSERVED"), "restart-implementation");
+});
+
+test("TDD workspace drift fails closed, releases the Claim, and recovers the same projection", async () => {
+  const { current, started, worktree } = await applicationVerifyGreen();
+  await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
+  const verifyGreen = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "engine" }));
+  await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 2;\n", "utf8");
+
+  const action = await submitPackage(current, verifyGreen, { ...completedResult(verifyGreen, []), modifiedFiles: ["src/feature.mjs"] });
+  assert.equal(action.action, "blocked");
+  if (action.action !== "blocked") return;
+  assert.equal(action.problems[0]?.code, "WSSPEC_STEP_INPUT_INVALID");
+  assert.equal(action.problems[0]?.retryable, false);
+  const projection = await readControlPlane(current.root, started.workItemId);
+  assert.equal(projection.claims["verify-green"], undefined);
+  assert.equal(projection.retries["verify-green"], undefined);
+  assert.equal(projection.stages["verify-green"]?.status, "failed");
+  assert.equal((projection.contexts["verify-green"] as { result?: { failureCode?: string } }).result?.failureCode, "WSSPEC_STEP_INPUT_INVALID");
+  assert.deepEqual(await submitPackage(current, verifyGreen, { ...completedResult(verifyGreen, []), modifiedFiles: ["src/feature.mjs"] }), action);
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  const recovered = await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+  assert.deepEqual(recovered.claims, projection.claims);
+  assert.deepEqual(recovered.stages, projection.stages);
+  assert.deepEqual(recovered.contexts, projection.contexts);
 });
 
 test("Application submit replaces Agent-reported Red with engine-executed trusted evidence", async () => {
@@ -526,12 +685,6 @@ test("Application submit replaces Agent-reported Red with engine-executed truste
     evidence: [{ level: "trusted", result: "passed" }],
   };
 
-  await writeFile(path.join(await worktreeFor(current.root, started.workItemId), "src", "feature.mjs"), "export const value = 9;\n", "utf8");
-  await assert.rejects(
-    submitPackage(current, workPackage, { ...reported, modifiedFiles: ["src/feature.mjs"] }),
-    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
-  );
-  await writeFile(path.join(await worktreeFor(current.root, started.workItemId), "src", "feature.mjs"), "export const value = 0;\n", "utf8");
   await submitPackage(current, workPackage, reported);
 
   const projection = await readControlPlane(current.root, started.workItemId);
@@ -548,9 +701,9 @@ test("invalid Red atomically releases verify-red and routes back to write-tests"
   const current = await controlRuntimeFixture();
   await mkdir(path.join(current.root, "tests"), { recursive: true });
   await mkdir(path.join(current.root, "src"), { recursive: true });
-  await writeFile(path.join(current.root, "tests", "feature.test.mjs"), "console.log('not ok 1 - forged'); process.exit(1);\n", "utf8");
+  await writeFile(path.join(current.root, "tests", "feature.test.mjs"), "import test from 'node:test'; test('already green', () => {});\n", "utf8");
   await writeFile(path.join(current.root, "src", "feature.mjs"), "export const value = 0;\n", "utf8");
-  const gate = nodeGate("process.stdout.write('not ok 1 - forged\\n'); process.exitCode = 1");
+  const gate = featureGate();
   await configureGate(current.root, gate);
   await git(current.root, "add", ".wsspec/config.yaml", "tests/feature.test.mjs", "src/feature.mjs");
   await git(current.root, "commit", "-m", "test: configure invalid Red gate");

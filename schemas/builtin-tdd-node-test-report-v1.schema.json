@@ -7,6 +7,8 @@
     "version",
     "adapter",
     "summary",
+    "failureTotal",
+    "truncated",
     "failures"
   ],
   "properties": {
@@ -57,6 +59,13 @@
           "minimum": 0
         }
       }
+    },
+    "failureTotal": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "type": "boolean"
     },
     "failures": {
       "type": "array",

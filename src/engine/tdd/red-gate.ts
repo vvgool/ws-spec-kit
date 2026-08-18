@@ -49,6 +49,7 @@ const nodeTestReporterSource = [
   "}",
   "export default async function* reporter(source) {",
   "  const failures = [];",
+  "  let failureTotal = 0;",
   "  const diagnosticKinds = new Map();",
   "  let summary;",
   "  for await (const event of source) {",
@@ -58,10 +59,11 @@ const nodeTestReporterSource = [
   "      if (/SyntaxError|Unexpected token/u.test(message)) diagnosticKinds.set(file, 'syntax');",
   "      else if (/Cannot find (?:module|package)|MODULE_NOT_FOUND|ERR_MODULE_NOT_FOUND/u.test(message)) diagnosticKinds.set(file, 'dependency');",
   "    }",
-  "    if (event.type === 'test:fail' && event.data && event.data.details?.type !== 'suite' && failures.length < 100) {",
+  "    if (event.type === 'test:fail' && event.data && event.data.details?.type !== 'suite') {",
+  "      failureTotal += 1;",
   "      const file = absoluteFile(event.data.file);",
   "      const classified = kind(event.data.details?.error);",
-  "      failures.push({ name: String(event.data.name || 'unnamed test').slice(0, 512), file, kind: classified === 'other' ? (diagnosticKinds.get(file) || 'other') : classified });",
+  "      if (failures.length < 100) failures.push({ name: String(event.data.name || 'unnamed test').slice(0, 512), file, kind: classified === 'other' ? (diagnosticKinds.get(file) || 'other') : classified });",
   "    }",
   "    if (event.type === 'test:summary' && event.data && event.data.file === undefined) {",
   "      const counts = event.data.counts || {};",
@@ -69,7 +71,7 @@ const nodeTestReporterSource = [
   "    }",
   "  }",
   "  for (const failure of failures) { if (failure.kind === 'other' && diagnosticKinds.has(failure.file)) failure.kind = diagnosticKinds.get(failure.file); }",
-  "  yield JSON.stringify({ version: 1, adapter: 'node-test', summary, failures });",
+  "  yield JSON.stringify({ version: 1, adapter: 'node-test', summary, failureTotal, truncated: failureTotal > failures.length, failures });",
   "}",
   "",
 ].join("\n");
@@ -78,6 +80,8 @@ interface NodeTestReport {
   version: 1;
   adapter: "node-test";
   summary: { success: boolean; tests: number; passed: number; failed: number; cancelled: number; skipped: number; todo: number };
+  failureTotal: number;
+  truncated: boolean;
   failures: Array<{ name: string; file: string; kind: "assertion" | "syntax" | "dependency" | "other" }>;
 }
 
@@ -317,14 +321,17 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
   const report = parseNodeTestReport(result.report);
   const [outputWorkspaceDigest, outputManifest] = await Promise.all([computeWorkspaceTreeDigest(input.worktree), testFileManifest(input.worktree, input.testPaths, input.gate.testPathRules)]);
   if (outputWorkspaceDigest !== currentWorkspaceDigest || outputManifest.digest !== manifest.digest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 执行期间修改了 workspace 或 Red 测试。 ");
+  if (report.truncated || report.failureTotal !== report.failures.length || report.failureTotal !== report.summary.failed) {
+    throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test reporter failure 聚合不完整，不能形成可信 Evidence。 ");
+  }
+  if (report.failures.some(({ kind }) => kind === "syntax")) throw new VerificationError("WSSPEC_TDD_RED_SYNTAX_FAILURE", "固定 Test Gate 存在语法错误，不能形成可信 Evidence。 ");
+  if (report.failures.some(({ kind }) => kind === "dependency" || kind === "other")) throw new VerificationError("WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE", "固定 Test Gate 存在依赖或未分类失败，不能形成可信 Evidence。 ");
   const matchedFailures = await reportFailures(report, input.worktree, manifest.files.map(({ path: filename }) => filename));
   const inheritedSecrets = input.gate.inheritEnv.flatMap((name) => process.env[name] === undefined ? [] : [process.env[name]!]);
   const secrets = [...Object.values(input.gate.env), ...inheritedSecrets, ...(input.secrets ?? [])];
   const assertionFailures = matchedFailures.filter(({ kind }) => kind === "assertion");
   if (input.phase === "red") {
     if (result.exitCode === 0 || report.summary.success) throw new VerificationError("WSSPEC_TDD_RED_NOT_OBSERVED", "Test Gate 未观察到预期失败。 ");
-    if (matchedFailures.some(({ kind }) => kind === "syntax")) throw new VerificationError("WSSPEC_TDD_RED_SYNTAX_FAILURE", "测试语法错误不能作为 Red Evidence。 ");
-    if (matchedFailures.some(({ kind }) => kind === "dependency")) throw new VerificationError("WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE", "测试依赖缺失不能作为 Red Evidence。 ");
     if (assertionFailures.length === 0 || report.summary.failed === 0) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "结构化结果未包含命中 Red 测试路径的 assertion failure。 ");
   } else if (result.exitCode !== 0 || !report.summary.success || report.summary.failed !== 0 || report.summary.tests === 0) {
     throw new VerificationError("WSSPEC_TDD_GREEN_NOT_OBSERVED", "同一 Test Gate 未形成结构化零失败 Green 结果。 ");

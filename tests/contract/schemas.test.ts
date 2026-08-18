@@ -133,6 +133,8 @@ const validValues: Record<string, Record<string, unknown>> = {
     version: 1,
     adapter: "node-test",
     summary: { success: false, tests: 1, passed: 0, failed: 1, cancelled: 0, skipped: 0, todo: 0 },
+    failureTotal: 1,
+    truncated: false,
     failures: [{ name: "login rejects invalid password", file: "/workspace/tests/login.test.ts", kind: "assertion" }],
   },
   "builtin.artifact.v1": {
