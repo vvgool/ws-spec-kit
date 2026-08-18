@@ -470,6 +470,7 @@ function addAll(target: Set<string>, values: Iterable<string>): void {
 
 function validateExpressions(sourceSteps: readonly WorkflowStep[], compiledSteps: readonly CompiledStep[]): void {
   const declaredOutputs = new Set(flatten(compiledSteps).flatMap((step) => step.outputs.map(({ artifact }) => artifact)));
+  const declaredSteps = new Set(flatten(compiledSteps).map((step) => step.id));
   const validate = (expression: string, path: string, availableArtifacts: ReadonlySet<string>, availableSteps: ReadonlySet<string>, allSteps: ReadonlySet<string>): void => {
     let ast: ExpressionAst;
     try {
@@ -539,12 +540,12 @@ function validateExpressions(sourceSteps: readonly WorkflowStep[], compiledSteps
         addAll(available, effectiveOutputs(byId.get(dependency)!, parentEnabled));
         availableSteps.add(dependency);
       }
-      if (step.when !== undefined) validate(step.when, `${stepPath}/when`, available, availableSteps, new Set(byId.keys()));
+      if (step.when !== undefined) validate(step.when, `${stepPath}/when`, available, availableSteps, declaredSteps);
       const untilAvailable = new Set(available);
       const untilSteps = new Set(availableSteps);
       for (const child of current.steps) { addAll(untilAvailable, effectiveOutputs(child, parentEnabled && current.enabled)); untilSteps.add(child.id); }
-      if (step.until !== undefined) validate(step.until, `${stepPath}/until`, untilAvailable, untilSteps, new Set(byId.keys()));
-      if (step.loop?.until !== undefined) validate(step.loop.until, `${stepPath}/loop/until`, untilAvailable, untilSteps, new Set(byId.keys()));
+      if (step.until !== undefined) validate(step.until, `${stepPath}/until`, untilAvailable, untilSteps, declaredSteps);
+      if (step.loop?.until !== undefined) validate(step.loop.until, `${stepPath}/loop/until`, untilAvailable, untilSteps, declaredSteps);
       visit(step.steps ?? [], current.steps, `${stepPath}/steps`, available, availableSteps, true, parentEnabled && current.enabled);
       if (nested) addAll(preceding, effectiveOutputs(current, parentEnabled));
       if (nested) precedingSteps.add(current.id);

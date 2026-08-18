@@ -450,6 +450,11 @@ test("application snapshot parser rejects unknown and malformed recursive fields
       const plan = profiles.quick!.steps.find(({ id }) => id === "plan")!;
       (plan.outputs as Array<Record<string, unknown>>)[0]!.contentLevel = 1;
     }],
+    ["legacy artifact shorthand expression", (value) => {
+      const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      const reviewFix = profiles.governed!.steps.find(({ id }) => id === "review-fix")!;
+      reviewFix.until = "${review-result.approved}";
+    }],
   ];
   for (const [name, mutate] of corruptions) {
     const corrupted = structuredClone(snapshot);
@@ -480,6 +485,21 @@ test("acquire and recovery reject structurally invalid Application snapshots wit
       const profiles = snapshot.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
       const reviewFix = profiles.governed!.steps.find(({ id }) => id === "review-fix")!;
       (reviewFix.steps as Array<Record<string, unknown>>)[0]!.typo = true;
+    });
+    await writeFile(path.join(rewritten.controlPlane, "runtime.json"), "not-json\n", "utf8");
+    await assert.rejects(
+      recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_APPLICATION_SNAPSHOT_INVALID",
+    );
+  });
+
+  await t.test("legacy artifact shorthand", async () => {
+    const current = await fixture();
+    const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "旧快照表达式拒绝" } });
+    const rewritten = await rewriteApplicationSnapshot(current, started.workItemId, (snapshot) => {
+      const profiles = snapshot.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      const reviewFix = profiles.governed!.steps.find(({ id }) => id === "review-fix")!;
+      reviewFix.until = "${review-result.approved}";
     });
     await writeFile(path.join(rewritten.controlPlane, "runtime.json"), "not-json\n", "utf8");
     await assert.rejects(

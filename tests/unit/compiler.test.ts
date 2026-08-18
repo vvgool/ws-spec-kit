@@ -161,6 +161,20 @@ test("compiler 与 runtime 共用受限 AST，并接受复合 Binding 和 Artifa
   assert.equal(compiled.steps.find(({ id }) => id === "commit")?.when, "${artifacts.review-result.approved == true || bindings.issue.exists}");
 });
 
+test("嵌套 Step 条件可引用父级可达依赖，并区分未来与未知 Step", async () => {
+  const parentDependency = await fixture();
+  step(parentDependency.pkg, "fix").when = "${steps.verify-green.status == 'succeeded'}";
+  assert.doesNotThrow(() => compileWorkflow(parentDependency.pkg, parentDependency.profile));
+
+  const future = await fixture();
+  step(future.pkg, "fix").when = "${steps.commit.status == 'succeeded'}";
+  expectCompileError(() => compileWorkflow(future.pkg, future.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE");
+
+  const unknown = await fixture();
+  step(unknown.pkg, "fix").when = "${steps.missing.status == 'succeeded'}";
+  expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN");
+});
+
 test("rejects expressions that reference unreachable, future, disabled or unknown-typed outputs", async () => {
   const future = await fixture();
   step(future.pkg, "clarify").when = "${artifacts.review-result.approved}";

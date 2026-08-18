@@ -1,5 +1,6 @@
 import type { CompiledStep, CompiledWorkflow, ProfileId, ResolvedChangePolicy, SecurityClass } from "../domain/workflow.js";
 import type { ProjectGatePolicy } from "../engine/compiler.js";
+import { parseExpression } from "../engine/expressions/parser.js";
 import type { ArtifactReference, ResolvedSkillDescriptor } from "../protocol/work-package.js";
 import { parseSkillLock } from "../registry/skills/lock.js";
 import type { SkillLock, SkillProvider } from "../registry/skills/types.js";
@@ -108,6 +109,17 @@ function optionalText(source: Record<string, unknown>, key: string, label: strin
   return source[key] === undefined ? undefined : { [key]: text(source[key], `${label}.${key}`) };
 }
 
+function optionalExpression(source: Record<string, unknown>, key: string, label: string): { [key: string]: string } | undefined {
+  if (source[key] === undefined) return undefined;
+  const value = text(source[key], `${label}.${key}`);
+  try {
+    parseExpression(value);
+  } catch {
+    invalid(`${label}.${key}`);
+  }
+  return { [key]: value };
+}
+
 function parseArtifactReference(value: unknown, label: string): ArtifactReference {
   const source = record(value, label, ["artifactType", "schemaVersion", "path", "revision", "contentHash", "mediaType", "contentLevel"]);
   return {
@@ -174,9 +186,9 @@ function parseSnapshotStep(value: unknown, label: string): SnapshotStep {
     ...optionalText(source, "artifactLevel", label),
     ...optionalText(source, "objective", label),
     ...optionalText(source, "expectedOutcome", label),
-    ...optionalText(source, "when", label),
+    ...optionalExpression(source, "when", label),
     ...optionalText(source, "action", label),
-    ...optionalText(source, "until", label),
+    ...optionalExpression(source, "until", label),
     ...(retry === undefined ? {} : { retry }),
     ...(source.maxIterations === undefined ? {} : { maxIterations: integer(source.maxIterations, `${label}.maxIterations`, 1) }),
     ...(source.independentReviewActor === undefined ? {} : { independentReviewActor: flag(source.independentReviewActor, `${label}.independentReviewActor`) }),

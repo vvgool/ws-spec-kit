@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
+import { parseExpression } from "../../src/engine/expressions/parser.js";
+
 const root = path.resolve(import.meta.dirname, "../..");
 const designFile = "docs/superpowers/specs/2026-08-17-wsspeckit-workflow-design.md";
 const plans: Record<string, string> = {
@@ -44,4 +46,12 @@ test("需求矩阵引用的实施 Task 在对应计划中有真实标题", async
       for (let task = first; task <= last; task += 1) assert.match(documents[phase]!, new RegExp(`^### Task ${task}：`, "mu"), `${row[0]} 引用了不存在的 ${phase} Task ${task}`);
     }
   }
+});
+
+test("权威设计规格中的 Workflow 条件使用正式有限表达式语法", async () => {
+  const design = await readFile(path.join(root, designFile), "utf8");
+  const expressions = [...design.matchAll(/\$\{[^}]+\}/gu)].map((match) => match[0]);
+
+  assert.ok(expressions.length > 0, "设计规格缺少 Workflow 条件示例");
+  for (const expression of expressions) assert.doesNotThrow(() => parseExpression(expression), expression);
 });
