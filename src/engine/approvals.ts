@@ -12,16 +12,27 @@ export class ApprovalError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "ApprovalError"; }
 }
 
+export function approvalBindingDigest(input: {
+  stageId: string;
+  attemptId: string;
+  artifacts: readonly Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">[];
+}): string {
+  if (input.artifacts.length === 1) return input.artifacts[0]!.contentHash;
+  return sha256(JSON.stringify(input.artifacts.length === 0
+    ? { version: 1, stageId: input.stageId, attemptId: input.attemptId, artifacts: [] }
+    : input.artifacts));
+}
+
 export async function prepareArtifactApproval(input: {
   cwd: string;
   workItemId: string;
   stageId: string;
   attemptId: string;
   artifacts: ArtifactReference[];
+  actor?: string;
   now?: Date;
 }): Promise<RuntimeApproval> {
   const worktree = await worktreeFor(input.cwd, input.workItemId);
-  if (input.artifacts.length === 0) throw new ApprovalError("WSSPEC_REQUIRED_ARTIFACT_MISSING", "审批必须绑定至少一个 Artifact。");
   const artifacts = await Promise.all(input.artifacts.map(async (reference) => {
     if (reference.path === undefined) throw new ApprovalError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 缺少路径。`);
     const verified = await verifyArtifact(path.join(worktree, reference.path), {
@@ -42,18 +53,22 @@ export async function prepareArtifactApproval(input: {
     artifact,
     content: await readFile(path.join(worktree, artifact.path), "utf8"),
   })));
-  const contentHash = artifacts.length === 1
-    ? artifacts[0]!.contentHash
-    : sha256(JSON.stringify(artifacts));
+  const contentHash = approvalBindingDigest({ stageId: input.stageId, attemptId: input.attemptId, artifacts });
+  const artifactPath = artifacts[0]?.path;
+  const artifactDiff = artifactContents
+    .map(({ artifact, content }) => `--- /dev/null\n+++ ${artifact.path}\n${content.split("\n").map((line) => `+${line}`).join("\n")}`)
+    .join("\n")
+    .slice(0, 65536);
   return {
     requestId: `approval-${crypto.randomUUID()}`,
     stageId: input.stageId,
     attemptId: input.attemptId,
-    artifactPath: artifacts[0]!.path,
+    ...(artifactPath === undefined ? {} : { artifactPath }),
     contentHash,
     artifacts,
-    artifactDiff: artifactContents.map(({ artifact, content }) => `--- /dev/null\n+++ ${artifact.path}\n${content.split("\n").map((line) => `+${line}`).join("\n")}`).join("\n").slice(0, 65536),
+    ...(artifactDiff === "" ? {} : { artifactDiff }),
     workspaceTreeDigest: await computeWorkspaceTreeDigest(worktree),
+    requestedBy: input.actor ?? "engine",
     status: "pending",
     createdAt: (input.now ?? new Date()).toISOString(),
   };
@@ -66,7 +81,7 @@ async function worktreeFor(cwd: string, workItemId: string): Promise<string> {
   return path.join(cache.repositoryRoot, locator.worktree);
 }
 
-export async function requestArtifactApproval(input: { cwd: string; workItemId: string; stageId: string; attemptId: string; artifactPath: string; artifactType: string }): Promise<RuntimeApproval> {
+export async function requestArtifactApproval(input: { cwd: string; workItemId: string; stageId: string; attemptId: string; artifactPath: string; artifactType: string; actor?: string }): Promise<RuntimeApproval> {
   let projection = await readControlPlane(input.cwd, input.workItemId);
   if (projection.stages[input.stageId]?.status !== "validating") throw new ApprovalError("WSSPEC_APPROVAL_NOT_READY", "Stage 尚未进入 validating。");
   const request = await prepareArtifactApproval({
@@ -109,6 +124,7 @@ function assertPendingApproval(
     || pending.attemptId !== request.attemptId
     || pending.contentHash !== request.contentHash
     || pending.workspaceTreeDigest !== request.workspaceTreeDigest
+    || pending.requestedBy !== request.requestedBy
     || JSON.stringify(pending.artifacts) !== JSON.stringify(request.artifacts)) {
     throw new ApprovalError("WSSPEC_APPROVAL_NOT_PENDING", "审批请求不存在、已经处理或绑定已变化。");
   }
@@ -116,13 +132,13 @@ function assertPendingApproval(
 }
 
 async function verifyApprovalArtifacts(worktree: string, workItemId: string, request: RuntimeApproval): Promise<void> {
-  const references = request.artifacts ?? [{
+  const references = request.artifacts ?? (request.artifactPath === undefined ? [] : [{
     artifactType: path.basename(request.artifactPath, ".md"),
     schemaVersion: 1,
     path: request.artifactPath,
     contentHash: request.contentHash,
     revision: 1,
-  }];
+  }]);
   const verifiedReferences = await Promise.all(references.map((reference) => verifyArtifact(path.join(worktree, reference.path), {
     repositoryRoot: worktree,
     artifactType: reference.artifactType,
@@ -144,9 +160,7 @@ async function verifyApprovalArtifacts(worktree: string, workItemId: string, req
       throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_MISMATCH", "审批绑定的 Artifact 引用已经变化。");
     }
   }
-  const verifiedDigest = verifiedReferences.length === 1
-    ? verifiedReferences[0]!.contentHash
-    : sha256(JSON.stringify(verifiedReferences));
+  const verifiedDigest = approvalBindingDigest({ stageId: request.stageId, attemptId: request.attemptId, artifacts: verifiedReferences });
   if (verifiedDigest !== request.contentHash) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_MISMATCH", "审批绑定的 Artifact 集合摘要已经变化。");
 }
 
@@ -187,7 +201,12 @@ export async function decideArtifactApproval(input: { cwd: string; workItemId: s
         }
         await verifyApprovalArtifacts(worktree, input.workItemId, pending);
         const status = input.decision === "approve" ? "approved" : "rejected";
-        const decided: RuntimeApproval = { ...pending, status, decidedAt: new Date().toISOString() };
+        const decided: RuntimeApproval = {
+          ...pending,
+          status,
+          decidedBy: input.actor ?? "interactive-user",
+          decidedAt: new Date().toISOString(),
+        };
         const next = {
           ...current,
           workItem: transitionWorkItem(current.workItem, { type: "transition", to: "active" }),

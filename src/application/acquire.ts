@@ -7,6 +7,7 @@ import { revalidateGlobalSkillLock } from "../registry/skills/resolver.js";
 import { validate } from "../schemas/index.js";
 import { applicationCloseEvidenceKey, recoverControlPlane, type ApplicationCloseEvidence, type RuntimeClaim, type RuntimeProjection } from "../storage/control-plane.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
+import { closeChecklist, type CloseDecision } from "../engine/archive.js";
 import { conditionScope, evaluateCondition } from "../engine/control/condition.js";
 import {
   advanceLoop,
@@ -59,6 +60,7 @@ export interface ApplicationSkippedStepRecord {
 interface AcquiredMutation {
   action: AgentAction;
   skippedStepIds: string[];
+  closeDecision?: CloseDecision;
 }
 
 export class ApplicationAcquireError extends Error {
@@ -539,7 +541,7 @@ export async function acquireNextLocked(input: {
   actor: string;
   root: string;
   dependencies: AcquireDependencies;
-}): Promise<{ projection: RuntimeProjection; action: AgentAction; skippedStepIds: string[] }> {
+}): Promise<{ projection: RuntimeProjection; action: AgentAction; skippedStepIds: string[]; closeDecision?: CloseDecision }> {
   const { state, actor, dependencies } = input;
   let projection = {
     ...input.projection,
@@ -641,6 +643,45 @@ export async function acquireNextLocked(input: {
     });
   }
   if (step.uses === "control.close") {
+    const workspaceTreeDigest = await computeWorkspaceTreeDigest(state.worktree);
+    const decision = closeChecklist({
+      profile,
+      projection,
+      gatePolicy: state.snapshot.gatePolicy,
+      gates: state.snapshot.gates,
+      workspaceTreeDigest,
+      configDigest: state.item.execution.configDigest,
+    });
+    if (!decision.allowed) {
+      let workItem = transitionWorkItem(projection.workItem, { type: "transition", to: "verifying" });
+      workItem = transitionWorkItem(workItem, { type: "transition", to: "blocked" });
+      projection = {
+        ...projection,
+        workItem,
+        evidence: {
+          ...projection.evidence,
+          "application.close-checklist": {
+            checkedAt: now.toISOString(),
+            workspaceTreeDigest,
+            decision,
+          },
+        },
+      };
+      const missing = decision.missing.map(({ category, id }) => `${category}:${id}`).join(", ");
+      return {
+        projection,
+        action: {
+          action: "blocked",
+          problems: [{
+            code: "WSSPEC_CLOSE_CHECKLIST_INCOMPLETE",
+            message: `Close checklist 未满足：${missing}`,
+            retryable: true,
+          }],
+        },
+        skippedStepIds: promoted.skippedStepIds,
+        closeDecision: decision,
+      };
+    }
     let stage = transitionStage(projection.stages[step.id]!, { type: "transition", to: "running" });
     stage = transitionStage(stage, { type: "transition", to: "validating" });
     stage = transitionStage(stage, { type: "transition", to: "succeeded" });
@@ -649,7 +690,7 @@ export async function acquireNextLocked(input: {
     workItem = transitionWorkItem(workItem, { type: "transition", to: "closed" });
     const applicationClose: ApplicationCloseEvidence = {
       closedAt: now.toISOString(),
-      workspaceTreeDigest: await computeWorkspaceTreeDigest(state.worktree),
+      workspaceTreeDigest,
     };
     projection = {
       ...projection,
@@ -658,7 +699,12 @@ export async function acquireNextLocked(input: {
       evidence: { ...projection.evidence, [applicationCloseEvidenceKey]: applicationClose },
       readOnly: true,
     };
-    return { projection, action: completed(state.item.workItemId, "closed", "Workflow 已完成。"), skippedStepIds: promoted.skippedStepIds };
+    return {
+      projection,
+      action: completed(state.item.workItemId, "closed", "Workflow 已完成。"),
+      skippedStepIds: promoted.skippedStepIds,
+      closeDecision: decision,
+    };
   }
   const acquired = await acquireExecutableStep({
     state,
@@ -686,15 +732,29 @@ export async function acquireApplication(input: AcquireInput, dependencies: Acqu
   const action = await mutateControlPlane<AcquiredMutation>({
     cwd: input.root,
     workItemId: input.workItemId,
-    eventType: (value) => value.skippedStepIds.length > 0 ? "step.skipped" : "attempt.acquired",
+    eventType: (value) => {
+      if (value.action.action === "completed" && value.action.summary.status === "closed") return "work-item.closed";
+      if (value.closeDecision !== undefined) return "evidence.recorded";
+      return value.skippedStepIds.length > 0 ? "step.skipped" : "attempt.acquired";
+    },
     stageId: (value) => value.skippedStepIds[0],
     idempotencyKey: `acquire:${crypto.randomUUID()}`,
     actor: input.actor,
     operationInput: { actor: input.actor, at: dependencies.now().toISOString() },
-    eventDetails: (value) => value.skippedStepIds.length === 0 ? {} : { skippedStepIds: value.skippedStepIds },
+    eventDetails: (value) => ({
+      ...(value.skippedStepIds.length === 0 ? {} : { skippedStepIds: value.skippedStepIds }),
+      ...(value.closeDecision === undefined ? {} : { closeDecision: value.closeDecision }),
+    }),
     mutate: async (projection) => {
       const acquired = await acquireNextLocked({ state, projection, actor: input.actor, root: input.root, dependencies });
-      return { projection: acquired.projection, value: { action: acquired.action, skippedStepIds: acquired.skippedStepIds } };
+      return {
+        projection: acquired.projection,
+        value: {
+          action: acquired.action,
+          skippedStepIds: acquired.skippedStepIds,
+          ...(acquired.closeDecision === undefined ? {} : { closeDecision: acquired.closeDecision }),
+        },
+      };
     },
   });
   if (action.action.action === "completed" && action.action.summary.status === "closed") {

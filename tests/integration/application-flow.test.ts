@@ -1457,11 +1457,15 @@ test("explicit recovery rebuilds a terminal control.close archive before read-on
     workflowRef: "builtin://workflows/documentation-delivery",
     profile: "quick",
   });
+  await rewriteApplicationSnapshot(current, started.workItemId, (snapshot) => {
+    const selectedProfile = snapshot.selectedProfile as string;
+    const profiles = snapshot.profiles as Record<string, { order: string[]; steps: Array<Record<string, unknown>> }>;
+    const close = profiles[selectedProfile]!.steps.find(({ uses }) => uses === "control.close")!;
+    profiles[selectedProfile]!.steps = [close];
+    profiles[selectedProfile]!.order = [close.id as string];
+  });
   const projection = await readControlPlane(current.root, started.workItemId);
-  projection.stages = Object.fromEntries(Object.keys(projection.stages).map((stepId) => [
-    stepId,
-    { status: stepId === "close" ? "ready" : "succeeded" },
-  ]));
+  projection.stages = { close: { status: "ready" } };
   await writeProjection(projection);
 
   const action = await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" });

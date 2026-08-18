@@ -81,6 +81,10 @@ export const applicationPublicErrorGroups = {
     "WSSPEC_RISK_RULE_INVALID", "WSSPEC_RISK_WORKFLOW_INVALID", "WSSPEC_LOOP_PROJECTION_INVALID", "WSSPEC_RETRY_PROJECTION_INVALID",
     "WSSPEC_STAGE_NOT_FOUND", "WSSPEC_STATE_TRANSITION_FORBIDDEN",
   ],
+  verification: [
+    "WSSPEC_CLOSE_CHECKLIST_INCOMPLETE", "WSSPEC_EVIDENCE_ATTEMPT_MISMATCH", "WSSPEC_EVIDENCE_HASH_MISMATCH",
+    "WSSPEC_EVIDENCE_INVALID", "WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT", "WSSPEC_EVIDENCE_STALE", "WSSPEC_GATE_NOT_REQUIRED",
+  ],
   start: ["WSSPEC_START_ROLLBACK_FAILED"],
   acquire: [
     "WSSPEC_LOOP_CONFIGURATION_INVALID", "WSSPEC_LOOP_MAX_ITERATIONS_REACHED", "WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING",
@@ -148,11 +152,11 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
     "compiler", "executor", "source", "workItem", "runtime", "start",
   ],
-  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire"],
-  submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval"],
+  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "verification"],
+  submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "verification"],
   decide: [
     "internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit",
-    "approval", "workflowPackage", "workflowTrust",
+    "approval", "verification", "workflowPackage", "workflowTrust",
   ],
   inspect: ["internal", "arguments", "repository", "schema", "snapshot", "workItem"],
   "workflow list": ["internal", "arguments", "builtin"],

@@ -251,10 +251,11 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
   const { root: _root, ...operationInput } = input;
   let profileEvent: "profile.selected" | "profile.upgraded" | undefined;
   let profileInvalidatedStepIds: string[] = [];
-  const action = await mutateControlPlane({
+  const action = await mutateControlPlane<AgentAction>({
     cwd: input.root,
     workItemId: input.workItemId,
-    eventType: () => profileEvent ?? "attempt.submitted",
+    eventType: (value) => profileEvent
+      ?? (value.action === "completed" && value.summary.status === "closed" ? "work-item.closed" : "attempt.submitted"),
     idempotencyKey: `submit:${input.attemptId}`,
     stageId: input.stepId,
     attemptId: input.attemptId,
@@ -364,8 +365,15 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       projection.stages[target.stageId] = validating;
       if (target.step.approval) {
         const artifacts = result.artifacts.filter((candidate) => candidate.path !== undefined);
-        if (artifacts.length === 0) throw new ApplicationSubmitError("WSSPEC_REQUIRED_ARTIFACT_MISSING", "审批 Step 必须提交可校验 Artifact。 ");
-        const request = await prepareArtifactApproval({ cwd: input.root, workItemId: input.workItemId, stageId: target.stageId, attemptId: input.attemptId, artifacts, now: dependencies.now() });
+        const request = await prepareArtifactApproval({
+          cwd: input.root,
+          workItemId: input.workItemId,
+          stageId: target.stageId,
+          attemptId: input.attemptId,
+          artifacts,
+          actor,
+          now: dependencies.now(),
+        });
         projection = {
           ...projection,
           workItem: transitionWorkItem(projection.workItem, { type: "transition", to: "awaiting_approval" }),

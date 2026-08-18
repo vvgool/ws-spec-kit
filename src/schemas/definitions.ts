@@ -486,7 +486,7 @@ export const schemas = {
     properties: {
       evidenceId: { type: "string", minLength: 1 },
       level: { enum: ["trusted", "attested", "reported"] },
-      gateId: { type: "string", pattern: idPattern },
+      gateId: { type: "string", pattern: "^[a-z][a-z0-9.-]{0,62}$" },
       codeRevision: { type: "string", minLength: 1 },
       baselineTreeDigest: { type: "string", pattern: digestPattern },
       workspaceTreeDigest: { type: "string", pattern: digestPattern },

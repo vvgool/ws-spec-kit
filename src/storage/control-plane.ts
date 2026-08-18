@@ -37,7 +37,7 @@ export interface RuntimeApproval {
   requestId: string;
   stageId: string;
   attemptId: string;
-  artifactPath: string;
+  artifactPath?: string;
   contentHash: string;
   artifacts?: Array<{
     artifactType: string;
@@ -49,6 +49,8 @@ export interface RuntimeApproval {
   }>;
   artifactDiff?: string;
   workspaceTreeDigest: string;
+  requestedBy?: string;
+  decidedBy?: string;
   status: "pending" | "approved" | "rejected" | "expired";
   createdAt: string;
   decidedAt?: string;
