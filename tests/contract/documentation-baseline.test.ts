@@ -132,15 +132,27 @@ test("公开错误码文档拒绝缺失或多余条目", async () => {
   assert.throws(() => assertErrorCatalogMatchesDocumentation({ ...reference, application: `${reference.application}\nWSSPEC_UNREGISTERED_DOCUMENT_CODE` }));
 });
 
-test("CLI 输出只透传已注册错误码", () => {
+test("CLI 输出保留已注册的非 internal 错误码与中文消息", () => {
   assert.deepEqual(
     errorOutput(Object.assign(new Error("参数无效。"), { code: "WSSPEC_ARGUMENT_INVALID" })),
     { ok: false, error: { code: "WSSPEC_ARGUMENT_INVALID", message: "参数无效。" } },
   );
-  for (const code of ["WSSPEC_UNREGISTERED", "INTERNAL_DATABASE_FAILURE"]) {
+});
+
+test("CLI 输出将所有 internal 与未知异常折叠为固定安全消息", () => {
+  const expected = { ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } };
+  const cases: unknown[] = [
+    Object.assign(new Error("internal credential=explicit-secret"), { code: "WSSPEC_INTERNAL_ERROR", stack: "stack explicit-secret", details: { credential: "explicit-secret" } }),
+    Object.assign(new Error("unknown credential=wsspec-secret"), { code: "WSSPEC_UNREGISTERED", stack: "stack wsspec-secret", details: { credential: "wsspec-secret" } }),
+    Object.assign(new Error("unknown credential=foreign-secret"), { code: "INTERNAL_DATABASE_FAILURE", stack: "stack foreign-secret", details: { credential: "foreign-secret" } }),
+    new Error("ordinary credential=error-secret"),
+    "non-error credential=string-secret",
+    { message: "non-error credential=object-secret", stack: "stack object-secret", details: { credential: "object-secret" } },
+  ];
+  for (const error of cases) {
     assert.deepEqual(
-      errorOutput(Object.assign(new Error("不得公开。"), { code })),
-      { ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } },
+      errorOutput(error),
+      expected,
     );
   }
 });

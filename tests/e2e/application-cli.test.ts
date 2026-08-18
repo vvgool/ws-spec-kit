@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -79,4 +79,18 @@ test("核心 CLI 的 value option 拒绝缺值、相邻 option 与重复项，�
     assert.match(`${result.stdout}${result.stderr}`, new RegExp(current.code), current.args.join(" "));
   }
   await assert.rejects(access(path.join(root, "--dry-run", "SKILL.md")), /ENOENT/);
+});
+
+test("CLI 对 malformed result JSON 只输出固定 internal 错误且不泄露 parser 详情", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-cli-home-"));
+  const resultFile = "malformed-result.json";
+  await writeFile(path.join(root, resultFile), "credential=cli-round4-secret", "utf8");
+
+  const result = await runCli(root, ["submit", "WSS-PROBE", "--step", "probe", "--attempt", "probe", "--lease", "probe", "--result", resultFile], home);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, `${JSON.stringify({ ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } })}\n`);
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stdout, /cli-round4-secret|Unexpected token|not valid JSON/u);
 });

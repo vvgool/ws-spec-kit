@@ -1,3 +1,5 @@
+import { applicationInternalError, isApplicationPublicErrorCode } from "../../protocol/public-contract.js";
+
 export interface CliProblem {
   code: string;
   message: string;
@@ -17,7 +19,6 @@ export function json(value: unknown): string {
 
 export function errorOutput(error: unknown): { ok: false; error: CliProblem } {
   const code = error instanceof Error && "code" in error ? String((error as Error & { code: unknown }).code) : "WSSPEC_INTERNAL_ERROR";
-  if (isApplicationPublicErrorCode(code)) return { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } };
-  return { ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } };
+  if (error instanceof Error && code !== applicationInternalError.code && isApplicationPublicErrorCode(code)) return { ok: false, error: { code, message: error.message } };
+  return { ok: false, error: { ...applicationInternalError } };
 }
-import { isApplicationPublicErrorCode } from "../../protocol/public-contract.js";
