@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
+import { computeArtifactTreeDigest, computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { validate } from "../../src/schemas/index.js";
 import { RepositoryError, initRepository, loadRepository } from "../../src/storage/repository.js";
 import { createGitRepository, git } from "./helpers/git.js";
@@ -120,4 +120,34 @@ test("workspace digest preserves whitespace in Git paths", async () => {
   await writeFile(filename, "two\n", "utf8");
 
   assert.notEqual(await computeWorkspaceTreeDigest(root), before);
+});
+
+test("Artifact digest covers Work Item artifacts while workspace ignores Artifact and enumerated Runtime noise", async () => {
+  const root = await createGitRepository();
+  await writeFile(path.join(root, ".gitignore"), ".worktrees/\n.wsspec/work-items/\n", "utf8");
+  await git(root, "add", ".gitignore");
+  await git(root, "commit", "-m", "test: ignore Work Item runtime tree");
+  const itemRoot = path.join(root, ".wsspec", "work-items", "WSS-TEST");
+  const controlPlane = path.join(itemRoot, "control-plane");
+  await mkdir(controlPlane, { recursive: true });
+  const before = await computeWorkspaceTreeDigest(root);
+
+  await writeFile(path.join(controlPlane, "runtime.json"), "runtime-one\n", "utf8");
+  await writeFile(path.join(controlPlane, "events.jsonl"), "event-one\n", "utf8");
+  await writeFile(path.join(controlPlane, "runtime.lock"), "lock-one\n", "utf8");
+  assert.equal(await computeWorkspaceTreeDigest(root), before);
+  const artifactBefore = await computeArtifactTreeDigest(root);
+
+  const artifacts = path.join(itemRoot, "artifacts");
+  await mkdir(artifacts, { recursive: true });
+  const artifact = path.join(artifacts, "spec.md");
+  await writeFile(artifact, "approved\n", "utf8");
+  const approved = await computeWorkspaceTreeDigest(root);
+  assert.equal(approved, before);
+  const approvedArtifact = await computeArtifactTreeDigest(root);
+  assert.notEqual(approvedArtifact, artifactBefore);
+
+  await writeFile(artifact, "tampered\n", "utf8");
+  assert.equal(await computeWorkspaceTreeDigest(root), approved);
+  assert.notEqual(await computeArtifactTreeDigest(root), approvedArtifact);
 });

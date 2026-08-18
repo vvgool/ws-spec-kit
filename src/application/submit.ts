@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { verifyArtifact } from "../domain/artifacts.js";
 import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, type TreeEntry } from "../domain/digests.js";
+import { matchesRepositoryPath } from "../domain/repository-path.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { deriveInitialStages } from "./initial-stages.js";
 import { applyProfileDecision, type ProfileDecision } from "./profile.js";
@@ -87,27 +88,8 @@ async function actualChangedFiles(state: ApplicationState, before: readonly Tree
     .sort((left, right) => left.localeCompare(right));
 }
 
-function glob(pattern: string): RegExp {
-  let source = "^";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index]!;
-    if (character === "*" && pattern[index + 1] === "*") {
-      if (pattern[index + 2] === "/") {
-        source += "(?:.*/)?";
-        index += 2;
-      } else {
-        source += ".*";
-        index += 1;
-      }
-    } else if (character === "*") source += "[^/]*";
-    else if (character === "?") source += "[^/]";
-    else source += character.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  }
-  return new RegExp(`${source}$`, "u");
-}
-
 function permitted(file: string, allowedPaths: readonly string[]): boolean {
-  return allowedPaths.some((allowed) => glob(allowed).test(file));
+  return allowedPaths.some((allowed) => matchesRepositoryPath(allowed, file));
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {

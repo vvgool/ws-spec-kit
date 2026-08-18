@@ -32,6 +32,12 @@ export interface WorkflowFixture {
     loopAttemptsUsed?: number;
     upgradeStep?: string;
     upgradeAttemptsUsed?: number;
+    governedStep?: string;
+    governedAttemptChanged?: boolean;
+    governedAttemptsUsed?: number;
+    governedLoopMaxIterations?: number;
+    governedProfile?: string;
+    governedApprovalCount?: number;
   };
   acquire(workItemId: StartResult["workItemId"], actor: string): Promise<WorkPackage>;
   advance(seconds: number): void;
@@ -47,6 +53,7 @@ interface FeatureOptions {
   externalTargets?: boolean;
   upgradeAtStep?: string;
   interruptAfterProfileUpgrade?: boolean;
+  interruptAfterApprovalStep?: string;
 }
 
 interface FeatureArtifacts {
@@ -280,7 +287,7 @@ function bodyFor(type: string, approved = true): string {
   return `# ${type}\n\n本地 E2E 产物。\n`;
 }
 
-async function worktreeFor(root: string, workItemId: string): Promise<string> {
+export async function worktreeFor(root: string, workItemId: string): Promise<string> {
   const projection = await readControlPlane(root, workItemId);
   const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
   return path.join(root, locator.worktree);
@@ -393,13 +400,45 @@ export async function executeFeatureWorkflow(
   let reviewIndex = 0;
   let loopInterrupted = false;
   let profileInterrupted = false;
+  let approvalInterrupted = false;
   let highRiskInjected = false;
   let writeTestsCount = 0;
   let safety = 0;
   while (action.action !== "completed") {
     if (safety++ > 80) throw new Error("feature workflow exceeded bounded E2E steps");
     if (action.action === "await_approval") {
+      const beforeDecision = await readControlPlane(fixture.root, started.workItemId);
+      const approval = beforeDecision.approvals[action.approval.requestId];
       action = await approve(fixture, started.workItemId, action);
+      if (!approvalInterrupted && approval?.stageId === options.interruptAfterApprovalStep) {
+        assert.equal(action.action, "execute");
+        if (action.action !== "execute") throw new Error("expected active Attempt after governed approval");
+        const interrupted = action.workPackage;
+        const before = await readControlPlane(fixture.root, started.workItemId);
+        const loopBefore = before.loops["review-fix"];
+        assert.ok(loopBefore);
+        const approvalsBefore = structuredClone(before.approvals);
+        await writeFile(path.join(before.controlPlane, "runtime.json"), "interrupted after governed approval\n", "utf8");
+        fixture.restart();
+        const view = await fixture.app.inspect({ root: fixture.root, workItemId: started.workItemId });
+        assert.equal(view.workflowRef, started.workflowRef);
+        assert.equal(view.profile, "governed");
+        const resumed = await fixture.acquire(started.workItemId, options.implementationActor);
+        const after = await readControlPlane(fixture.root, started.workItemId);
+        assert.equal(resumed.stepId, interrupted.stepId);
+        assert.notEqual(resumed.attemptId, interrupted.attemptId);
+        assert.deepEqual(after.loops["review-fix"], loopBefore);
+        assert.deepEqual(after.approvals, approvalsBefore);
+        assert.equal(after.profile.selected, before.profile.selected);
+        fixture.recovery.governedStep = resumed.stepId;
+        fixture.recovery.governedAttemptChanged = resumed.attemptId !== interrupted.attemptId;
+        fixture.recovery.governedAttemptsUsed = attemptsUsed(after, resumed.stepId);
+        fixture.recovery.governedLoopMaxIterations = after.loops["review-fix"]?.maxIterations;
+        fixture.recovery.governedProfile = after.profile.selected;
+        fixture.recovery.governedApprovalCount = Object.keys(after.approvals).length;
+        action = { action: "execute", workPackage: resumed };
+        approvalInterrupted = true;
+      }
       continue;
     }
     if (action.action === "blocked") {

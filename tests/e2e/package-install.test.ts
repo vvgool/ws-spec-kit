@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 const execute = promisify(execFile);
@@ -60,4 +61,24 @@ test("打包产物不包含旧 Workflow、Project Config、编排器或 StageCon
     .filter((filename) => filename.startsWith("dist/") && filename.endsWith(".d.ts"))
     .map((filename) => readFile(path.join(repositoryRoot, filename), "utf8")));
   assert.doesNotMatch(declarations.join("\n"), /\bStageContext\b/u);
+});
+
+test("构建产物保持 repository-relative matcher 和 symlink 拒绝边界", async () => {
+  await execute("npm", ["run", "build"], { cwd: repositoryRoot });
+  const repositoryPath = await import(`${pathToFileURL(path.join(repositoryRoot, "dist", "domain", "repository-path.js")).href}?${crypto.randomUUID()}`) as {
+    matchesRepositoryPath(pattern: string, candidate: string): boolean;
+  };
+  const docs = await import(`${pathToFileURL(path.join(repositoryRoot, "dist", "engine", "docs-integrity.js")).href}?${crypto.randomUUID()}`) as {
+    checkDocumentationIntegrity(input: { root: string; files: string[]; allowedPaths: string[] }): Promise<{ ok: boolean; problems: Array<{ code: string }> }>;
+  };
+  assert.equal(repositoryPath.matchesRepositoryPath("docs/**/*.md", "docs/readme.md"), true);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-dist-docs-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "wsspec-dist-outside-"));
+  await mkdir(path.join(root, "docs"), { recursive: true });
+  await writeFile(path.join(outside, "outside.md"), "# Outside\n");
+  await symlink(path.join(outside, "outside.md"), path.join(root, "docs", "escape.md"));
+  const checked = await docs.checkDocumentationIntegrity({ root, files: ["docs/escape.md"], allowedPaths: ["docs/**/*.md"] });
+  assert.equal(checked.ok, false);
+  assert.deepEqual(checked.problems.map(({ code }) => code), ["WSSPEC_DOCUMENTATION_FILE_INVALID"]);
 });

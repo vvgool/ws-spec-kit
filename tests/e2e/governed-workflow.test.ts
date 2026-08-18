@@ -7,6 +7,7 @@ import {
   assertClosedFeatureWorkflow,
   createWorkflowFixture,
   executeFeatureWorkflow,
+  worktreeFor,
 } from "./helpers/workflow-fixture.js";
 
 test("Governed requires an independent reviewer, complete audit, and read-back local receipts", async () => {
@@ -24,6 +25,7 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
     reviewActors: ["independent-reviewer"],
     reviewApprovals: [true],
     externalTargets: true,
+    interruptAfterApprovalStep: "commit",
   });
 
   const review = result.recovered.contexts["review-fix:1:review"] as { actor?: string };
@@ -42,5 +44,30 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.equal(result.snapshot.profiles.governed.audit.level, "complete");
   assert.equal(result.snapshot.profiles.governed.audit.retention, "extended");
   assert.ok(Object.values(result.recovered.approvals).every(({ status }) => status === "approved"));
+  assert.deepEqual(result.recoveryEvidence, {
+    governedStep: "update-issue",
+    governedAttemptChanged: true,
+    governedAttemptsUsed: 2,
+    governedLoopMaxIterations: 5,
+    governedProfile: "governed",
+    governedApprovalCount: 4,
+  });
+
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const audit = JSON.parse(await readFile(path.join(worktree, ".wsspec", "archive", started.workItemId, "audit.json"), "utf8")) as {
+    projection: {
+      approvals: Record<string, { status: string; requestedBy?: string; decidedBy?: string; decidedAt?: string }>;
+      contexts: Record<string, { actor?: string }>;
+      evidence: Record<string, unknown>;
+    };
+  };
+  const decisions = Object.values(audit.projection.approvals);
+  assert.equal(decisions.length, 5);
+  assert.ok(decisions.every(({ status, requestedBy, decidedBy, decidedAt }) => status === "approved" && requestedBy !== undefined && decidedBy === "fixture-owner" && decidedAt !== undefined));
+  assert.ok(new Set(Object.values(audit.projection.contexts).map(({ actor }) => actor)).has("independent-reviewer"));
+  for (const target of ["issue", "knowledge"] as const) {
+    const publishing = audit.projection.evidence[`external-receipt:${target}`] as { target?: string; status?: string; readBack?: boolean };
+    assert.deepEqual(publishing, { ...publishing, target, status: "confirmed", readBack: true });
+  }
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
 });

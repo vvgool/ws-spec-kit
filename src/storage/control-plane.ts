@@ -73,6 +73,7 @@ export const applicationCloseEvidenceKey = "application.close";
 export interface ApplicationCloseEvidence {
   closedAt: string;
   workspaceTreeDigest: string;
+  artifactTreeDigest: string;
 }
 
 interface ProjectionEventResult {
@@ -196,7 +197,7 @@ export async function readApplicationAnchor(cwd: string, workItemId: string): Pr
   return anchor;
 }
 
-export async function writeArchiveSnapshot(input: { projection: RuntimeProjection; worktree: string; closedAt: string; workspaceTreeDigest: string }): Promise<void> {
+export async function writeArchiveSnapshot(input: { projection: RuntimeProjection; worktree: string; closedAt: string; workspaceTreeDigest: string; artifactTreeDigest: string }): Promise<void> {
   const { controlPlane: _controlPlane, ...publicProjection } = input.projection;
   const audit = {
     version: 1,
@@ -204,6 +205,7 @@ export async function writeArchiveSnapshot(input: { projection: RuntimeProjectio
     workItemId: input.projection.workItemId,
     closedAt: input.closedAt,
     workspaceTreeDigest: input.workspaceTreeDigest,
+    artifactTreeDigest: input.artifactTreeDigest,
     terminalEventHash: input.projection.lastEventHash,
     projection: publicProjection,
   };
@@ -476,8 +478,9 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     const applicationClose = recovered.evidence[applicationCloseEvidenceKey] as Partial<ApplicationCloseEvidence> | undefined;
     const closedAt = value?.closedAt ?? applicationClose?.closedAt;
     const workspaceTreeDigest = value?.workspaceTreeDigest ?? applicationClose?.workspaceTreeDigest;
-    if (typeof closedAt !== "string" || typeof workspaceTreeDigest !== "string") throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "关闭事件缺少归档重建数据。");
-    await writeArchiveSnapshot({ projection: recovered, worktree: path.join(resolved.repositoryRoot, resolved.worktree), closedAt, workspaceTreeDigest });
+    const artifactTreeDigest = applicationClose?.artifactTreeDigest;
+    if (typeof closedAt !== "string" || typeof workspaceTreeDigest !== "string" || typeof artifactTreeDigest !== "string") throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "关闭事件缺少归档重建数据。");
+    await writeArchiveSnapshot({ projection: recovered, worktree: path.join(resolved.repositoryRoot, resolved.worktree), closedAt, workspaceTreeDigest, artifactTreeDigest });
   }
   return recovered;
   });

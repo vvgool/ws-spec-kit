@@ -1,4 +1,5 @@
 import { sha256 } from "../domain/digests.js";
+import { isRepositoryRelativePattern, matchesRepositoryPath } from "../domain/repository-path.js";
 import { ExpressionError, type ExpressionAst } from "./expressions/ast.js";
 import { parseExpression } from "./expressions/parser.js";
 import type {
@@ -651,9 +652,7 @@ function validateDocumentationSafety(workflow: WorkflowPackage["workflow"], step
 }
 
 function validRelativePathPattern(pattern: string): boolean {
-  if (pattern === "" || pattern.includes("\0") || pattern.includes("\\") || pattern.startsWith("/") || /^[A-Za-z]:/.test(pattern)) return false;
-  const segments = pattern.split("/");
-  return !segments.some((segment) => segment === "" || segment === "." || segment === "..");
+  return isRepositoryRelativePattern(pattern);
 }
 
 type DocumentationPathClass = "readme" | "changelog" | "docs-md" | "docs-mdx" | "docs-txt";
@@ -667,24 +666,11 @@ function documentationPathClass(pattern: string): DocumentationPathClass | undef
   return undefined;
 }
 
-function glob(pattern: string): RegExp {
-  let source = "";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const character = pattern[index]!;
-    if (character === "*") {
-      if (pattern[index + 1] === "*") { source += ".*"; index += 1; }
-      else source += "[^/]*";
-    } else if (character === "?") source += "[^/]";
-    else source += character.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-  }
-  return new RegExp(`^${source}$`, "i");
-}
-
 function containsPattern(parent: string, child: string): boolean {
   if (parent === child) return true;
   if (documentationPathClass(parent) !== documentationPathClass(child)) return false;
   if (defaultDocumentationPaths.includes(parent)) return true;
-  if (!/[?*]/.test(child)) return glob(parent).test(child);
+  if (!/[?*]/.test(child)) return matchesRepositoryPath(parent, child);
   return false;
 }
 

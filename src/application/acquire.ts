@@ -1,4 +1,4 @@
-import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest } from "../domain/digests.js";
+import { computeArtifactTreeDigest, computeWorkspaceSnapshot, computeWorkspaceTreeDigest } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import type { AgentAction, AcquireInput, StepFailureCode, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../protocol/work-package.js";
@@ -7,7 +7,7 @@ import { revalidateGlobalSkillLock } from "../registry/skills/resolver.js";
 import { validate } from "../schemas/index.js";
 import { applicationCloseEvidenceKey, recoverControlPlane, type ApplicationCloseEvidence, type RuntimeClaim, type RuntimeProjection } from "../storage/control-plane.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
-import { closeChecklist, type CloseDecision } from "../engine/archive.js";
+import { closeChecklistForWorktree, type CloseDecision } from "../engine/archive.js";
 import { conditionScope, evaluateCondition } from "../engine/control/condition.js";
 import {
   advanceLoop,
@@ -640,14 +640,19 @@ export async function acquireNextLocked(input: {
     });
   }
   if (step.uses === "control.close") {
-    const workspaceTreeDigest = await computeWorkspaceTreeDigest(state.worktree);
-    const decision = closeChecklist({
+    const [workspaceTreeDigest, artifactTreeDigest] = await Promise.all([
+      computeWorkspaceTreeDigest(state.worktree),
+      computeArtifactTreeDigest(state.worktree),
+    ]);
+    const decision = await closeChecklistForWorktree({
       profile,
       projection,
       gatePolicy: state.snapshot.gatePolicy,
       gates: state.snapshot.gates,
       workspaceTreeDigest,
       configDigest: state.item.execution.configDigest,
+      worktree: state.worktree,
+      source: state.snapshot.source,
     });
     if (!decision.allowed) {
       let workItem = transitionWorkItem(projection.workItem, { type: "transition", to: "verifying" });
@@ -688,6 +693,7 @@ export async function acquireNextLocked(input: {
     const applicationClose: ApplicationCloseEvidence = {
       closedAt: now.toISOString(),
       workspaceTreeDigest,
+      artifactTreeDigest,
     };
     projection = {
       ...projection,

@@ -4,6 +4,7 @@ import * as canonicalizeModule from "canonicalize";
 import { parse } from "yaml";
 
 import { sha256 } from "./digests.js";
+import { resolveRepositoryRegularFile } from "./repository-path.js";
 import { SchemaValidationError, validate } from "../schemas/index.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
@@ -205,11 +206,14 @@ export async function verifyArtifact(
   expected: ArtifactExpectation,
   options: { allowUnregisteredType?: boolean } = {},
 ): Promise<ArtifactReference> {
-  const [root, actual] = await Promise.all([realpath(expected.repositoryRoot), realpath(filename)]);
-  const relative = path.relative(root, actual);
+  const root = await realpath(expected.repositoryRoot);
+  const relative = path.relative(path.resolve(expected.repositoryRoot), path.resolve(filename));
   if (relative.startsWith("..") || path.isAbsolute(relative) || relative === "") {
     throw new ArtifactError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 路径越出仓库边界。");
   }
+  let actual: string;
+  try { actual = await resolveRepositoryRegularFile(root, relative.split(path.sep).join("/")); }
+  catch { throw new ArtifactError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 必须是仓库内的普通文件，且不能经过符号链接。"); }
   const artifact = await readArtifact(actual);
   const { metadata } = artifact;
   if (

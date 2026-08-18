@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import * as canonicalizeModule from "canonicalize";
 
 import { loadApplicationState, type SnapshotProfile } from "../../src/application/state.js";
+import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { sha256 } from "../../src/domain/digests.js";
-import { closeChecklist } from "../../src/engine/archive.js";
+import { closeChecklist, closeChecklistForWorktree } from "../../src/engine/archive.js";
+import { approvalBindingDigest } from "../../src/engine/approvals.js";
 import type { TrustedEvidence } from "../../src/engine/tdd/types.js";
 import {
   evidenceProjectionKey,
@@ -394,6 +397,76 @@ test("Close 对 Approval 已规范化的多 Artifact 顺序不产生伪差异", 
   });
 
   assert.deepEqual(decision.missing.filter(({ category }) => category === "approval"), []);
+});
+
+test("Close 重新读盘验证 required 和 approved Artifact", async () => {
+  const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-artifact-"));
+  const selected = profile("quick", []);
+  const body = "# Proposal\n\nApproved content.\n";
+  const metadata = {
+    artifactType: "proposal",
+    schemaVersion: 1 as const,
+    workItemId: "WSS-CLOSE",
+    stageId: "author-proposal",
+    attemptId: "attempt-author",
+    revision: 1,
+  };
+  const reference = {
+    artifactType: "proposal",
+    schemaVersion: 1,
+    path: ".wsspec/work-items/WSS-CLOSE/artifacts/proposal.md",
+    revision: 1,
+    contentHash: computeArtifactContentHash(metadata, body),
+    mediaType: "text/markdown",
+  };
+  const filename = path.join(worktree, reference.path);
+  await mkdir(path.dirname(filename), { recursive: true });
+  const validArtifact = `---\nartifactType: proposal\nschemaVersion: 1\nworkItemId: WSS-CLOSE\nstageId: author-proposal\nattemptId: attempt-author\nrevision: 1\ncontentHash: ${reference.contentHash}\n---\n${body}`;
+  await writeFile(filename, validArtifact, "utf8");
+  const current = approvalReadyProjection({
+    artifacts: [reference],
+    artifactPath: reference.path,
+    contentHash: approvalBindingDigest({ stageId: "author-proposal", attemptId: "attempt-author", artifacts: [reference] }),
+  });
+  const context = current.contexts["author-proposal"] as { result: { artifacts: unknown[] } };
+  context.result.artifacts = [reference];
+  const input = {
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+    worktree,
+    source: {
+      artifactType: "requirement-source",
+      schemaVersion: 1,
+      path: ".wsspec/work-items/WSS-CLOSE/source/source.json",
+      revision: 1,
+      contentHash: "sha256:source",
+      mediaType: "application/json",
+    },
+  };
+
+  assert.equal((await closeChecklistForWorktree(input)).allowed, true);
+
+  await writeFile(filename, "tampered\n", "utf8");
+  assert.deepEqual((await closeChecklistForWorktree(input)).missing.filter(({ category }) => category === "artifact" || category === "approval"), [
+    { category: "artifact", id: "proposal" },
+    { category: "approval", id: "author-proposal" },
+  ]);
+
+  await unlink(filename);
+  assert.equal((await closeChecklistForWorktree(input)).allowed, false);
+
+  await writeFile(filename, "---\nmalformed: true\n---\nbody\n", "utf8");
+  assert.equal((await closeChecklistForWorktree(input)).allowed, false);
+
+  const replacement = path.join(path.dirname(filename), "replacement.md");
+  await writeFile(replacement, validArtifact, "utf8");
+  await unlink(filename);
+  await symlink("replacement.md", filename);
+  assert.equal((await closeChecklistForWorktree(input)).allowed, false);
 });
 
 test("Close 不要求已跳过条件 Step 的 Artifact 或 Approval", () => {

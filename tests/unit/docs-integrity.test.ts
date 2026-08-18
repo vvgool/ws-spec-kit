@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -35,5 +35,25 @@ test("文档完整性 Gate 拒绝空正文、冲突标记、非法 UTF-8 和越�
   assert.equal(result.ok, false);
   assert.deepEqual(result.problems.map((problem) => problem.code).sort(), [
     "WSSPEC_DOCUMENTATION_SCOPE_VIOLATION", "WSSPEC_DOC_CONFLICT_MARKER", "WSSPEC_DOC_EMPTY", "WSSPEC_DOC_INVALID_UTF8",
+  ]);
+});
+
+test("文档完整性 Gate 拒绝 symlink 和非普通文件", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-docs-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "wsspec-docs-outside-"));
+  await mkdir(path.join(root, "docs", "directory.md"), { recursive: true });
+  await writeFile(path.join(outside, "outside.md"), "# Outside\n");
+  await symlink(path.join(outside, "outside.md"), path.join(root, "docs", "escape.md"));
+
+  const result = await checkDocumentationIntegrity({
+    root,
+    files: ["docs/escape.md", "docs/directory.md"],
+    allowedPaths: ["docs/**/*.md"],
+  });
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.problems.map(({ code, file }) => ({ code, file })), [
+    { code: "WSSPEC_DOCUMENTATION_FILE_INVALID", file: "docs/escape.md" },
+    { code: "WSSPEC_DOCUMENTATION_FILE_INVALID", file: "docs/directory.md" },
   ]);
 });

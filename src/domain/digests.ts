@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, readlink } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { lstat, readFile, readdir, readlink } from "node:fs/promises";
 import path from "node:path";
 
 import { repositoryRoot, runGitRaw } from "../storage/git.js";
@@ -16,14 +17,16 @@ export function sha256(content: string | Uint8Array): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
-export async function computeWorkspaceSnapshot(cwd: string): Promise<TreeEntry[]> {
-  const root = await repositoryRoot(cwd);
-  const output = await runGitRaw(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
-  const paths = output.split("\0")
-    .filter((candidate) => candidate !== "" && !candidate.startsWith(".wsspec/work-items/") && !candidate.startsWith(".wsspec/archive/"))
-    .sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
-  const entries: TreeEntry[] = [];
+function volatileRuntimePath(candidate: string): boolean {
+  return /^\.wsspec\/work-items\/[^/]+\/control-plane\/(?:runtime\.json|events\.jsonl|runtime\.lock)$/u.test(candidate);
+}
 
+function artifactPath(candidate: string): boolean {
+  return /^\.wsspec\/work-items\/[^/]+\/artifacts\//u.test(candidate);
+}
+
+async function snapshotPaths(root: string, paths: readonly string[]): Promise<TreeEntry[]> {
+  const entries: TreeEntry[] = [];
   for (const relativePath of paths) {
     const absolutePath = path.join(root, relativePath);
     try {
@@ -39,18 +42,62 @@ export async function computeWorkspaceSnapshot(cwd: string): Promise<TreeEntry[]
         });
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        entries.push({ path: relativePath, type: "deleted", mode: "deleted" });
-      } else {
-        throw error;
-      }
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") entries.push({ path: relativePath, type: "deleted", mode: "deleted" });
+      else throw error;
     }
   }
-
   return entries;
+}
+
+async function listedPaths(root: string): Promise<string[]> {
+  const output = await runGitRaw(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+  return output.split("\0").filter((candidate) => candidate !== "")
+    .sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+}
+
+async function artifactPaths(root: string): Promise<string[]> {
+  const itemRoot = path.join(root, ".wsspec", "work-items");
+  const result: string[] = [];
+  const walk = async (directory: string, relative: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    for (const entry of entries) {
+      const childRelative = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) await walk(path.join(directory, entry.name), childRelative);
+      else result.push(childRelative);
+    }
+  };
+  let items: Dirent[];
+  try { items = await readdir(itemRoot, { withFileTypes: true }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  items.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+  for (const item of items) {
+    if (!item.isDirectory()) continue;
+    const artifacts = path.join(itemRoot, item.name, "artifacts");
+    const relative = `.wsspec/work-items/${item.name}/artifacts`;
+    let stat;
+    try { stat = await lstat(artifacts); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+    if (stat.isDirectory()) await walk(artifacts, relative);
+    else result.push(relative);
+  }
+  return result.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+}
+
+export async function computeWorkspaceSnapshot(cwd: string): Promise<TreeEntry[]> {
+  const root = await repositoryRoot(cwd);
+  const paths = (await listedPaths(root)).filter((candidate) => !artifactPath(candidate)
+    && !volatileRuntimePath(candidate) && !candidate.startsWith(".wsspec/archive/"));
+  return snapshotPaths(root, paths);
 }
 
 export async function computeWorkspaceTreeDigest(cwd: string): Promise<string> {
   const entries = await computeWorkspaceSnapshot(cwd);
+  return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
+}
+
+export async function computeArtifactTreeDigest(cwd: string): Promise<string> {
+  const root = await repositoryRoot(cwd);
+  const entries = await snapshotPaths(root, await artifactPaths(root));
   return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
 }

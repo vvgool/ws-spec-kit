@@ -1,4 +1,5 @@
 import * as canonicalizeModule from "canonicalize";
+import path from "node:path";
 
 import { approvalBindingDigest } from "./approvals.js";
 import { completedReviewActors, implementationActors } from "./actor-roles.js";
@@ -14,6 +15,7 @@ import {
 import { parseTddCycleEvidence, parseTrustedEvidence } from "./tdd/red-gate.js";
 import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
+import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
 import type { ProjectGatePolicy } from "./compiler.js";
 import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
 
@@ -34,6 +36,11 @@ export interface CloseChecklistInput {
   gates: ApplicationSnapshot["gates"];
   workspaceTreeDigest: string;
   configDigest: string;
+}
+
+export interface WorktreeCloseChecklistInput extends CloseChecklistInput {
+  worktree: string;
+  source: ApplicationSnapshot["source"];
 }
 
 interface AttemptRecord {
@@ -302,4 +309,66 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
   missing.sort((left, right) => categoryOrder.get(left.category)! - categoryOrder.get(right.category)!
     || left.id.localeCompare(right.id));
   return { allowed: missing.length === 0, missing };
+}
+
+function sameArtifactReference(actual: ArtifactReference, expected: ApprovalArtifact): boolean {
+  return actual.artifactType === expected.artifactType
+    && actual.schemaVersion === expected.schemaVersion
+    && actual.path === expected.path
+    && actual.revision === expected.revision
+    && actual.contentHash === expected.contentHash
+    && (expected.mediaType === undefined || actual.mediaType === expected.mediaType);
+}
+
+async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInput): Promise<RuntimeProjection> {
+  const contexts = { ...input.projection.contexts };
+  for (const instance of effectiveStepInstances(input.profile, input.projection)) {
+    const attempt = instance.context;
+    if (attempt?.result?.status !== "completed" || typeof attempt.workPackage?.attemptId !== "string") continue;
+    const requiredTypes = new Set(instance.step.outputs.filter(({ required }) => required).map(({ artifact }) => artifact));
+    const approvalBound = Object.values(input.projection.approvals).some((approval) => approvalMatches(approval, instance));
+    const references = attempt.result.artifacts ?? [];
+    const verified: ApprovalArtifact[] = [];
+    const invalidRequiredTypes = new Set<string>();
+    for (const value of references) {
+      const reference = approvalArtifact(value);
+      if (reference === undefined) {
+        if (typeof value.artifactType === "string" && requiredTypes.has(value.artifactType)) invalidRequiredTypes.add(value.artifactType);
+        continue;
+      }
+      const targeted = requiredTypes.has(reference.artifactType) || approvalBound;
+      if (!targeted) {
+        verified.push(reference);
+        continue;
+      }
+      if (reference.artifactType === "requirement-source") {
+        if (sameValues(reference, input.source)) verified.push(reference);
+        else invalidRequiredTypes.add(reference.artifactType);
+        continue;
+      }
+      try {
+        const actual = await verifyArtifact(path.join(input.worktree, reference.path), {
+          repositoryRoot: input.worktree,
+          artifactType: reference.artifactType,
+          workItemId: input.projection.workItemId,
+          stageId: instance.stepInstanceId,
+          attemptId: attempt.workPackage.attemptId,
+        }, { allowUnregisteredType: true });
+        if (!sameArtifactReference(actual, reference)) throw new Error("Artifact reference mismatch");
+        verified.push(reference);
+      } catch {
+        if (requiredTypes.has(reference.artifactType)) invalidRequiredTypes.add(reference.artifactType);
+      }
+    }
+    const filtered = verified.filter(({ artifactType }) => !invalidRequiredTypes.has(artifactType));
+    contexts[instance.stepInstanceId] = {
+      ...attempt,
+      result: { ...attempt.result, artifacts: filtered },
+    };
+  }
+  return { ...input.projection, contexts };
+}
+
+export async function closeChecklistForWorktree(input: WorktreeCloseChecklistInput): Promise<CloseDecision> {
+  return closeChecklist({ ...input, projection: await projectionWithVerifiedArtifacts(input) });
 }

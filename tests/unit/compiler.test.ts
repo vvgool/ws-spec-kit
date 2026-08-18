@@ -544,3 +544,13 @@ test("documentation glob narrowing rejects broader wildcard placement", () => {
     }), "WSSPEC_CHANGE_POLICY_EXPANSION");
   }
 });
+
+test("documentation glob narrowing shares zero-directory globstar semantics", () => {
+  const resolved = resolveChangePolicy({
+    workflowId: "documentation-delivery",
+    policy: { kind: "documentation-only", allowedPaths: ["docs/**/*.md"] },
+    documentationAllowedPaths: ["docs/readme.md"],
+  });
+
+  assert.deepEqual(resolved.allowedPaths, ["docs/readme.md"]);
+});
