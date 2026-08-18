@@ -18,6 +18,7 @@ import {
   retainOnlyReadyStage,
   submitPackage,
   worktreeFor,
+  writeReviewArtifact,
 } from "./helpers/control-runtime.js";
 
 async function writeArtifact(input: {
@@ -349,6 +350,113 @@ test("失败 Attempt 的敏感实际改动与 Retry 状态原子升档，并在�
   await writeFile(path.join(durable.controlPlane, "runtime.json"), "not-json\n", "utf8");
   const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
   assert.equal(recovered.profile.selected, "governed");
+});
+
+test("当前 Review 属于升档失效集合时，可重试失败原子保留最终状态并支持幂等重试恢复", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证当前 Review 失败升档" }, profile: "quick" });
+  await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-current-review-upgrade",
+    operationInput: {},
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        contexts: { ...current.contexts, implement: { actor: "implementer", result: { status: "completed" } } },
+      },
+      value: null,
+    }),
+  });
+  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  await mkdir(path.join(worktree, "src/auth"), { recursive: true });
+  await writeFile(path.join(worktree, "src/auth/session.ts"), "export const session = true;\n", "utf8");
+  const failed = { ...failedResult(review), modifiedFiles: ["src/auth/session.ts"] };
+
+  const [first, duplicate] = await Promise.all([
+    submitPackage(fixture, review, failed),
+    submitPackage(fixture, review, failed),
+  ]);
+  assert.deepEqual(duplicate, first);
+  await assert.rejects(
+    submitPackage(fixture, review, { ...failed, summary: "conflicting failure" }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_IDEMPOTENCY_CONFLICT",
+  );
+  const durable = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(durable.profile.selected, "governed");
+  assert.deepEqual(durable.profile.riskSignals.modifiedPaths, ["src/auth/session.ts"]);
+  assert.equal(durable.stages["review-fix"]?.status, "failed");
+  assert.equal(durable.retries[review.stepId]?.status, "ready");
+  assert.equal(durable.claims["review-fix"], undefined);
+  assert.equal((durable.contexts[review.stepId] as { result?: { status?: string } } | undefined)?.result?.status, "failed");
+  assert.equal((await readEvents(durable.controlPlane)).filter(({ eventType }) => eventType === "profile.upgraded").length, 1);
+
+  const retry = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "retry-reviewer" }));
+  assert.equal(retry.stepId, review.stepId);
+  await submitPackage(fixture, retry, failedResult(retry));
+  const retried = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(retried.profile.selected, "governed");
+  assert.equal(retried.retries[review.stepId]?.status, "ready");
+
+  await writeFile(path.join(retried.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+  assert.equal(recovered.profile.selected, "governed");
+  assert.equal(recovered.stages["review-fix"]?.status, "failed");
+  assert.equal(recovered.retries[review.stepId]?.status, "ready");
+  assert.equal(recovered.claims["review-fix"], undefined);
+});
+
+test("当前 Review 属于升档失效集合时，永久失败原子持久化 Profile 与阻塞终态", async () => {
+  const fixture = await controlRuntimeFixture({ validatedFailureCode: "WSSPEC_STEP_INPUT_INVALID" });
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证当前 Review 永久失败升档" }, profile: "quick" });
+  await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-current-review-permanent-failure",
+    operationInput: {},
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        contexts: { ...current.contexts, implement: { actor: "implementer", result: { status: "completed" } } },
+      },
+      value: null,
+    }),
+  });
+  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const reviewArtifact = await writeReviewArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    workPackage: review,
+    approved: false,
+    filename: "permanent-failure-review.md",
+  });
+  const fix = requireExecute(await submitPackage(fixture, review, completedResult(review, [reviewArtifact])));
+  const verify = requireExecute(await submitPackage(fixture, fix));
+  await mkdir(path.join(worktree, "src/auth"), { recursive: true });
+  await writeFile(path.join(worktree, "src/auth/session.ts"), "export const session = true;\n", "utf8");
+
+  const action = await submitPackage(fixture, verify, { ...failedResult(verify), modifiedFiles: ["src/auth/session.ts"] });
+  assert.equal(action.action, "blocked");
+  const durable = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(durable.profile.selected, "governed");
+  assert.deepEqual(durable.profile.riskSignals.modifiedPaths, ["src/auth/session.ts"]);
+  assert.equal(durable.stages["review-fix"]?.status, "failed");
+  assert.equal(durable.retries[verify.stepId], undefined);
+  assert.equal(durable.claims["review-fix"], undefined);
+  assert.equal((durable.contexts[verify.stepId] as { result?: { failureCode?: string } } | undefined)?.result?.failureCode, "WSSPEC_STEP_INPUT_INVALID");
+
+  await writeFile(path.join(durable.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+  assert.equal(recovered.profile.selected, "governed");
+  assert.equal(recovered.stages["review-fix"]?.status, "failed");
+  assert.equal(recovered.retries[verify.stepId], undefined);
+  assert.equal(recovered.claims["review-fix"], undefined);
 });
 
 test("Auto 在 Intake low/high 后保持 provisional，并由 Explore 合并累计 high 后首次选档", async () => {

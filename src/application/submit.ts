@@ -207,26 +207,39 @@ function changedProfileSteps(state: ApplicationState, decision: ProfileDecision)
     .map(({ id }) => id);
 }
 
-function activateSelectedProfile(state: ApplicationState, projection: RuntimeProjection, decision: ProfileDecision): {
+function activateSelectedProfile(
+  state: ApplicationState,
+  projection: RuntimeProjection,
+  decision: ProfileDecision,
+  options: { preserveCurrentStep?: string } = {},
+): {
   state: ApplicationState;
   projection: RuntimeProjection;
   invalidatedStepIds: string[];
 } {
   const invalidatedStepIds = [...new Set([...decision.invalidatedStepIds, ...changedProfileSteps(state, decision)])].sort();
-  const applied = applyProfileDecision(projection, { ...decision, invalidatedStepIds });
+  const applied = applyProfileDecision(projection, { ...decision, invalidatedStepIds }, options);
   const profile = state.snapshot.profiles[decision.selected];
   const initial = deriveInitialStages(profile);
   const stages = { ...applied.stages };
   for (const stepId of invalidatedStepIds) {
     if (stages[stepId]?.status === "invalidated" && initial[stepId] !== undefined) stages[stepId] = initial[stepId];
   }
+  const loops = { ...applied.loops };
+  if (options.preserveCurrentStep !== undefined && loops[options.preserveCurrentStep] !== undefined) {
+    const selectedStep = profile.steps.find(({ id }) => id === options.preserveCurrentStep);
+    if (selectedStep?.maxIterations !== undefined) {
+      loops[options.preserveCurrentStep] = { ...loops[options.preserveCurrentStep]!, maxIterations: selectedStep.maxIterations };
+    }
+  }
+  const activated = { ...applied, stages, loops };
   return {
     state: {
       ...state,
-      projection: { ...applied, stages },
+      projection: activated,
       snapshot: { ...state.snapshot, selectedProfile: decision.selected, changePolicy: profile.changePolicy },
     },
-    projection: { ...applied, stages },
+    projection: activated,
     invalidatedStepIds,
   };
 }
@@ -288,6 +301,12 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       };
       if (target.internal) projection.contexts[target.stepInstanceId] = record;
       delete projection.claims[target.stageId];
+      const currentRetry = result.status === "failed"
+        ? ownProjection(projection.retries, target.stepInstanceId)
+        : undefined;
+      if (result.status === "failed" && currentRetry === undefined) {
+        throw new ApplicationSubmitError("WSSPEC_RETRY_PROJECTION_INVALID", `步骤 ${target.stepInstanceId} 缺少重试投影。 `);
+      }
       const profileEvaluation = evaluateSubmitProfileDecision({
         projection,
         result,
@@ -299,7 +318,12 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       let invalidatesTarget = false;
       if (decision !== undefined) {
         const selectedChanged = decision.selected !== decision.previous;
-        const activated = activateSelectedProfile(runtimeState, projection, decision);
+        const activated = activateSelectedProfile(
+          runtimeState,
+          projection,
+          decision,
+          result.status === "failed" ? { preserveCurrentStep: target.stageId } : {},
+        );
         projection = activated.projection;
         runtimeState = activated.state;
         profileInvalidatedStepIds = activated.invalidatedStepIds;
@@ -309,8 +333,6 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       if (result.status === "failed") {
         const running = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "running" });
         projection.stages[target.stageId] = transitionStage(running, { type: "transition", to: "failed" });
-        const retry = ownProjection(projection.retries, target.stepInstanceId);
-        if (retry === undefined) throw new ApplicationSubmitError("WSSPEC_RETRY_PROJECTION_INVALID", `步骤 ${target.stepInstanceId} 缺少重试投影。 `);
         const failureCode = result.failureCode!;
         if (!isRetryableStepFailure(failureCode)) {
           delete projection.retries[target.stepInstanceId];
@@ -319,7 +341,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
             value: { action: "blocked", problems: [stepFailureProblem(failureCode, result.summary)] } satisfies AgentAction,
           };
         }
-        const failedRetry = failRetry(retry);
+        const failedRetry = failRetry(currentRetry!);
         projection.retries[target.stepInstanceId] = failedRetry;
         return {
           projection,

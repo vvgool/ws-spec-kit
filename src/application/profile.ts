@@ -57,7 +57,11 @@ function evidenceDependsOnStep(value: unknown, stepIds: ReadonlySet<string>, dep
   return Object.values(record).some((item) => evidenceDependsOnStep(item, stepIds, depth + 1));
 }
 
-export function applyProfileDecision(projection: RuntimeProjection, decision: ProfileDecision): RuntimeProjection {
+export function applyProfileDecision(
+  projection: RuntimeProjection,
+  decision: ProfileDecision,
+  options: { preserveCurrentStep?: string } = {},
+): RuntimeProjection {
   if (decision.previous !== projection.profile.selected) {
     throw new ProfileRuntimeError("WSSPEC_PROFILE_DECISION_STALE", "Profile 决策的 previous 与当前运行投影不一致。");
   }
@@ -66,7 +70,8 @@ export function applyProfileDecision(projection: RuntimeProjection, decision: Pr
   }
 
   const upgraded = strength[decision.selected] > strength[decision.previous];
-  const stepIds = new Set(upgraded ? decision.invalidatedStepIds : []);
+  const stepIds = new Set((upgraded ? decision.invalidatedStepIds : [])
+    .filter((stepId) => stepId !== options.preserveCurrentStep));
   const stages = { ...projection.stages };
   for (const stepId of stepIds) {
     const stage = stages[stepId];
