@@ -4,10 +4,11 @@ import path from "node:path";
 import { parse } from "yaml";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
+import { isRepositoryRelativePattern, matchesRepositoryPath } from "../domain/repository-path.js";
 import { validate } from "../schemas/index.js";
 import { mutateControlPlane } from "./scheduler.js";
 import { loadApplicationState, selectedProfile, type SnapshotStep } from "../application/state.js";
-import { fixedGateCommandDigest, isTestPath, parseTrustedEvidence, testFileManifest } from "./tdd/red-gate.js";
+import { fixedGateCommandDigest, parseTrustedEvidence, testAssetManifest, testFileManifest } from "./tdd/red-gate.js";
 import { testPathRules, type FixedTestGate, type TddCycleEvidence, type TrustedEvidence } from "./tdd/types.js";
 import { VerificationError } from "./tdd/types.js";
 
@@ -25,6 +26,8 @@ export async function fixedTestGateForState(state: Pick<import("../application/s
   const config = object(parse(await readFile(path.join(state.itemRoot, "snapshot", "config.yaml"), "utf8")));
   const gate = object(object(object(config?.quality)?.gates)?.test);
   const configuredPathRules = object(config?.testing)?.pathRules;
+  const testAssetPaths = object(config?.testing)?.testAssetPaths;
+  const productPaths = object(config?.testing)?.productPaths;
   const argv = gate?.command;
   const timeoutSeconds = gate?.timeoutSeconds;
   const inheritEnv = gate?.inheritEnv;
@@ -36,6 +39,8 @@ export async function fixedTestGateForState(state: Pick<import("../application/s
     || (env !== undefined && object(env) === undefined)
     || !Array.isArray(configuredPathRules) || configuredPathRules.length === 0
     || !configuredPathRules.every((value) => typeof value === "string" && (testPathRules as readonly string[]).includes(value))
+    || !Array.isArray(testAssetPaths) || testAssetPaths.length === 0 || !testAssetPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
+    || !Array.isArray(productPaths) || productPaths.length === 0 || !productPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
     || reporter?.type !== "node-test" || reporter.version !== 1) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 快照缺少固定且完整的 test Gate。 ");
   }
@@ -50,6 +55,8 @@ export async function fixedTestGateForState(state: Pick<import("../application/s
       return [name, value];
     })),
     testPathRules: configuredPathRules as FixedTestGate["testPathRules"],
+    testAssetPaths: testAssetPaths as string[],
+    productPaths: productPaths as string[],
     reporter: { type: "node-test", version: 1 },
   };
 }
@@ -94,13 +101,18 @@ export function assertImplementHasTrustedRed(input: {
   }
   return Promise.all([
     testFileManifest(input.worktree, evidence.testPaths, evidence.testPathRules),
+    testAssetManifest(input.worktree, evidence.testAssets.map(({ path }) => path)),
     computeWorkspaceTreeDigest(input.worktree),
     input.gate === undefined ? Promise.resolve(evidence.commandDigest) : fixedGateCommandDigest(input.gate, input.worktree),
-  ]).then(([manifest, workspaceDigest, commandDigest]) => {
+  ]).then(([manifest, assets, workspaceDigest, commandDigest]) => {
     if (evidence.commandId !== input.commandId || evidence.commandDigest !== commandDigest) {
       throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 的命令、环境或可执行文件已变化。 ");
     }
-    if (manifest.digest !== evidence.testPathsDigest || (input.requireWorkspaceMatch === true && workspaceDigest !== evidence.workspaceDigest)) {
+    if (manifest.digest !== evidence.testPathsDigest
+      || assets.digest !== evidence.testAssetsDigest
+      || (input.gate !== undefined && (JSON.stringify(input.gate.testAssetPaths) !== JSON.stringify(evidence.testAssetPaths)
+        || JSON.stringify(input.gate.productPaths) !== JSON.stringify(evidence.productPaths)))
+      || (input.requireWorkspaceMatch === true && workspaceDigest !== evidence.workspaceDigest)) {
       throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red 测试内容已修改或删除。 ");
     }
   });
@@ -110,10 +122,10 @@ export function evaluateReviewFixEvidence(input: {
   modifiedFiles: readonly string[];
   cycle: TddCycleEvidence;
 }): { action: "append-green"; commandId: string } | { action: "restart-cycle"; nextStepId: "write-tests" } {
-  const tests = new Set(input.cycle.testPaths);
+  const tests = new Set(input.cycle.testAssets.map(({ path }) => path));
   return input.modifiedFiles.some((filename) => {
     const normalized = filename.replaceAll("\\", "/");
-    return tests.has(normalized) || isTestPath(normalized, input.cycle.testPathRules);
+    return tests.has(normalized) || input.cycle.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, normalized));
   })
     ? { action: "restart-cycle", nextStepId: "write-tests" }
     : { action: "append-green", commandId: input.cycle.commandId };

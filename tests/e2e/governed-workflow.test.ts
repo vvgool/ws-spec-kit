@@ -34,10 +34,13 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.notEqual(review.actor, implementation.actor);
   for (const target of ["issue", "knowledge"] as const) {
     const receipt = result.recovered.evidence[`external-receipt:${target}`] as Record<string, unknown>;
-    assert.deepEqual(
-      { kind: receipt.kind, target: receipt.target, status: receipt.status, readBack: receipt.readBack },
-      { kind: "external-receipt", target, status: "confirmed", readBack: true },
-    );
+    assert.equal(receipt.kind, "external-receipt");
+    assert.equal(receipt.target, target);
+    assert.equal(receipt.status, "confirmed");
+    assert.equal(receipt.readBackStatus, "confirmed");
+    assert.equal(receipt.externalWorkItemId, started.workItemId);
+    assert.equal(receipt.stableId, `local:${target}`);
+    assert.equal(receipt.readBackContentDigest, receipt.publishedContentDigest);
     const external = JSON.parse(await readFile(path.join(fixture.externalRoot, `${target}.json`), "utf8")) as { workItemId: string };
     assert.equal(external.workItemId, started.workItemId);
   }
@@ -66,8 +69,13 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.ok(decisions.every(({ status, requestedBy, decidedBy, decidedAt }) => status === "approved" && requestedBy !== undefined && decidedBy === "fixture-owner" && decidedAt !== undefined));
   assert.ok(new Set(Object.values(audit.projection.contexts).map(({ actor }) => actor)).has("independent-reviewer"));
   for (const target of ["issue", "knowledge"] as const) {
-    const publishing = audit.projection.evidence[`external-receipt:${target}`] as { target?: string; status?: string; readBack?: boolean };
-    assert.deepEqual(publishing, { ...publishing, target, status: "confirmed", readBack: true });
+    const publishing = audit.projection.evidence[`external-receipt:${target}`] as Record<string, unknown>;
+    assert.equal(publishing.target, target);
+    assert.equal(publishing.status, "confirmed");
+    assert.equal(publishing.readBackStatus, "confirmed");
+    assert.equal(publishing.externalWorkItemId, started.workItemId);
+    assert.equal(publishing.stableId, `local:${target}`);
+    assert.equal(publishing.readBackContentDigest, publishing.publishedContentDigest);
   }
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
 });

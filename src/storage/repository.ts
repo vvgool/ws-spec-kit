@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ulid } from "ulid";
 
-import { testPathRules } from "../engine/tdd/types.js";
+import { defaultProductPaths, defaultTestAssetPaths, testPathRules } from "../engine/tdd/types.js";
 import { parse, stringify } from "yaml";
 
 import type { RepositoryId } from "../domain/ids.js";
@@ -124,7 +124,7 @@ export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   await writeFileAtomic(filename, stringify({ version: 1, repositoryId }, { lineWidth: 0 }));
   await writeDefaultIfMissing(path.join(root, ".wsspec", "config.yaml"), stringify({
     version: 1,
-    testing: { pathRules: [...testPathRules] },
+    testing: { pathRules: [...testPathRules], testAssetPaths: [...defaultTestAssetPaths], productPaths: [...defaultProductPaths] },
   }, { lineWidth: 0 }));
   await writeDefaultIfMissing(path.join(root, ".wsspec", "workflow.yaml"), stringify({
     version: 1,

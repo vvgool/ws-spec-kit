@@ -32,7 +32,14 @@ test("repository initialization creates a versioned Application selection config
   await initRepository(root);
   const config = parse(await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8"));
   const workflow = parse(await readFile(path.join(root, ".wsspec", "workflow.yaml"), "utf8"));
-  assert.deepEqual(config, { version: 1, testing: { pathRules: ["node", "java", "ruby", "dotnet"] } });
+  assert.deepEqual(config, {
+    version: 1,
+    testing: {
+      pathRules: ["node", "java", "ruby", "dotnet"],
+      testAssetPaths: ["test/**", "tests/**", "**/__tests__/**", "**/__snapshots__/**", "**/*.test.*", "**/*.spec.*"],
+      productPaths: ["src/**"],
+    },
+  });
   assert.deepEqual(validate("builtin.application-project-config.v1", config), config);
   assert.deepEqual(workflow, {
     version: 1,

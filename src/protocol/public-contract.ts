@@ -81,8 +81,9 @@ export const applicationPublicErrorGroups = {
     "WSSPEC_RISK_RULE_INVALID", "WSSPEC_RISK_WORKFLOW_INVALID", "WSSPEC_LOOP_PROJECTION_INVALID", "WSSPEC_RETRY_PROJECTION_INVALID",
     "WSSPEC_STAGE_NOT_FOUND", "WSSPEC_STATE_TRANSITION_FORBIDDEN",
   ],
-  verification: [
-    "WSSPEC_CLOSE_CHECKLIST_INCOMPLETE", "WSSPEC_EVIDENCE_ATTEMPT_MISMATCH", "WSSPEC_EVIDENCE_HASH_MISMATCH",
+  close: ["WSSPEC_CLOSE_CHECKLIST_INCOMPLETE"],
+  evidenceIngestion: [
+    "WSSPEC_EVIDENCE_ATTEMPT_MISMATCH", "WSSPEC_EVIDENCE_HASH_MISMATCH",
     "WSSPEC_EVIDENCE_INVALID", "WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT", "WSSPEC_EVIDENCE_STALE", "WSSPEC_GATE_NOT_REQUIRED",
   ],
   tdd: [
@@ -159,11 +160,11 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
     "compiler", "executor", "source", "workItem", "runtime", "start",
   ],
-  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "verification", "tdd"],
-  submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "verification", "tdd"],
+  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "close", "tdd"],
+  submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "tdd"],
   decide: [
     "internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit",
-    "approval", "verification", "workflowPackage", "workflowTrust",
+    "approval", "workflowPackage", "workflowTrust",
   ],
   inspect: ["internal", "arguments", "repository", "schema", "snapshot", "workItem"],
   "workflow list": ["internal", "arguments", "builtin"],

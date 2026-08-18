@@ -15,6 +15,7 @@ export const schemaIds = [
   "builtin.tdd-trusted-evidence.v1",
   "builtin.tdd-cycle-evidence.v1",
   "builtin.tdd-node-test-report.v1",
+  "builtin.external-receipt.v1",
   "builtin.artifact.v1",
 ] as const;
 
@@ -263,9 +264,11 @@ function applicationProjectConfigSchema(id: "builtin.application-project-config.
       testing: {
         type: "object",
         additionalProperties: false,
-        required: ["pathRules"],
+        required: ["pathRules", "testAssetPaths", "productPaths"],
         properties: {
           pathRules: { type: "array", minItems: 1, uniqueItems: true, items: testPathRuleSchema },
+          testAssetPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
+          productPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
         },
       },
       publishing: {
@@ -520,7 +523,7 @@ export const schemas = {
     $id: "builtin.tdd-trusted-evidence.v1",
     type: "object",
     additionalProperties: false,
-    required: ["evidenceId", "level", "phase", "taskId", "stepId", "commandId", "commandDigest", "exitCode", "failedTests", "testPaths", "testFiles", "testPathsDigest", "testPathRules", "workspaceDigest", "summary"],
+    required: ["evidenceId", "level", "phase", "taskId", "stepId", "commandId", "commandDigest", "exitCode", "failedTests", "testPaths", "testFiles", "testPathsDigest", "testPathRules", "testAssets", "testAssetsDigest", "testAssetPaths", "productPaths", "workspaceDigest", "summary"],
     properties: {
       evidenceId: { type: "string", pattern: "^evidence-[a-f0-9]{64}$" },
       level: { const: "trusted" },
@@ -540,6 +543,15 @@ export const schemas = {
       },
       testPathsDigest: { type: "string", pattern: digestPattern },
       testPathRules: { type: "array", minItems: 1, uniqueItems: true, items: testPathRuleSchema },
+      testAssets: {
+        type: "array", minItems: 1, items: {
+          type: "object", additionalProperties: false, required: ["path", "digest"],
+          properties: { path: { type: "string", minLength: 1 }, digest: { type: "string", pattern: digestPattern } },
+        },
+      },
+      testAssetsDigest: { type: "string", pattern: digestPattern },
+      testAssetPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
+      productPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
       workspaceDigest: { type: "string", pattern: digestPattern },
       summary: { type: "string", maxLength: 8192 },
     },
@@ -549,15 +561,42 @@ export const schemas = {
     $id: "builtin.tdd-cycle-evidence.v1",
     type: "object",
     additionalProperties: false,
-    required: ["taskId", "testPaths", "testPathRules", "commandId", "redEvidenceId", "greenEvidenceId"],
+    required: ["taskId", "testPaths", "testPathRules", "testAssets", "testAssetsDigest", "testAssetPaths", "productPaths", "commandId", "redEvidenceId", "greenEvidenceId"],
     properties: {
       taskId: { type: "string", pattern: workItemIdPattern },
       testPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
       testPathRules: { type: "array", minItems: 1, uniqueItems: true, items: testPathRuleSchema },
+      testAssets: {
+        type: "array", minItems: 1, items: {
+          type: "object", additionalProperties: false, required: ["path", "digest"],
+          properties: { path: { type: "string", minLength: 1 }, digest: { type: "string", pattern: digestPattern } },
+        },
+      },
+      testAssetsDigest: { type: "string", pattern: digestPattern },
+      testAssetPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
+      productPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
       commandId: { type: "string", pattern: idPattern },
       redEvidenceId: { type: "string", pattern: "^evidence-[a-f0-9]{64}$" },
       greenEvidenceId: { type: "string", pattern: "^evidence-[a-f0-9]{64}$" },
       refactorEvidenceId: { type: "string", pattern: "^evidence-[a-f0-9]{64}$" },
+    },
+  },
+  "builtin.external-receipt.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "builtin.external-receipt.v1",
+    type: "object",
+    additionalProperties: false,
+    required: ["version", "kind", "target", "stableId", "externalWorkItemId", "publishedContentDigest", "readBackContentDigest", "status", "readBackStatus"],
+    properties: {
+      version: { const: 1 },
+      kind: { const: "external-receipt" },
+      target: { enum: ["issue", "knowledge"] },
+      stableId: { type: "string", minLength: 1 },
+      externalWorkItemId: { type: "string", minLength: 1 },
+      publishedContentDigest: { type: "string", pattern: digestPattern },
+      readBackContentDigest: { type: "string", pattern: digestPattern },
+      status: { const: "confirmed" },
+      readBackStatus: { enum: ["confirmed", "stale", "failed"] },
     },
   },
   "builtin.tdd-node-test-report.v1": {

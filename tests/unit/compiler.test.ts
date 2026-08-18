@@ -356,6 +356,37 @@ test("Profiles cannot lower approval, Review or enabled-Step strength", async ()
   expectCompileError(() => compileWorkflow(excessiveReview.pkg, excessiveReview.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
 });
 
+test("Review-Fix safety follows actorRole semantics across renamed and multiple loops", async () => {
+  const renamed = await fixture("feature-delivery", "governed");
+  const loop = step(renamed.pkg, "review-fix");
+  loop.id = "audit-cycle";
+  for (const candidate of allSteps(renamed.pkg.workflow.steps)) {
+    if (candidate.needs !== undefined) candidate.needs = candidate.needs.map((id) => id === "review-fix" ? "audit-cycle" : id);
+  }
+  for (const definition of renamed.pkg.profiles.values()) {
+    definition.steps["audit-cycle"] = definition.steps["review-fix"]!;
+    delete definition.steps["review-fix"];
+  }
+  delete profile(renamed.pkg, "governed").steps["audit-cycle"]!.independentReviewActor;
+  expectCompileError(() => compileWorkflow(renamed.pkg, renamed.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+
+  const multiple = await fixture("feature-delivery", "governed");
+  const second = structuredClone(step(multiple.pkg, "review-fix"));
+  second.id = "security-audit";
+  second.needs = ["review-fix"];
+  assert.ok(second.steps);
+  second.steps = second.steps.map((child) => ({ ...child, id: `security-${child.id}` }));
+  multiple.pkg.workflow.steps.splice(-1, 0, second);
+  step(multiple.pkg, "close").needs = ["security-audit"];
+  for (const [profileId, definition] of multiple.pkg.profiles) {
+    definition.steps["security-audit"] = {
+      maxIterations: profileId === "quick" ? 1 : 2,
+      ...(profileId === "governed" ? {} : { independentReviewActor: false }),
+    };
+  }
+  expectCompileError(() => compileWorkflow(multiple.pkg, multiple.profile), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+});
+
 test("Quick documentation Profile may disable an optional publishing Step", async () => {
   const { pkg, profile: selected } = await fixture("documentation-delivery", "quick");
   profile(pkg, "quick").steps["update-wiki"] = { enabled: false };

@@ -6,6 +6,7 @@ import { parseApplicationSnapshot } from "../application/snapshot.js";
 import { deriveInitialStages } from "../application/initial-stages.js";
 import type { LoopProjection, RetryProjection, StageState, WorkItemState } from "../domain/states.js";
 import { sha256, type TreeEntry } from "../domain/digests.js";
+import { assertExternalReceipts } from "../domain/external-receipt.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { interruptedRetry } from "../engine/control/retry.js";
 import { emptyRuntimeRiskSignals, type RuntimeProfileProjection } from "../application/profile.js";
@@ -198,6 +199,7 @@ export async function readApplicationAnchor(cwd: string, workItemId: string): Pr
 }
 
 export async function writeArchiveSnapshot(input: { projection: RuntimeProjection; worktree: string; closedAt: string; workspaceTreeDigest: string; artifactTreeDigest: string }): Promise<void> {
+  assertExternalReceipts(input.projection.evidence, "WSSPEC_EVENT_CHAIN_INVALID");
   const { controlPlane: _controlPlane, ...publicProjection } = input.projection;
   const audit = {
     version: 1,
@@ -312,6 +314,7 @@ export function replayEvents(input: {
       const result = event.result as ProjectionEventResult;
       if (result.projection === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件 ${event.eventType} 缺少可重放投影。`);
       recovered = { ...recovered, ...result.projection };
+      assertExternalReceipts(recovered.evidence, "WSSPEC_EVENT_CHAIN_INVALID");
     }
     recovered.lastSequence = event.sequence;
     recovered.lastEventHash = event.eventHash;

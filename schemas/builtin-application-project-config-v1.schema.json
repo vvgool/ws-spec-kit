@@ -167,7 +167,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "pathRules"
+        "pathRules",
+        "testAssetPaths",
+        "productPaths"
       ],
       "properties": {
         "pathRules": {
@@ -181,6 +183,26 @@
               "ruby",
               "dotnet"
             ]
+          }
+        },
+        "testAssetPaths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "productPaths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
           }
         }
       }

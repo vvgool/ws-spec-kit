@@ -59,8 +59,10 @@ function nodeGate(_script = "", timeoutMs = 2_000): FixedTestGate {
     inheritEnv: [],
     env: {},
     testPathRules: ["node", "java", "ruby", "dotnet"],
+    testAssetPaths: ["tests/**"],
+    productPaths: ["src/**"],
     reporter: { type: "node-test", version: 1 },
-  };
+  } as FixedTestGate;
 }
 
 function featureGate(): FixedTestGate {
@@ -70,7 +72,11 @@ function featureGate(): FixedTestGate {
 async function configureGate(root: string, gate: FixedTestGate): Promise<void> {
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
     version: 1,
-    testing: { pathRules: gate.testPathRules },
+    testing: {
+      pathRules: gate.testPathRules,
+      testAssetPaths: (gate as FixedTestGate & { testAssetPaths: readonly string[] }).testAssetPaths,
+      productPaths: (gate as FixedTestGate & { productPaths: readonly string[] }).productPaths,
+    },
     quality: {
       gates: {
         test: {
@@ -431,6 +437,87 @@ test("deleting or weakening the Red test invalidates implement and Green evidenc
       redEvidence: red,
     }),
     (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+  );
+});
+
+test("trusted Red binds traced helper, fixture, snapshot, config and indirect imports", async () => {
+  const root = await workspace([
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    "import { expected } from './support/helper.mjs';",
+    "test('uses the complete test asset graph', async () => assert.equal(await expected(), 1));",
+    "",
+  ].join("\n"));
+  await mkdir(path.join(root, "tests", "support"), { recursive: true });
+  await mkdir(path.join(root, "tests", "fixtures"), { recursive: true });
+  await mkdir(path.join(root, "tests", "snapshots"), { recursive: true });
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), [
+    "import { createRequire } from 'node:module';",
+    "import config from '../test.config.mjs';",
+    "const require = createRequire(import.meta.url);",
+    "const { snapshot, product } = require('./reader.cjs');",
+    "export async function expected() {",
+    "  const { fixture } = await import('../fixtures/value.mjs');",
+    "  return product + fixture + snapshot + config.offset;",
+    "}",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(path.join(root, "tests", "support", "reader.cjs"), [
+    "const { readFileSync } = require('node:fs');",
+    "exports.snapshot = Number(readFileSync(new URL('../snapshots/value.txt', `file://${__filename}`), 'utf8'));",
+    "exports.product = Number(/value = (\\d+)/.exec(readFileSync('src/feature.mjs', 'utf8'))?.[1]);",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(path.join(root, "tests", "fixtures", "value.mjs"), "export const fixture = 0;\n", "utf8");
+  await writeFile(path.join(root, "tests", "snapshots", "value.txt"), "0\n", "utf8");
+  await writeFile(path.join(root, "tests", "test.config.mjs"), "export default { offset: 0 };\n", "utf8");
+  await git(root, "add", "tests", "src/feature.mjs");
+  await git(root, "commit", "-m", "test: seed traced test assets");
+
+  const gate = nodeGate();
+  const red = await recordRedEvidence(await redInput(root, gate));
+  const bound = red as TrustedEvidence & { testAssets: Array<{ path: string; digest: string }>; testAssetsDigest: string };
+  assert.deepEqual(bound.testAssets.map(({ path: filename }) => filename), [
+    "tests/feature.test.mjs",
+    "tests/fixtures/value.mjs",
+    "tests/snapshots/value.txt",
+    "tests/support/helper.mjs",
+    "tests/support/reader.cjs",
+    "tests/test.config.mjs",
+  ]);
+  assert.match(bound.testAssetsDigest, /^sha256:/u);
+
+  await writeFile(path.join(root, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
+  await assert.doesNotReject(assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }));
+
+  for (const [filename, replacement] of [
+    ["tests/support/helper.mjs", "export function expected() { return 1; }\n"],
+    ["tests/fixtures/value.mjs", "export const fixture = 1;\n"],
+    ["tests/snapshots/value.txt", "1\n"],
+    ["tests/test.config.mjs", "export default { offset: 1 };\n"],
+  ] as const) {
+    const absolute = path.join(root, filename);
+    const original = await readFile(absolute, "utf8");
+    await writeFile(absolute, replacement, "utf8");
+    await assert.rejects(
+      assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }),
+      (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+      filename,
+    );
+    await writeFile(absolute, original, "utf8");
+  }
+});
+
+test("test asset trace truncation fails closed", async () => {
+  const module = await import("../../src/engine/tdd/red-gate.js") as Record<string, unknown>;
+  assert.equal(typeof module.parseTestAssetTrace, "function");
+  assert.throws(
+    () => (module.parseTestAssetTrace as (records: string, root: string, gate: FixedTestGate) => unknown)(
+      `${JSON.stringify({ version: 1, truncated: true })}\n`,
+      "/tmp/worktree",
+      nodeGate(),
+    ),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_REPORT_INVALID",
   );
 });
 

@@ -5,6 +5,16 @@ export type TddCommandStep = Pick<CompiledStep, "id" | "uses" | "action" | "expe
 export const testPathRules = ["node", "java", "ruby", "dotnet"] as const;
 export type TestPathRule = (typeof testPathRules)[number];
 
+export const defaultTestAssetPaths = [
+  "test/**",
+  "tests/**",
+  "**/__tests__/**",
+  "**/__snapshots__/**",
+  "**/*.test.*",
+  "**/*.spec.*",
+] as const;
+export const defaultProductPaths = ["src/**"] as const;
+
 export interface FixedTestGate {
   commandId: string;
   argv: readonly string[];
@@ -13,6 +23,8 @@ export interface FixedTestGate {
   inheritEnv: readonly string[];
   env: Readonly<Record<string, string>>;
   testPathRules: readonly TestPathRule[];
+  testAssetPaths: readonly string[];
+  productPaths: readonly string[];
   reporter: { type: "node-test"; version: 1 };
 }
 
@@ -35,6 +47,10 @@ export interface TrustedEvidence {
   testFiles: TestFileDigest[];
   testPathsDigest: string;
   testPathRules: TestPathRule[];
+  testAssets: TestFileDigest[];
+  testAssetsDigest: string;
+  testAssetPaths: string[];
+  productPaths: string[];
   workspaceDigest: string;
   summary: string;
 }
@@ -43,6 +59,10 @@ export interface TddCycleEvidence {
   taskId: string;
   testPaths: string[];
   testPathRules: TestPathRule[];
+  testAssets: TestFileDigest[];
+  testAssetsDigest: string;
+  testAssetPaths: string[];
+  productPaths: string[];
   commandId: string;
   redEvidenceId: string;
   greenEvidenceId: string;

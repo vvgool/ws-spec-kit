@@ -16,6 +16,7 @@ import { parseTddCycleEvidence, parseTrustedEvidence } from "./tdd/red-gate.js";
 import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
+import { externalReceiptMatches } from "../domain/external-receipt.js";
 import type { ProjectGatePolicy } from "./compiler.js";
 import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
 
@@ -214,14 +215,13 @@ function independentReviewsSatisfied(input: CloseChecklistInput, step: SnapshotS
 function externalReceiptSatisfied(input: CloseChecklistInput, target: "issue" | "knowledge"): boolean {
   const bindings = record(input.projection.evidence.bindings);
   const binding = record(bindings?.[target]);
-  if (binding === undefined || binding.exists === false) return false;
-  return Object.values(input.projection.evidence).some((value) => {
-    const receipt = record(value);
-    return receipt?.kind === "external-receipt"
-      && receipt.target === target
-      && receipt.status === "confirmed"
-      && (input.profile.publishing.readBackRequired !== true || receipt.readBack === true);
-  });
+  if (binding === undefined) return false;
+  return Object.values(input.projection.evidence).some((receipt) => externalReceiptMatches({
+    receipt,
+    target,
+    binding,
+    readBackRequired: input.profile.publishing.readBackRequired === true,
+  }));
 }
 
 function sameValues(left: unknown, right: unknown): boolean {
@@ -240,9 +240,13 @@ function greenMatchesRed(green: TrustedEvidence, red: TrustedEvidence): boolean 
     && green.commandId === red.commandId
     && green.commandDigest === red.commandDigest
     && green.testPathsDigest === red.testPathsDigest
+    && green.testAssetsDigest === red.testAssetsDigest
     && sameValues(green.testPaths, red.testPaths)
     && sameValues(green.testFiles, red.testFiles)
-    && sameValues(green.testPathRules, red.testPathRules);
+    && sameValues(green.testPathRules, red.testPathRules)
+    && sameValues(green.testAssets, red.testAssets)
+    && sameValues(green.testAssetPaths, red.testAssetPaths)
+    && sameValues(green.productPaths, red.productPaths);
 }
 
 function completeTddCycle(input: CloseChecklistInput): boolean {
@@ -253,7 +257,11 @@ function completeTddCycle(input: CloseChecklistInput): boolean {
     || cycle.redEvidenceId !== red.evidenceId
     || cycle.commandId !== red.commandId
     || !sameValues(cycle.testPaths, red.testPaths)
-    || !sameValues(cycle.testPathRules, red.testPathRules)) return false;
+    || !sameValues(cycle.testPathRules, red.testPathRules)
+    || cycle.testAssetsDigest !== red.testAssetsDigest
+    || !sameValues(cycle.testAssets, red.testAssets)
+    || !sameValues(cycle.testAssetPaths, red.testAssetPaths)
+    || !sameValues(cycle.productPaths, red.productPaths)) return false;
   const green = parseTrustedEvidence(input.projection.evidence[tddGreenEvidenceKey(input.projection.workItemId, cycle.greenEvidenceId)]);
   if (green === undefined || green.evidenceId !== cycle.greenEvidenceId || !greenMatchesRed(green, red)) return false;
   let latest = green;

@@ -19,7 +19,7 @@ import {
 } from "../../src/engine/verification.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import type { RuntimeProjection } from "../../src/storage/control-plane.js";
-import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
+import { readControlPlane, recoverControlPlane, replayEvents, writeArchiveSnapshot } from "../../src/storage/control-plane.js";
 import { readEvents, withControlPlaneLock } from "../../src/storage/events.js";
 import {
   controlRuntimeFixture,
@@ -44,6 +44,10 @@ function trustedTddEvidence(phase: "red" | "green", overrides: Partial<TrustedEv
     testFiles: [{ path: "tests/feature.test.mjs", digest: "sha256:test" }],
     testPathsDigest: "sha256:test-paths",
     testPathRules: ["node"],
+    testAssets: [{ path: "tests/feature.test.mjs", digest: "sha256:test" }],
+    testAssetsDigest: "sha256:test-assets",
+    testAssetPaths: ["tests/**"],
+    productPaths: ["src/**"],
     workspaceDigest: phase === "red" ? "sha256:red-workspace" : "sha256:workspace",
     summary: phase === "red" ? "feature is red" : "all tests passed",
     ...overrides,
@@ -207,6 +211,47 @@ test("Close 逐项分类 step、artifact、approval、evidence 和 external rece
   ]);
 });
 
+test("Close binds external receipt identity and read-back digest to the current binding", () => {
+  const selected = profile("governed", []);
+  const base = approvalReadyProjection({});
+  const receipt = {
+    version: 1,
+    kind: "external-receipt",
+    target: "issue",
+    stableId: "issue-current",
+    externalWorkItemId: "WSS-CLOSE",
+    publishedContentDigest: "sha256:published",
+    readBackContentDigest: "sha256:published",
+    status: "confirmed",
+    readBackStatus: "confirmed",
+  };
+  const input = (value: Record<string, unknown>, binding: Record<string, unknown> = { exists: true, stableId: "issue-current", externalWorkItemId: "WSS-CLOSE" }) => closeChecklist({
+    profile: { ...selected, publishing: { issueRequired: true, knowledgeRequired: false, readBackRequired: true } },
+    projection: {
+      ...base,
+      evidence: { bindings: { issue: binding }, "external-receipt:issue": value },
+    },
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(input(receipt).missing.filter(({ category }) => category === "external-receipt"), []);
+  for (const invalid of [
+    { ...receipt, stableId: "issue-other" },
+    { ...receipt, externalWorkItemId: "WSS-OTHER" },
+    { ...receipt, readBackContentDigest: "sha256:stale" },
+    { ...receipt, readBackStatus: "stale" },
+  ]) {
+    assert.deepEqual(input(invalid).missing.filter(({ category }) => category === "external-receipt"), [{ category: "external-receipt", id: "issue" }]);
+  }
+  assert.deepEqual(
+    input(receipt, { exists: true, stableId: "issue-rebound", externalWorkItemId: "WSS-CLOSE" }).missing.filter(({ category }) => category === "external-receipt"),
+    [{ category: "external-receipt", id: "issue" }],
+  );
+});
+
 test("Close requires a schema-valid linked Red and Green TDD evidence chain", () => {
   const selected = profile("quick", []);
   selected.order = ["verify-red", "verify-green", "close"];
@@ -254,6 +299,10 @@ test("Close requires a schema-valid linked Red and Green TDD evidence chain", ()
     taskId: "WSS-CLOSE",
     testPaths: [...red.testPaths],
     testPathRules: [...red.testPathRules],
+    testAssets: [...red.testAssets],
+    testAssetsDigest: red.testAssetsDigest,
+    testAssetPaths: [...red.testAssetPaths],
+    productPaths: [...red.productPaths],
     commandId: red.commandId,
     redEvidenceId: red.evidenceId,
     greenEvidenceId: green.evidenceId,
@@ -324,11 +373,20 @@ test("Gate 集合随 Profile 增强，且只接受当前 workspace/config 的 pa
     projection: {
       ...base,
       evidence: {
-        bindings: { issue: { exists: true }, knowledge: { exists: true } },
+        bindings: {
+          issue: { exists: true, stableId: "issue-current", externalWorkItemId: "WSS-CLOSE" },
+          knowledge: { exists: true, stableId: "knowledge-current", externalWorkItemId: "WSS-CLOSE" },
+        },
         [evidenceProjectionKey("quality-check", "test")]: freshTest,
         [evidenceProjectionKey("quality-check", "lint")]: staleLint,
-        "external-receipt:issue": { kind: "external-receipt", target: "issue", status: "confirmed", readBack: true },
-        "external-receipt:knowledge": { kind: "external-receipt", target: "knowledge", status: "confirmed", readBack: true },
+        "external-receipt:issue": {
+          version: 1, kind: "external-receipt", target: "issue", stableId: "issue-current", externalWorkItemId: "WSS-CLOSE",
+          publishedContentDigest: "sha256:issue", readBackContentDigest: "sha256:issue", status: "confirmed", readBackStatus: "confirmed",
+        },
+        "external-receipt:knowledge": {
+          version: 1, kind: "external-receipt", target: "knowledge", stableId: "knowledge-current", externalWorkItemId: "WSS-CLOSE",
+          publishedContentDigest: "sha256:knowledge", readBackContentDigest: "sha256:knowledge", status: "confirmed", readBackStatus: "confirmed",
+        },
       },
     },
     gates: [{ id: "test", evidence: "trusted" }, { id: "lint", evidence: "trusted" }],
@@ -936,6 +994,72 @@ async function prepareCloseFixture() {
   });
   return { fixture, started };
 }
+
+test("external receipt validation rejects invalid content before append, replay, and archive write", async () => {
+  const { fixture, started } = await prepareCloseFixture();
+  const before = await readControlPlane(fixture.root, started.workItemId);
+  const eventsBefore = await readEvents(before.controlPlane);
+  const invalidReceipt = {
+    version: 1,
+    kind: "external-receipt",
+    target: "issue",
+    stableId: "issue-current",
+    publishedContentDigest: "sha256:published",
+    readBackContentDigest: "sha256:published",
+    status: "confirmed",
+    readBackStatus: "confirmed",
+  };
+
+  await assert.rejects(
+    mutateControlPlane({
+      cwd: fixture.root,
+      workItemId: started.workItemId,
+      eventType: "evidence.recorded",
+      idempotencyKey: "test:invalid-external-receipt",
+      operationInput: invalidReceipt,
+      mutate: (current) => ({
+        projection: { ...current, evidence: { ...current.evidence, "external-receipt:issue": invalidReceipt } },
+        value: null,
+      }),
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_INVALID",
+  );
+  assert.equal((await readEvents(before.controlPlane)).length, eventsBefore.length);
+
+  const source = eventsBefore.find(({ eventType }) => !["work-item.transitioned", "stage.transitioned"].includes(eventType));
+  assert.ok(source);
+  const replayEvent = {
+    ...source,
+    result: {
+      ...(source.result as Record<string, unknown>),
+      projection: { evidence: { "external-receipt:issue": invalidReceipt } },
+    },
+  };
+  assert.throws(
+    () => replayEvents({
+      repositoryId: before.repositoryId,
+      workItemId: before.workItemId,
+      stageIds: Object.keys(before.stages),
+      controlPlane: before.controlPlane,
+      events: [replayEvent],
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+  );
+
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const auditPath = path.join(worktree, ".wsspec", "archive", started.workItemId, "audit.json");
+  await assert.rejects(
+    writeArchiveSnapshot({
+      projection: { ...before, evidence: { ...before.evidence, "external-receipt:issue": invalidReceipt } },
+      worktree,
+      closedAt: "2026-08-19T00:00:00.000Z",
+      workspaceTreeDigest: "sha256:workspace",
+      artifactTreeDigest: "sha256:artifacts",
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+  );
+  await assert.rejects(access(auditPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
 
 test("control.close 在必需 Gate 缺失时 blocked，Fresh Evidence 到齐后才关闭并可恢复归档", async () => {
   const { fixture, started } = await prepareCloseFixture();

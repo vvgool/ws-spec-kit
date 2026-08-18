@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.external-receipt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "kind",
+    "target",
+    "stableId",
+    "externalWorkItemId",
+    "publishedContentDigest",
+    "readBackContentDigest",
+    "status",
+    "readBackStatus"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "external-receipt"
+    },
+    "target": {
+      "enum": [
+        "issue",
+        "knowledge"
+      ]
+    },
+    "stableId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "externalWorkItemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publishedContentDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "readBackContentDigest": {
+      "type": "string",
+      "pattern": "^sha256:.+$"
+    },
+    "status": {
+      "const": "confirmed"
+    },
+    "readBackStatus": {
+      "enum": [
+        "confirmed",
+        "stale",
+        "failed"
+      ]
+    }
+  }
+}

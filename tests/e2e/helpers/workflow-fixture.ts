@@ -143,7 +143,10 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
       if (id === "connector.execute/requirement.capture" && input.externalTargets) {
         runtime.evidence = {
           ...runtime.evidence,
-          bindings: { issue: { exists: true, stableId: "local:issue" }, knowledge: { exists: true, stableId: "local:knowledge" } },
+          bindings: {
+            issue: { exists: true, stableId: "local:issue", externalWorkItemId: runtime.workItemId },
+            knowledge: { exists: true, stableId: "local:knowledge", externalWorkItemId: runtime.workItemId },
+          },
         };
       }
       if (target === undefined || !input.externalTargets) return;
@@ -158,12 +161,15 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
       runtime.evidence = {
         ...runtime.evidence,
         [`external-receipt:${target}`]: {
+          version: 1,
           kind: "external-receipt",
           target,
           stableId: `local:${target}`,
+          externalWorkItemId: runtime.workItemId,
+          publishedContentDigest: sha256(`${JSON.stringify(stored)}\n`),
+          readBackContentDigest: sha256(`${JSON.stringify(stored)}\n`),
           status: "confirmed",
-          readBack: true,
-          contentDigest: sha256(`${JSON.stringify(stored)}\n`),
+          readBackStatus: "confirmed",
         },
       };
       return;
@@ -187,7 +193,7 @@ function projectConfig(documentation: boolean): Record<string, unknown> {
   };
   return {
     version: 1,
-    testing: { pathRules: ["node", "java", "ruby", "dotnet"] },
+    testing: { pathRules: ["node", "java", "ruby", "dotnet"], testAssetPaths: ["tests/**"], productPaths: ["src/**"] },
     ...(documentation ? {} : { quality: { gates: gate } }),
     ...(documentation ? { documentation: { allowedPaths: ["README*.md", "CHANGELOG*.md", "docs/**/*.md", "docs/**/*.mdx", "docs/**/*.txt"] } } : {}),
   };

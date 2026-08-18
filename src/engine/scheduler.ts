@@ -4,6 +4,7 @@ import * as canonicalizeModule from "canonicalize";
 import { parse } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
+import { assertExternalReceipts } from "../domain/external-receipt.js";
 import { transitionStage, transitionWorkItem, type StageStatus, type WorkItemStatus } from "../domain/states.js";
 import { appendEventUnlocked, readEvents, withControlPlaneLock, type DomainEvent } from "../storage/events.js";
 import { readControlPlane, replayEvents, writeProjection, type RuntimeProjection } from "../storage/control-plane.js";
@@ -57,6 +58,7 @@ export async function mutateControlPlane<T>(input: {
     }
     if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const mutation = await input.mutate(projection);
+    assertExternalReceipts(mutation.projection.evidence, "WSSPEC_EVENT_INVALID");
     const metadata = await eventMetadata(projection);
     const snapshot = {
       workItem: mutation.projection.workItem,

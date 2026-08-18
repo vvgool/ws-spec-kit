@@ -142,6 +142,15 @@ function effectiveIterations(step: WorkflowStep, profile: ProfileDefinition): nu
   return profile.steps[step.id]?.maxIterations ?? step.maxIterations ?? step.loop?.maxIterations;
 }
 
+function reviewFixLoops(sourceSteps: readonly WorkflowStep[]): WorkflowStep[] {
+  return sourceSteps.filter((step) => {
+    if (step.uses !== "control.loop") return false;
+    const descendants = allSourceSteps(step.steps ?? []);
+    return descendants.some(({ actorRole }) => actorRole === "review")
+      && descendants.some(({ actorRole }) => actorRole === "fix");
+  });
+}
+
 function isSubset(left: readonly string[], right: readonly string[]): boolean {
   const rightSet = new Set(right);
   return left.every((value) => rightSet.has(value));
@@ -172,16 +181,15 @@ function validateProfileSafety(packageRef: string, workflowId: string, sourceSte
       }
     }
 
-    const review = sourceSteps.find(({ id }) => id === "review-fix");
-    if (review !== undefined) {
+    for (const review of reviewFixLoops(sourceSteps)) {
       const baseIterations = review.maxIterations ?? review.loop?.maxIterations;
       const iterations = effectiveIterations(review, profile);
-      if (profileId === "quick" && iterations !== 1) profileSafetyFailure(profileId, "/steps/review-fix/maxIterations", "Quick Review-Fix 必须限制为 1 轮。");
+      if (profileId === "quick" && iterations !== 1) profileSafetyFailure(profileId, `/steps/${review.id}/maxIterations`, "Quick Review-Fix 必须限制为 1 轮。");
       if ((profileId === "standard" || profileId === "governed") && baseIterations !== undefined && (iterations === undefined || iterations < baseIterations)) {
-        profileSafetyFailure(profileId, "/steps/review-fix/maxIterations", "Standard/Governed 不能降低基础 Review-Fix 轮数。");
+        profileSafetyFailure(profileId, `/steps/${review.id}/maxIterations`, "Standard/Governed 不能降低基础 Review-Fix 轮数。");
       }
       if (profileId === "governed" && profile.steps[review.id]?.independentReviewActor !== true) {
-        profileSafetyFailure(profileId, "/steps/review-fix/independentReviewActor", "Governed 必须要求独立 Review Actor。");
+        profileSafetyFailure(profileId, `/steps/${review.id}/independentReviewActor`, "Governed 必须要求独立 Review Actor。");
       }
     }
   }

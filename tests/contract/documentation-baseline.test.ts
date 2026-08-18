@@ -224,6 +224,24 @@ test("CLI typed error、逐路由目录与公开文档保持双向覆盖", async
   }
 });
 
+test("public routes separate reachable close errors from non-route evidence ingestion errors", () => {
+  assert.deepEqual(applicationPublicErrorGroups.close, ["WSSPEC_CLOSE_CHECKLIST_INCOMPLETE"]);
+  assert.deepEqual(applicationPublicErrorGroups.evidenceIngestion, [
+    "WSSPEC_EVIDENCE_ATTEMPT_MISMATCH",
+    "WSSPEC_EVIDENCE_HASH_MISMATCH",
+    "WSSPEC_EVIDENCE_INVALID",
+    "WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT",
+    "WSSPEC_EVIDENCE_STALE",
+    "WSSPEC_GATE_NOT_REQUIRED",
+  ]);
+  assert.ok(applicationPublicErrorGroupNamesByRoute.acquire.includes("close"));
+  for (const route of publicCliRoutes) {
+    assert.equal((applicationPublicErrorGroupNamesByRoute[route] as readonly string[]).includes("evidenceIngestion"), false, route);
+  }
+  assert.equal((applicationPublicErrorGroupNamesByRoute.submit as readonly string[]).includes("close"), false);
+  assert.equal((applicationPublicErrorGroupNamesByRoute.decide as readonly string[]).includes("close"), false);
+});
+
 test("CLI 输出保留已注册的非 internal 错误码与中文消息", () => {
   assert.deepEqual(
     errorOutput(Object.assign(new Error("参数无效。"), { code: "WSSPEC_ARGUMENT_INVALID" })),
