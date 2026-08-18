@@ -284,10 +284,14 @@ function validateBuiltinProfileMatrix(packageRef: string, workflowId: string, so
   requireGovernedPolicy();
 }
 
-function validateStepShape(step: WorkflowStep, path: string): void {
+function validateStepShape(step: WorkflowStep, path: string, insideLoop = false): void {
+  if (insideLoop && step.uses === "control.loop") {
+    fail("WSSPEC_COMPILE_NESTED_LOOP_UNSUPPORTED", `${path}/uses`, "control.loop 暂不支持嵌套。");
+  }
   if (Object.hasOwn(step, "securityClass")) fail("WSSPEC_COMPILE_SECURITY_OVERRIDE", `${path}/securityClass`, "安全类别只能来自 Executor Registry。");
   record(step, path, workflowStepKeys, "WSSPEC_COMPILE_STEP_INVALID");
-  for (const [index, child] of (step.steps ?? []).entries()) validateStepShape(child, `${path}/steps/${index}`);
+  const childrenInsideLoop = insideLoop || step.uses === "control.loop";
+  for (const [index, child] of (step.steps ?? []).entries()) validateStepShape(child, `${path}/steps/${index}`, childrenInsideLoop);
 }
 
 function executorContractFor(step: Pick<WorkflowStep, "uses" | "action">, path: string): ExecutorContract {

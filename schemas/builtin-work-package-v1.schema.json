@@ -27,7 +27,7 @@
     },
     "stepId": {
       "type": "string",
-      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+      "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
     },
     "attemptId": {
       "type": "string",

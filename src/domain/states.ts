@@ -8,6 +8,20 @@ export type StageStatus = (typeof stageStatuses)[number];
 export interface StageState { status: StageStatus; suspendedFrom?: "running" }
 export interface StageEvent { type: "transition"; to: StageStatus }
 
+export interface LoopProjection {
+  loopId: string;
+  iteration: number;
+  maxIterations: number;
+  status: "running" | "succeeded" | "blocked";
+}
+
+export interface RetryProjection {
+  stepInstanceId: string;
+  attemptsUsed: number;
+  maxAttempts: number;
+  status: "ready" | "running" | "exhausted";
+}
+
 export const workItemStatuses = [
   "draft", "active", "awaiting_approval", "verifying", "verified", "blocked", "pending_publish",
   "reconciliation_required", "paused", "closed", "cancelled",

@@ -119,6 +119,24 @@ test("rejects duplicate Step IDs including nested control Steps", async () => {
   expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_DUPLICATE_STEP");
 });
 
+test("rejects nested control.loop before completed Submit can bypass its until condition", async () => {
+  const { pkg, profile } = await fixture();
+  step(pkg, "review-fix").steps?.push({
+    id: "nested-review-fix",
+    uses: "control.loop",
+    until: "false",
+    maxIterations: 2,
+    steps: [{ id: "nested-review", uses: "agent.execute" }],
+  });
+
+  assert.throws(
+    () => compileWorkflow(pkg, profile),
+    (error: unknown) => error instanceof CompileError
+      && error.code === "WSSPEC_COMPILE_NESTED_LOOP_UNSUPPORTED"
+      && error.path === "/steps/9/steps/3/uses",
+  );
+});
+
 test("rejects unknown dependencies and cycles in the complete top-level DAG", async () => {
   const unknown = await fixture();
   step(unknown.pkg, "plan").needs = ["missing"];

@@ -20,6 +20,7 @@ export type SchemaId = (typeof schemaIds)[number];
 type JsonSchema = Record<string, unknown>;
 
 const idPattern = "^[a-z][a-z0-9-]{0,62}$";
+const stepInstanceIdPattern = "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$";
 const digestPattern = "^sha256:.+$";
 const repositoryIdPattern = "^repo-[0-9A-HJKMNP-TV-Z]{26}$";
 const workItemIdPattern = "^WSS-[A-Za-z0-9-]+$";
@@ -144,7 +145,7 @@ const workPackageSchema: JsonSchema = {
   properties: {
     version: { const: 1 },
     workItemId: { type: "string", pattern: workItemIdPattern },
-    stepId: { type: "string", pattern: idPattern },
+    stepId: { type: "string", pattern: stepInstanceIdPattern },
     attemptId: { type: "string", pattern: attemptIdPattern },
     lease: {
       type: "object", additionalProperties: false, required: ["token", "expiresAt"],
@@ -386,7 +387,7 @@ export const schemas = {
     required: ["root", "workItemId", "stepId", "attemptId", "leaseToken", "result"],
     properties: {
       root: { type: "string", minLength: 1 }, workItemId: { type: "string", pattern: workItemIdPattern },
-      stepId: { type: "string", pattern: idPattern }, attemptId: { type: "string", pattern: attemptIdPattern },
+      stepId: { type: "string", pattern: stepInstanceIdPattern }, attemptId: { type: "string", pattern: attemptIdPattern },
       leaseToken: { type: "string", minLength: 1 }, result: submitResultSchema,
     },
   },
@@ -505,7 +506,7 @@ export const schemas = {
       artifactType: { type: "string", pattern: idPattern },
       schemaVersion: { const: 1 },
       workItemId: { type: "string", pattern: workItemIdPattern },
-      stageId: { type: "string", pattern: idPattern },
+      stageId: { type: "string", pattern: stepInstanceIdPattern },
       attemptId: { type: "string", pattern: "^attempt-.+$" },
       revision: { type: "integer", minimum: 1 },
       contentHash: { type: "string", pattern: digestPattern },

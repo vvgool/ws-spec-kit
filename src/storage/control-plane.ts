@@ -4,9 +4,10 @@ import { parse } from "yaml";
 
 import { parseApplicationSnapshot } from "../application/snapshot.js";
 import { deriveInitialStages } from "../application/initial-stages.js";
-import type { StageState, WorkItemState } from "../domain/states.js";
+import type { LoopProjection, RetryProjection, StageState, WorkItemState } from "../domain/states.js";
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
+import { interruptedRetry } from "../engine/control/retry.js";
 import { loadRepository } from "./repository.js";
 import { appendEventUnlocked, EventStoreError, readEvents, recoverStaleControlPlaneLock, repairIncompleteEventTail, withControlPlaneLock, type DomainEvent, type StoredEvent } from "./events.js";
 import { writeFileAtomic } from "./files.js";
@@ -24,6 +25,8 @@ export interface RuntimeProjection {
   contexts: Record<string, unknown>;
   approvals: Record<string, RuntimeApproval>;
   evidence: Record<string, unknown>;
+  loops: Record<string, LoopProjection>;
+  retries: Record<string, RetryProjection>;
   readOnly: boolean;
   controlPlane: string;
 }
@@ -69,7 +72,7 @@ export interface ApplicationCloseEvidence {
 }
 
 interface ProjectionEventResult {
-  projection?: Pick<RuntimeProjection, "workItem" | "stages" | "claims" | "contexts" | "approvals" | "evidence" | "readOnly">;
+  projection?: Pick<RuntimeProjection, "workItem" | "stages" | "claims" | "contexts" | "approvals" | "evidence" | "loops" | "retries" | "readOnly">;
   value?: unknown;
 }
 
@@ -225,6 +228,8 @@ export async function initializeControlPlane(input: {
     contexts: {},
     approvals: {},
     evidence: {},
+    loops: {},
+    retries: {},
     readOnly: false,
     controlPlane: resolved.directory,
   };
@@ -238,7 +243,17 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
   if (stored.repositoryId !== resolved.repositoryId || stored.workItemId !== workItemId) {
     throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
   }
-  return { ...stored, claims: stored.claims ?? {}, contexts: stored.contexts ?? {}, approvals: stored.approvals ?? {}, evidence: stored.evidence ?? {}, readOnly: stored.readOnly ?? false, controlPlane: resolved.directory };
+  return {
+    ...stored,
+    claims: stored.claims ?? {},
+    contexts: stored.contexts ?? {},
+    approvals: stored.approvals ?? {},
+    evidence: stored.evidence ?? {},
+    loops: stored.loops ?? {},
+    retries: stored.retries ?? {},
+    readOnly: stored.readOnly ?? false,
+    controlPlane: resolved.directory,
+  };
 }
 
 export function replayEvents(input: {
@@ -263,6 +278,8 @@ export function replayEvents(input: {
     contexts: {},
     approvals: {},
     evidence: {},
+    loops: {},
+    retries: {},
     readOnly: false,
     controlPlane: input.controlPlane,
   };
@@ -381,9 +398,22 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   const recoverWorkItem = recovered.workItem.status === "awaiting_approval" && durableApprovalIds.size === 0;
   if (recoveryStages.length > 0 || recoverWorkItem || invalidPendingApprovalIds.size > 0) {
     const recoveredAt = recoveryTime.toISOString();
-    const next = { ...recovered, workItem: recoverWorkItem ? { status: "active" as const } : recovered.workItem, stages: { ...recovered.stages }, claims: { ...recovered.claims }, contexts: { ...recovered.contexts }, approvals: { ...recovered.approvals } };
+    const next = {
+      ...recovered,
+      workItem: recoverWorkItem ? { status: "active" as const } : recovered.workItem,
+      stages: { ...recovered.stages },
+      claims: { ...recovered.claims },
+      contexts: { ...recovered.contexts },
+      approvals: { ...recovered.approvals },
+      retries: { ...recovered.retries },
+    };
     for (const stageId of recoveryStages) {
-      next.stages[stageId] = { status: "ready" };
+      const stepInstanceId = recovered.claims[stageId]?.stageId ?? stageId;
+      const retry = Object.hasOwn(next.retries, stepInstanceId) ? next.retries[stepInstanceId] : undefined;
+      if (retry !== undefined) next.retries[stepInstanceId] = interruptedRetry(retry);
+      next.stages[stageId] = (Object.hasOwn(next.retries, stepInstanceId) ? next.retries[stepInstanceId] : undefined)?.status === "exhausted"
+        ? { status: "failed" }
+        : { status: "ready" };
       delete next.claims[stageId];
       delete next.contexts[stageId];
     }
@@ -401,7 +431,20 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       workflowDigest: previous.workflowDigest, configDigest: previous.configDigest, baselineTreeDigest: previous.baselineTreeDigest,
       inputWorkspaceTreeDigest: previous.outputWorkspaceTreeDigest ?? previous.inputWorkspaceTreeDigest, outputWorkspaceTreeDigest: null,
       inputDigest: sha256(recoveryStages.sort().join("\n")),
-      result: { projection: { workItem: next.workItem, stages: next.stages, claims: next.claims, contexts: next.contexts, approvals: next.approvals, evidence: next.evidence, readOnly: next.readOnly }, value: { abandonedStages, approvalStages } },
+      result: {
+        projection: {
+          workItem: next.workItem,
+          stages: next.stages,
+          claims: next.claims,
+          contexts: next.contexts,
+          approvals: next.approvals,
+          evidence: next.evidence,
+          loops: next.loops,
+          retries: next.retries,
+          readOnly: next.readOnly,
+        },
+        value: { abandonedStages, approvalStages },
+      },
     };
     const stored = await appendEventUnlocked(resolved.directory, event);
     next.lastSequence = stored.sequence; next.lastEventHash = stored.eventHash; next.idempotency = { ...next.idempotency, [idempotencyKey]: stored.sequence };

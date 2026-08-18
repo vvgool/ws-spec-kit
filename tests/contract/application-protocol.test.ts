@@ -102,6 +102,31 @@ test("Work Package 只携带执行引用和约束", () => {
   }
 });
 
+test("失败 SubmitResult 不接受 Agent 自报失败分类或 retryable", () => {
+  const base = {
+    version: 1,
+    summary: "步骤执行失败",
+    modifiedFiles: [],
+    artifacts: [],
+    commands: [],
+    evidence: [],
+    externalWrites: [],
+    remainingRisks: [],
+  };
+  const failed = { ...base, status: "failed" };
+  assert.deepEqual(validate("builtin.submit-result.v1" as SchemaId, failed), failed);
+
+  const invalid = [
+    [{ ...base, status: "failed", failureCode: "WSSPEC_STEP_INPUT_INVALID" }, "WSSPEC_SCHEMA_UNKNOWN_FIELD"],
+    [{ ...base, status: "failed", failureCode: "WSSPEC_AGENT_DECIDES_RETRY" }, "WSSPEC_SCHEMA_UNKNOWN_FIELD"],
+    [{ ...base, status: "failed", failureCode: "WSSPEC_STEP_FAILED", retryable: true }, "WSSPEC_SCHEMA_UNKNOWN_FIELD"],
+    [{ ...base, status: "completed", failureCode: "WSSPEC_STEP_FAILED" }, "WSSPEC_SCHEMA_UNKNOWN_FIELD"],
+  ] as const;
+  for (const [value, code] of invalid) {
+    assertSchemaError(() => validate("builtin.submit-result.v1" as SchemaId, value), code);
+  }
+});
+
 test("StartInput 支持显式 Workflow，也允许交给项目 activeWorkflow", () => {
   const source = { type: "prompt", text: "增加登录功能" };
   const implicit = { root: "/workspace", source, profile: "auto" };

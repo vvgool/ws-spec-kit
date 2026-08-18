@@ -4,13 +4,21 @@ import { verifyArtifact } from "../domain/artifacts.js";
 import { computeWorkspaceSnapshot, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { prepareArtifactApproval } from "../engine/approvals.js";
+import { parseLoopStepInstanceId, projectArtifactValues } from "../engine/control/loop.js";
+import {
+  failRetry,
+  isRetryableStepFailure,
+  isStepFailureCode,
+  retryFailureProblem,
+  stepFailureProblem,
+} from "../engine/control/retry.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
 import type { AgentAction, SubmitInput, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
 import { validate } from "../schemas/index.js";
 import { recoverControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
-import { acquireNextLocked, type AcquireDependencies, type ApplicationAttemptRecord } from "./acquire.js";
+import { acquireNextLocked, type AcquireDependencies, type ApplicationAttemptRecord, type ApplicationStepResult } from "./acquire.js";
 import { loadApplicationState, selectedProfile, type ApplicationState, type SnapshotStep } from "./state.js";
 
 export interface SubmitDependencies extends AcquireDependencies {
@@ -22,6 +30,31 @@ export class ApplicationSubmitError extends Error {
     super(`${code}: ${message}`);
     this.name = "ApplicationSubmitError";
   }
+}
+
+interface ExecutionTarget {
+  stageId: string;
+  stepInstanceId: string;
+  step: SnapshotStep;
+  internal: boolean;
+}
+
+function ownProjection<T>(values: Record<string, T>, key: string): T | undefined {
+  return Object.hasOwn(values, key) ? values[key] : undefined;
+}
+
+function executionTarget(profile: ReturnType<typeof selectedProfile>, projection: RuntimeProjection, stepInstanceId: string): ExecutionTarget {
+  const topLevel = profile.steps.find((candidate) => candidate.id === stepInstanceId);
+  if (topLevel !== undefined) return { stageId: topLevel.id, stepInstanceId, step: topLevel, internal: false };
+  const parsed = parseLoopStepInstanceId(stepInstanceId);
+  if (parsed === undefined) throw new ApplicationSubmitError("WSSPEC_STAGE_NOT_FOUND", `找不到 Step ${stepInstanceId}。 `);
+  const loopStep = profile.steps.find((candidate) => candidate.id === parsed.loopId && candidate.uses === "control.loop");
+  const loop = ownProjection(projection.loops, parsed.loopId);
+  const child = loopStep?.steps.find((candidate) => candidate.id === parsed.stepId);
+  if (loopStep === undefined || child === undefined || loop?.status !== "running" || loop.iteration !== parsed.iteration) {
+    throw new ApplicationSubmitError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Attempt 所属循环轮次已失效。 ");
+  }
+  return { stageId: loopStep.id, stepInstanceId, step: child, internal: true };
 }
 
 function internalPath(workItemId: string, filename: string): boolean {
@@ -98,10 +131,10 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
   }
 }
 
-async function validateResult(input: SubmitInput, state: ApplicationState, step: SnapshotStep, projection: RuntimeProjection, now: Date): Promise<void> {
-  const claim = projection.claims[input.stepId];
-  const context = projection.contexts[input.stepId] as ApplicationAttemptRecord | undefined;
-  if (claim?.attemptId !== input.attemptId || claim.claimToken !== input.leaseToken || context?.workPackage.attemptId !== input.attemptId || context.workPackage.lease.token !== input.leaseToken) {
+async function validateResult(input: SubmitInput, state: ApplicationState, target: ExecutionTarget, projection: RuntimeProjection, now: Date): Promise<void> {
+  const claim = projection.claims[target.stageId];
+  const context = projection.contexts[target.stageId] as ApplicationAttemptRecord | undefined;
+  if (claim?.stageId !== input.stepId || claim.attemptId !== input.attemptId || claim.claimToken !== input.leaseToken || context?.workPackage.stepId !== input.stepId || context.workPackage.attemptId !== input.attemptId || context.workPackage.lease.token !== input.leaseToken) {
     throw new ApplicationSubmitError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Attempt 或 Lease 已失效。 ");
   }
   if (new Date(claim.expiresAt) <= now) {
@@ -114,14 +147,14 @@ async function validateResult(input: SubmitInput, state: ApplicationState, step:
   if (!sameStrings(changed, input.result.modifiedFiles)) {
     throw new ApplicationSubmitError("WSSPEC_MODIFIED_FILES_MISMATCH", "提交结果的 modifiedFiles 与实际 Git diff 不一致。 ");
   }
-  const declaredOutputs = new Set(step.outputs.map((output) => output.artifact));
+  const declaredOutputs = new Set(target.step.outputs.map((output) => output.artifact));
   const undeclared = input.result.artifacts.find((artifact) => !declaredOutputs.has(artifact.artifactType));
   if (undeclared !== undefined) {
     throw new ApplicationSubmitError("WSSPEC_UNDECLARED_ARTIFACT", `Artifact ${undeclared.artifactType} 未在 Step outputs 中声明。 `);
   }
-  for (const artifact of input.result.artifacts) await verifySubmittedArtifact(state, step, input.attemptId, artifact);
+  for (const artifact of input.result.artifacts) await verifySubmittedArtifact(state, { ...target.step, id: input.stepId }, input.attemptId, artifact);
   if (input.result.status === "completed") {
-    for (const output of step.outputs.filter((candidate) => candidate.required)) {
+    for (const output of target.step.outputs.filter((candidate) => candidate.required)) {
       if (!input.result.artifacts.some((artifact) => artifact.artifactType === output.artifact)) {
         throw new ApplicationSubmitError("WSSPEC_REQUIRED_ARTIFACT_MISSING", `缺少必需 Artifact ${output.artifact}。 `);
       }
@@ -142,13 +175,30 @@ function approvalAction(state: ApplicationState, request: Awaited<ReturnType<typ
   };
 }
 
+function trustedSubmitResult(
+  submitted: SubmitResult,
+  validated: Awaited<ReturnType<ReturnType<ExecutorRegistry["assertStep"]>["validate"]>>,
+): ApplicationStepResult {
+  if (validated.status !== submitted.status) {
+    throw new ApplicationSubmitError("WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID", "Executor 返回的状态与 SubmitResult 不一致。 ");
+  }
+  if (submitted.status === "failed") {
+    if (!isStepFailureCode(validated.failureCode)) {
+      throw new ApplicationSubmitError("WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID", "Executor 未返回受支持的稳定失败码。 ");
+    }
+    return { ...submitted, failureCode: validated.failureCode };
+  }
+  if (validated.failureCode !== undefined) {
+    throw new ApplicationSubmitError("WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID", "成功结果不能携带失败码。 ");
+  }
+  return submitted;
+}
+
 export async function submitApplication(input: SubmitInput, dependencies: SubmitDependencies): Promise<AgentAction> {
   validate("builtin.application-submit-input.v1", input);
   validate<SubmitResult>("builtin.submit-result.v1", input.result);
   const state = await loadApplicationState(input.root, input.workItemId);
   const profile = selectedProfile(state.snapshot);
-  const step = profile.steps.find((candidate) => candidate.id === input.stepId);
-  if (step === undefined) throw new ApplicationSubmitError("WSSPEC_STAGE_NOT_FOUND", `找不到 Step ${input.stepId}。 `);
   const { root: _root, ...operationInput } = input;
   const action = await mutateControlPlane({
     cwd: input.root,
@@ -159,47 +209,79 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
     attemptId: input.attemptId,
     operationInput,
     mutate: async (current) => {
-      await validateResult(input, state, step, current, dependencies.now());
-      await dependencies.executors.assertStep(step as never).validate(step as never, input.result, current);
-      const running = transitionStage(current.stages[input.stepId]!, { type: "transition", to: "running" });
+      const target = executionTarget(profile, current, input.stepId);
+      await validateResult(input, state, target, current, dependencies.now());
+      const executorStep = { ...target.step, id: target.stageId };
+      const result = trustedSubmitResult(
+        input.result,
+        await dependencies.executors.assertStep(executorStep as never).validate(executorStep as never, input.result, current),
+      );
+      if (target.internal && target.step.approval) {
+        throw new ApplicationSubmitError("WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED", "循环内部 Step 暂不支持审批。 ");
+      }
+      const active = current.contexts[target.stageId] as ApplicationAttemptRecord;
+      const artifactValues = await projectArtifactValues(state.worktree, result.artifacts);
+      const record: ApplicationAttemptRecord = {
+        workPackage: active.workPackage,
+        retryCount: active.retryCount,
+        stepInstanceId: target.stepInstanceId,
+        artifactValues,
+        result,
+      };
       let projection: RuntimeProjection = {
         ...current,
-        stages: { ...current.stages, [input.stepId]: running },
+        stages: { ...current.stages },
         claims: { ...current.claims },
-        contexts: {
-          ...current.contexts,
-          [input.stepId]: {
-            workPackage: (current.contexts[input.stepId] as ApplicationAttemptRecord).workPackage,
-            retryCount: (current.contexts[input.stepId] as ApplicationAttemptRecord).retryCount,
-            result: input.result,
-          } satisfies ApplicationAttemptRecord,
-        },
+        contexts: { ...current.contexts, [target.stageId]: record },
+        retries: { ...current.retries },
       };
-      delete projection.claims[input.stepId];
-      if (input.result.status === "failed") {
-        projection.stages[input.stepId] = transitionStage(running, { type: "transition", to: "failed" });
-        const retryable = (projection.contexts[input.stepId] as ApplicationAttemptRecord).retryCount < state.snapshot.maxStageRetries;
+      if (target.internal) projection.contexts[target.stepInstanceId] = record;
+      const actor = current.claims[target.stageId]!.actor;
+      delete projection.claims[target.stageId];
+      if (result.status === "failed") {
+        const running = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "running" });
+        projection.stages[target.stageId] = transitionStage(running, { type: "transition", to: "failed" });
+        const retry = ownProjection(projection.retries, target.stepInstanceId);
+        if (retry === undefined) throw new ApplicationSubmitError("WSSPEC_RETRY_PROJECTION_INVALID", `步骤 ${target.stepInstanceId} 缺少重试投影。 `);
+        const failureCode = result.failureCode!;
+        if (!isRetryableStepFailure(failureCode)) {
+          delete projection.retries[target.stepInstanceId];
+          return {
+            projection,
+            value: { action: "blocked", problems: [stepFailureProblem(failureCode, result.summary)] } satisfies AgentAction,
+          };
+        }
+        const failedRetry = failRetry(retry);
+        projection.retries[target.stepInstanceId] = failedRetry;
         return {
           projection,
-          value: { action: "blocked", problems: [{ code: "WSSPEC_STEP_FAILED", message: input.result.summary, retryable }] } satisfies AgentAction,
+          value: { action: "blocked", problems: [retryFailureProblem(failedRetry, result.summary)] } satisfies AgentAction,
         };
       }
+      delete projection.retries[target.stepInstanceId];
+      if (target.internal) {
+        projection.stages[target.stageId] = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "ready" });
+        delete projection.contexts[target.stageId];
+        const next = await acquireNextLocked({ state, projection, actor, root: input.root, dependencies });
+        return { projection: next.projection, value: next.action };
+      }
+      const running = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "running" });
       const validating = transitionStage(running, { type: "transition", to: "validating" });
-      projection.stages[input.stepId] = validating;
-      if (step.approval) {
-        const artifacts = input.result.artifacts.filter((candidate) => candidate.path !== undefined);
+      projection.stages[target.stageId] = validating;
+      if (target.step.approval) {
+        const artifacts = result.artifacts.filter((candidate) => candidate.path !== undefined);
         if (artifacts.length === 0) throw new ApplicationSubmitError("WSSPEC_REQUIRED_ARTIFACT_MISSING", "审批 Step 必须提交可校验 Artifact。 ");
-        const request = await prepareArtifactApproval({ cwd: input.root, workItemId: input.workItemId, stageId: input.stepId, attemptId: input.attemptId, artifacts, now: dependencies.now() });
+        const request = await prepareArtifactApproval({ cwd: input.root, workItemId: input.workItemId, stageId: target.stageId, attemptId: input.attemptId, artifacts, now: dependencies.now() });
         projection = {
           ...projection,
           workItem: transitionWorkItem(projection.workItem, { type: "transition", to: "awaiting_approval" }),
-          stages: { ...projection.stages, [input.stepId]: transitionStage(validating, { type: "transition", to: "awaiting_approval" }) },
+          stages: { ...projection.stages, [target.stageId]: transitionStage(validating, { type: "transition", to: "awaiting_approval" }) },
           approvals: { ...projection.approvals, [request.requestId]: request },
         };
         return { projection, value: approvalAction(state, request) };
       }
-      projection.stages[input.stepId] = transitionStage(validating, { type: "transition", to: "succeeded" });
-      const next = await acquireNextLocked({ state, projection, actor: current.claims[input.stepId]!.actor, root: input.root, dependencies });
+      projection.stages[target.stageId] = transitionStage(validating, { type: "transition", to: "succeeded" });
+      const next = await acquireNextLocked({ state, projection, actor, root: input.root, dependencies });
       return { projection: next.projection, value: next.action };
     },
   });

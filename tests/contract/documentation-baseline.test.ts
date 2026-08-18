@@ -177,6 +177,19 @@ test("操作章节不能借用下一章节的输出类型", async () => {
   assert.doesNotMatch(operationSection(mutated, "acquire"), /输出：`AgentAction`/u);
 });
 
+test("公开 SubmitResult 文档不能把可信失败分类描述成 Agent 字段", async () => {
+  const document = (await documents()).application;
+  const schema = JSON.parse(await readFile(path.join(root, "schemas", "builtin-submit-result-v1.schema.json"), "utf8")) as {
+    properties: Record<string, unknown>;
+  };
+  const row = document.match(/^\| `builtin\.submit-result\.v1` \| ([^|]+) \|$/mu)?.[1];
+  assert.ok(row);
+
+  assert.equal(Object.hasOwn(schema.properties, "failureCode"), false);
+  assert.doesNotMatch(row, /失败码|failureCode|retryable/u);
+  assert.match(operationSection(document, "submit"), /分类只由受信 Executor 或 Runtime 内部产生并持久化/u);
+});
+
 test("公开错误码文档拒绝缺失或多余条目", async () => {
   const reference = await documents();
   assertErrorCatalogMatchesDocumentation(reference);

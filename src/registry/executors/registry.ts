@@ -31,7 +31,9 @@ function executor(id: string, securityClass: SecurityClass): StepExecutor {
       return { action: "execute", workPackage: workPackage(runtime, step.id) };
     },
     async validate(_step, result): Promise<ValidatedStepResult> {
-      return { status: result.status, artifacts: result.artifacts };
+      return result.status === "failed"
+        ? { status: "failed", artifacts: result.artifacts, failureCode: "WSSPEC_STEP_FAILED" }
+        : { status: "completed", artifacts: result.artifacts };
     },
   };
 }

@@ -65,6 +65,8 @@ export async function mutateControlPlane<T>(input: {
       contexts: mutation.projection.contexts,
       approvals: mutation.projection.approvals,
       evidence: mutation.projection.evidence,
+      loops: mutation.projection.loops,
+      retries: mutation.projection.retries,
       readOnly: mutation.projection.readOnly,
     };
     const event: DomainEvent = {

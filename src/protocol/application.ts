@@ -21,6 +21,11 @@ export interface StartResult {
   profile: Exclude<WorkflowProfile, "auto">;
 }
 
+export type StepFailureCode =
+  | "WSSPEC_STEP_FAILED"
+  | "WSSPEC_STEP_INPUT_INVALID"
+  | "WSSPEC_STEP_CONFIGURATION_INVALID";
+
 export interface AcquireInput {
   root: string;
   workItemId: WorkItemId;
