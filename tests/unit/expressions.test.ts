@@ -22,6 +22,20 @@ test("有限表达式只读取声明根路径且缺失 Binding 为 false", () =>
   assert.equal(evaluateExpression(parseExpression("${bindings.issue.exists == false}"), scope), true);
 });
 
+test("缺失路径在比较和布尔组合中保持 fail-closed，但不破坏真实布尔值", () => {
+  const missing = { artifacts: {}, bindings: {}, steps: {} };
+  for (const source of [
+    "bindings.issue.exists",
+    "bindings.issue.exists == false",
+    "bindings.issue.exists != false",
+    "bindings.issue.exists && true",
+    "bindings.issue.exists || true",
+  ]) assert.equal(evaluateExpression(parseExpression(source), missing), false, source);
+  assert.equal(evaluateExpression(parseExpression("false && (bindings.issue.exists != false)"), missing), false);
+  assert.equal(evaluateExpression(parseExpression("true || (bindings.issue.exists != false)"), missing), true);
+  assert.equal(evaluateExpression(parseExpression("bindings.issue.exists != true"), scope), true);
+});
+
 test("有限表达式拒绝未知标识、调用、赋值与原型属性", () => {
   for (const source of ["unknown.exists", "process.exit()", "bindings.issue.exists = true", "bindings.__proto__.exists", "artifacts.review.constructor"]) {
     assert.throws(() => parseExpression(source), /WSSPEC_EXPRESSION_FORBIDDEN/);

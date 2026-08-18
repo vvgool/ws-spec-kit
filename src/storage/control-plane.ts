@@ -3,6 +3,7 @@ import path from "node:path";
 import { parse } from "yaml";
 
 import { parseApplicationSnapshot } from "../application/snapshot.js";
+import { deriveInitialStages } from "../application/initial-stages.js";
 import type { StageState, WorkItemState } from "../domain/states.js";
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
@@ -329,10 +330,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     const profile = application.profiles[application.selectedProfile];
     stageIds = profile.order;
     initialWorkItem = { status: "active" };
-    initialStages = Object.fromEntries(profile.steps.map((step) => [
-      step.id,
-      { status: !step.enabled ? "skipped" : step.needs.length === 0 ? "ready" : "pending" },
-    ])) as Record<string, StageState>;
+    initialStages = deriveInitialStages(profile);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (anchor !== undefined) {

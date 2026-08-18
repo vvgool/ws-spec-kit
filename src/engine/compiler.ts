@@ -1,4 +1,6 @@
 import { sha256 } from "../domain/digests.js";
+import { ExpressionError, type ExpressionAst } from "./expressions/ast.js";
+import { parseExpression } from "./expressions/parser.js";
 import type {
   ArtifactDeclaration,
   ArtifactRequirement,
@@ -444,20 +446,7 @@ function validateArtifactDependencies(steps: readonly CompiledStep[], path: stri
   }
 }
 
-function expressionReference(expression: string, path: string): { root: string; property: string; literal?: string } {
-  const match = /^\$\{\s*([a-z][a-z0-9-]*)\.([a-z][a-zA-Z0-9.-]*)(?:\s*(==|!=)\s*(true|false|null|-?[0-9]+(?:\.[0-9]+)?|"[^"\\]*"|'[^'\\]*'))?\s*\}$/.exec(expression);
-  if (match === null) fail("WSSPEC_COMPILE_EXPRESSION_INVALID", path, "表达式不属于 Workflow Language v1 有限语法。");
-  return { root: match[1]!, property: match[2]!, ...(match[4] === undefined ? {} : { literal: match[4] }) };
-}
-
 type ExpressionValueType = "boolean" | "number" | "string" | "null";
-
-function literalType(literal: string): ExpressionValueType {
-  if (literal === "true" || literal === "false") return "boolean";
-  if (literal === "null") return "null";
-  if (literal.startsWith('"') || literal.startsWith("'")) return "string";
-  return "number";
-}
 
 function artifactPropertyType(root: string, property: string): ExpressionValueType | undefined {
   if (property === "exists") return "boolean";
@@ -481,23 +470,50 @@ function addAll(target: Set<string>, values: Iterable<string>): void {
 
 function validateExpressions(sourceSteps: readonly WorkflowStep[], compiledSteps: readonly CompiledStep[]): void {
   const declaredOutputs = new Set(flatten(compiledSteps).flatMap((step) => step.outputs.map(({ artifact }) => artifact)));
-  const validate = (expression: string, path: string, available: ReadonlySet<string>): void => {
-    const reference = expressionReference(expression, path);
-    let valueType: ExpressionValueType | undefined;
-    if (reference.root === "bindings") {
-      if (!/^(?:issue|knowledge)\.exists$/.test(reference.property)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN", path, "表达式引用了未知 Binding 状态。");
-      valueType = "boolean";
-    } else {
-      if (!declaredOutputs.has(reference.root)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN", path, `表达式引用了未声明输出 ${reference.root}。`);
-      if (!available.has(reference.root)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE", path, `表达式引用了当前 Step 不可达或未启用的输出 ${reference.root}。`);
-      valueType = artifactPropertyType(reference.root, reference.property);
-      if (valueType === undefined) fail("WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN", path, `输出 ${reference.root} 没有属性 ${reference.property}。`);
+  const validate = (expression: string, path: string, availableArtifacts: ReadonlySet<string>, availableSteps: ReadonlySet<string>, allSteps: ReadonlySet<string>): void => {
+    let ast: ExpressionAst;
+    try {
+      ast = parseExpression(expression);
+    } catch (error) {
+      if (error instanceof ExpressionError) fail("WSSPEC_COMPILE_EXPRESSION_INVALID", path, "表达式不属于 Workflow Language v1 有限语法。");
+      throw error;
     }
-    if (reference.literal === undefined) {
-      if (valueType !== "boolean") fail("WSSPEC_COMPILE_EXPRESSION_TYPE_MISMATCH", path, "无比较操作的表达式必须解析为布尔值。");
-    } else if (literalType(reference.literal) !== valueType) {
-      fail("WSSPEC_COMPILE_EXPRESSION_TYPE_MISMATCH", path, "表达式属性与比较值类型不匹配。");
-    }
+    const typeOf = (node: ExpressionAst): ExpressionValueType => {
+      if (node.kind === "literal") {
+        if (node.value === null) return "null";
+        if (typeof node.value === "boolean") return "boolean";
+        if (typeof node.value === "number") return "number";
+        return "string";
+      }
+      if (node.kind === "binary") {
+        const left = typeOf(node.left);
+        const right = typeOf(node.right);
+        if (node.op === "==" || node.op === "!=") {
+          if (left !== right) fail("WSSPEC_COMPILE_EXPRESSION_TYPE_MISMATCH", path, "表达式两侧的比较类型必须一致。");
+          return "boolean";
+        }
+        if (left !== "boolean" || right !== "boolean") fail("WSSPEC_COMPILE_EXPRESSION_TYPE_MISMATCH", path, "逻辑表达式的两侧必须是布尔值。");
+        return "boolean";
+      }
+      const [target, property, ...rest] = node.segments;
+      if (rest.length > 0 || target === undefined || property === undefined) fail("WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN", path, "表达式路径不属于已声明的静态属性。 ");
+      if (node.root === "bindings") {
+        if (!((target === "issue" || target === "knowledge") && property === "exists")) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN", path, "表达式引用了未知 Binding 状态。");
+        return "boolean";
+      }
+      if (node.root === "artifacts") {
+        if (!declaredOutputs.has(target)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN", path, `表达式引用了未声明输出 ${target}。`);
+        if (!availableArtifacts.has(target)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE", path, `表达式引用了当前 Step 不可达或未启用的输出 ${target}。`);
+        const valueType = artifactPropertyType(target, property);
+        if (valueType === undefined) fail("WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN", path, `输出 ${target} 没有属性 ${property}。`);
+        return valueType;
+      }
+      if (!allSteps.has(target)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN", path, `表达式引用了未知 Step ${target}。`);
+      if (!availableSteps.has(target)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE", path, `表达式引用了当前 Step 不可达或未启用的 Step ${target}。`);
+      if (property !== "status") fail("WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN", path, `Step ${target} 没有属性 ${property}。`);
+      return "string";
+    };
+    if (typeOf(ast) !== "boolean") fail("WSSPEC_COMPILE_EXPRESSION_TYPE_MISMATCH", path, "表达式必须解析为布尔值。");
   };
 
   const visit = (
@@ -505,27 +521,36 @@ function validateExpressions(sourceSteps: readonly WorkflowStep[], compiledSteps
     compiled: readonly CompiledStep[],
     path: string,
     inherited: ReadonlySet<string>,
+    inheritedSteps: ReadonlySet<string>,
     nested: boolean,
     parentEnabled: boolean,
   ): void => {
     const byId = new Map(compiled.map((step) => [step.id, step]));
     const preceding = new Set<string>();
+    const precedingSteps = new Set<string>();
     for (const [index, step] of sources.entries()) {
       const current = compiled[index]!;
       const stepPath = `${path}/${index}`;
       const available = new Set(inherited);
+      const availableSteps = new Set(inheritedSteps);
       if (nested) addAll(available, preceding);
-      for (const dependency of dependencyClosure(current.id, byId)) addAll(available, effectiveOutputs(byId.get(dependency)!, parentEnabled));
-      if (step.when !== undefined) validate(step.when, `${stepPath}/when`, available);
+      if (nested) addAll(availableSteps, precedingSteps);
+      for (const dependency of dependencyClosure(current.id, byId)) {
+        addAll(available, effectiveOutputs(byId.get(dependency)!, parentEnabled));
+        availableSteps.add(dependency);
+      }
+      if (step.when !== undefined) validate(step.when, `${stepPath}/when`, available, availableSteps, new Set(byId.keys()));
       const untilAvailable = new Set(available);
-      for (const child of current.steps) addAll(untilAvailable, effectiveOutputs(child, parentEnabled && current.enabled));
-      if (step.until !== undefined) validate(step.until, `${stepPath}/until`, untilAvailable);
-      if (step.loop?.until !== undefined) validate(step.loop.until, `${stepPath}/loop/until`, untilAvailable);
-      visit(step.steps ?? [], current.steps, `${stepPath}/steps`, available, true, parentEnabled && current.enabled);
+      const untilSteps = new Set(availableSteps);
+      for (const child of current.steps) { addAll(untilAvailable, effectiveOutputs(child, parentEnabled && current.enabled)); untilSteps.add(child.id); }
+      if (step.until !== undefined) validate(step.until, `${stepPath}/until`, untilAvailable, untilSteps, new Set(byId.keys()));
+      if (step.loop?.until !== undefined) validate(step.loop.until, `${stepPath}/loop/until`, untilAvailable, untilSteps, new Set(byId.keys()));
+      visit(step.steps ?? [], current.steps, `${stepPath}/steps`, available, availableSteps, true, parentEnabled && current.enabled);
       if (nested) addAll(preceding, effectiveOutputs(current, parentEnabled));
+      if (nested) precedingSteps.add(current.id);
     }
   };
-  visit(sourceSteps, compiledSteps, "/steps", new Set(), false, true);
+  visit(sourceSteps, compiledSteps, "/steps", new Set(), new Set(), false, true);
 }
 
 function validateGates(workflow: WorkflowPackage["workflow"], steps: readonly CompiledStep[]): void {

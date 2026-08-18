@@ -6,6 +6,7 @@ import { parse, stringify } from "yaml";
 import { sha256 } from "../domain/digests.js";
 import type { ProfileId } from "../domain/workflow.js";
 import { compileWorkflow, type ProjectGatePolicy } from "../engine/compiler.js";
+import { deriveInitialStages } from "./initial-stages.js";
 import { selectProfile } from "../policy/profile.js";
 import type { StartInput, StartResult, WorkflowProfile } from "../protocol/application.js";
 import type { ResolvedSkillDescriptor } from "../protocol/work-package.js";
@@ -292,10 +293,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       ownerToken: creationOwnerForWorkItem(item),
     });
 
-    const initialStages = Object.fromEntries(profiles[selected].steps.map((step) => [
-      step.id,
-      { status: !step.enabled ? "skipped" : step.needs.length === 0 && step.when === undefined ? "ready" : "pending" },
-    ])) as Record<string, { status: "skipped" | "ready" | "pending" }>;
+    const initialStages = deriveInitialStages(profiles[selected]);
     await initializeControlPlane({ cwd: identity.repositoryRoot, workItemId, stages: profiles[selected].order, initialWorkItem: { status: "active" }, initialStages });
     return { workItemId, workflowRef, profile: selected };
   } catch (error) {

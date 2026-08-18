@@ -345,7 +345,7 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
     }> }>;
   };
   const governedReviewFix = application.profiles.governed?.steps.find(({ id }) => id === "review-fix");
-  assert.equal(governedReviewFix?.until, "${review-result.approved}");
+  assert.equal(governedReviewFix?.until, "${artifacts.review-result.approved}");
   assert.equal(governedReviewFix?.maxIterations, 5);
   assert.equal(governedReviewFix?.independentReviewActor, true);
   assert.deepEqual(governedReviewFix?.steps?.map(({ id }) => id), ["review", "fix", "verify"]);

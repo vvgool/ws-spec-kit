@@ -6,7 +6,9 @@ export interface ExpressionScope {
   steps?: Record<string, unknown>;
 }
 
-type Value = string | boolean | number | null | undefined;
+const missing = Symbol("missing");
+type Missing = typeof missing;
+type Value = string | boolean | number | null | Missing;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -15,15 +17,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function pathValue(ast: Extract<ExpressionAst, { kind: "path" }>, scope: ExpressionScope): Value {
   let current: unknown = scope[ast.root];
   for (const segment of ast.segments) {
-    if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, segment)) return undefined;
+    if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, segment)) return missing;
     current = current[segment];
   }
   if (current === null || typeof current === "string" || typeof current === "boolean" || typeof current === "number") return current;
-  return undefined;
+  return missing;
 }
 
-function booleanValue(value: Value): boolean {
-  if (value === undefined) return false;
+function booleanValue(value: Value): boolean | Missing {
+  if (value === missing) return missing;
   if (typeof value !== "boolean") throw new ExpressionError("WSSPEC_EXPRESSION_TYPE_INVALID", "逻辑表达式必须得到布尔值。");
   return value;
 }
@@ -31,12 +33,19 @@ function booleanValue(value: Value): boolean {
 function valueOf(ast: ExpressionAst, scope: ExpressionScope): Value {
   if (ast.kind === "literal") return ast.value;
   if (ast.kind === "path") return pathValue(ast, scope);
-  if (ast.op === "==") return valueOf(ast.left, scope) === valueOf(ast.right, scope);
-  if (ast.op === "!=") return valueOf(ast.left, scope) !== valueOf(ast.right, scope);
-  if (ast.op === "&&") return booleanValue(valueOf(ast.left, scope)) && booleanValue(valueOf(ast.right, scope));
-  return booleanValue(valueOf(ast.left, scope)) || booleanValue(valueOf(ast.right, scope));
+  const left = valueOf(ast.left, scope);
+  if (ast.op === "==" || ast.op === "!=") {
+    const right = valueOf(ast.right, scope);
+    if (left === missing || right === missing) return missing;
+    return ast.op === "==" ? left === right : left !== right;
+  }
+  const leftBoolean = booleanValue(left);
+  if (leftBoolean === missing) return missing;
+  if (ast.op === "&&") return leftBoolean ? booleanValue(valueOf(ast.right, scope)) : false;
+  return leftBoolean ? true : booleanValue(valueOf(ast.right, scope));
 }
 
 export function evaluateExpression(ast: ExpressionAst, scope: ExpressionScope): boolean {
-  return booleanValue(valueOf(ast, scope));
+  const value = booleanValue(valueOf(ast, scope));
+  return value === missing ? false : value;
 }

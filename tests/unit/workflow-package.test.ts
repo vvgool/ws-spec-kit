@@ -163,7 +163,7 @@ steps:
   - id: review-fix
     uses: control.loop
     needs: [verify-green]
-    until: '\${review-result.approved}'
+    until: '\${artifacts.review-result.approved}'
     maxIterations: 5
     steps:
       - id: review
@@ -172,7 +172,7 @@ steps:
         outputs: [review-result]
       - id: fix
         uses: agent.execute
-        when: '\${review-result.approved == false}'
+        when: '\${artifacts.review-result.approved == false}'
         skills: [{ ref: builtin://skills/review-fix, required: true }]
       - id: verify
         uses: command.execute

@@ -79,7 +79,7 @@ steps:
     uses: control.loop
     needs: [verify-document]
     inputs: [documentation-evidence]
-    until: ${review-result.approved}
+    until: ${artifacts.review-result.approved}
     maxIterations: 5
     steps:
       - id: review
@@ -90,7 +90,7 @@ steps:
         outputs: [review-result]
       - id: fix
         uses: agent.execute
-        when: ${review-result.approved == false}
+        when: ${artifacts.review-result.approved == false}
         skills:
           - ref: builtin://skills/documentation-editing
             required: true

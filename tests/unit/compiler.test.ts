@@ -92,7 +92,7 @@ test("compiles the formal Step Manifest with registry-owned security classes and
   assert.equal(compiled.steps.find(({ id }) => id === "commit")?.authorizationRequired, true);
   assert.equal(compiled.steps.find(({ id }) => id === "update-wiki")?.authorizationRequired, true);
   assert.equal(compiled.steps.find(({ id }) => id === "implement")?.skills[0]?.requestedRef, "builtin://skills/tdd-implementation");
-  assert.equal(compiled.steps.find(({ id }) => id === "review-fix")?.until, "${review-result.approved}");
+  assert.equal(compiled.steps.find(({ id }) => id === "review-fix")?.until, "${artifacts.review-result.approved}");
   assert.deepEqual(compiled.order.slice(0, 5), ["intake", "explore", "clarify", "design", "plan"]);
   assert.equal(compiled.changePolicy.kind, "feature");
 });
@@ -146,21 +146,32 @@ test("rejects malformed expressions and references to undeclared outputs", async
   expectCompileError(() => compileWorkflow(malformed.pkg, malformed.profile), "WSSPEC_COMPILE_EXPRESSION_INVALID");
 
   const unknown = await fixture();
-  step(unknown.pkg, "update-issue").when = "${missing.approved}";
+  step(unknown.pkg, "update-issue").when = "${artifacts.missing.approved}";
   expectCompileError(() => compileWorkflow(unknown.pkg, unknown.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN");
+});
+
+test("compiler 与 runtime 共用受限 AST，并接受复合 Binding 和 Artifact 条件", async () => {
+  const { pkg, profile: selected } = await fixture();
+  step(pkg, "update-issue").when = "${bindings.issue.exists && (bindings.knowledge.exists == false)}";
+  step(pkg, "commit").when = "${artifacts.review-result.approved == true || bindings.issue.exists}";
+
+  const compiled = compileWorkflow(pkg, selected);
+
+  assert.equal(compiled.steps.find(({ id }) => id === "update-issue")?.when, "${bindings.issue.exists && (bindings.knowledge.exists == false)}");
+  assert.equal(compiled.steps.find(({ id }) => id === "commit")?.when, "${artifacts.review-result.approved == true || bindings.issue.exists}");
 });
 
 test("rejects expressions that reference unreachable, future, disabled or unknown-typed outputs", async () => {
   const future = await fixture();
-  step(future.pkg, "clarify").when = "${review-result.approved}";
+  step(future.pkg, "clarify").when = "${artifacts.review-result.approved}";
   expectCompileError(() => compileWorkflow(future.pkg, future.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE");
 
   const disabled = await fixture("feature-delivery", "quick");
-  step(disabled.pkg, "plan").when = "${design.approved}";
+  step(disabled.pkg, "plan").when = "${artifacts.design.approved}";
   expectCompileError(() => compileWorkflow(disabled.pkg, disabled.profile), "WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE");
 
   const property = await fixture();
-  step(property.pkg, "commit").when = "${review-result.typo}";
+  step(property.pkg, "commit").when = "${artifacts.review-result.typo}";
   expectCompileError(() => compileWorkflow(property.pkg, property.profile), "WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN");
 });
 
