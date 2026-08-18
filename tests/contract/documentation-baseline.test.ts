@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
+import { errorOutput } from "../../src/adapters/cli/output.js";
 import { parseSkillLock } from "../../src/registry/skills/lock.js";
 import { publicCommandDescriptors } from "../../src/cli/commands/public-contract.js";
 import { publicRouteCommands } from "../../src/cli/commands/core.js";
@@ -79,6 +80,14 @@ function allSteps(steps: readonly WorkflowStep[]): WorkflowStep[] {
   return steps.flatMap((step) => [step, ...allSteps(step.steps ?? [])]);
 }
 
+function documentedErrorCodes(reference: Record<keyof typeof referenceDocuments, string>): string[] {
+  return [...new Set(Object.values(reference).flatMap((document) => [...document.matchAll(/WSSPEC_[A-Z_]+/gu)].map((match) => match[0])))].sort();
+}
+
+function assertErrorCatalogMatchesDocumentation(reference: Record<keyof typeof referenceDocuments, string>): void {
+  assert.deepEqual(documentedErrorCodes(reference), [...applicationPublicErrorCodes].sort());
+}
+
 test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill URI 与错误码", async () => {
   for (const filename of legacyDocuments) await assert.rejects(access(path.join(root, filename)), /ENOENT/u, filename);
   for (const filename of Object.values(referenceDocuments)) await access(path.join(root, filename));
@@ -107,13 +116,33 @@ test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill U
     for (const match of (await readFile(filename, "utf8")).matchAll(/builtin:\/\/skills\/[a-z0-9-]+/gu)) skillUris.add(match[0]);
   }
   for (const uri of skillUris) assert.match(reference.skills, new RegExp(escapeRegularExpression(uri), "u"), uri);
-  for (const code of applicationPublicErrorCodes) assert.match(`${reference.application}\n${reference.workflow}\n${reference.skills}\n${reference.connectors}`, new RegExp(code, "u"), code);
+  assertErrorCatalogMatchesDocumentation(reference);
 });
 
 test("操作章节不能借用下一章节的输出类型", async () => {
   const document = (await documents()).application;
   const mutated = document.replace("### `acquire`\n\n输入：`AcquireInput`，对应 `builtin.application-acquire-input.v1`，包含 `root`、`workItemId` 与必填 `actor`。输出：`AgentAction`。", "### `acquire`\n\n输入：`AcquireInput`，对应 `builtin.application-acquire-input.v1`，包含 `root`、`workItemId` 与必填 `actor`。");
   assert.doesNotMatch(operationSection(mutated, "acquire"), /输出：`AgentAction`/u);
+});
+
+test("公开错误码文档拒绝缺失或多余条目", async () => {
+  const reference = await documents();
+  assertErrorCatalogMatchesDocumentation(reference);
+  assert.throws(() => assertErrorCatalogMatchesDocumentation(Object.fromEntries(Object.entries(reference).map(([name, document]) => [name, document.replaceAll("WSSPEC_APPROVAL_DIGEST_MISMATCH", "")])) as typeof reference));
+  assert.throws(() => assertErrorCatalogMatchesDocumentation({ ...reference, application: `${reference.application}\nWSSPEC_UNREGISTERED_DOCUMENT_CODE` }));
+});
+
+test("CLI 输出只透传已注册错误码", () => {
+  assert.deepEqual(
+    errorOutput(Object.assign(new Error("参数无效。"), { code: "WSSPEC_ARGUMENT_INVALID" })),
+    { ok: false, error: { code: "WSSPEC_ARGUMENT_INVALID", message: "参数无效。" } },
+  );
+  for (const code of ["WSSPEC_UNREGISTERED", "INTERNAL_DATABASE_FAILURE"]) {
+    assert.deepEqual(
+      errorOutput(Object.assign(new Error("不得公开。"), { code })),
+      { ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } },
+    );
+  }
 });
 
 test("公开参考中的每个结构化示例都标注并通过正式契约", async () => {
