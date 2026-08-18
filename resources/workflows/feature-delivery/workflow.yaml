@@ -71,6 +71,7 @@ steps:
     outputs: [red-evidence]
   - id: implement
     uses: agent.execute
+    actorRole: implementation
     needs: [verify-red]
     inputs: [tasks]
     objective: 在保留 Red 测试的前提下完成最小实现
@@ -93,12 +94,14 @@ steps:
     steps:
       - id: review
         uses: agent.execute
+        actorRole: review
         skills:
           - ref: builtin://skills/code-review
             required: true
         outputs: [review-result]
       - id: fix
         uses: agent.execute
+        actorRole: fix
         when: ${artifacts.review-result.approved == false}
         skills:
           - ref: builtin://skills/bug-fixing

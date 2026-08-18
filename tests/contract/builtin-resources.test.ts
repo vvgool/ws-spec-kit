@@ -50,11 +50,15 @@ test("功能交付绑定可信 Red/Green Gate，文档交付保持纯文档边�
   const feature = catalog.workflows.find((item) => item.workflow.id === "feature-delivery")!;
   assert.deepEqual(feature.steps.map((step) => step.id), ["intake", "explore", "clarify", "design", "plan", "write-tests", "verify-red", "implement", "verify-green", "review-fix", "commit", "update-issue", "update-wiki", "close-issue", "close"]);
   assert.equal(feature.steps.find((step) => step.id === "review-fix")?.steps?.length, 3);
+  assert.equal(feature.steps.find((step) => step.id === "implement")?.actorRole, "implementation");
+  assert.deepEqual(feature.steps.find((step) => step.id === "review-fix")?.steps?.map(({ actorRole }) => actorRole), ["review", "fix", undefined]);
   assert.ok(feature.gates.some((gate) => gate.id === "verify-red" && gate.evidence === "trusted"));
   assert.ok(feature.gates.some((gate) => gate.id === "verify-green" && gate.evidence === "trusted"));
   const docs = catalog.workflows.find((item) => item.workflow.id === "documentation-delivery")!;
   assert.deepEqual(docs.steps.map((step) => step.id), ["intake", "explore", "clarify", "plan", "edit-document", "verify-document", "review-fix", "commit", "update-issue", "update-wiki", "close-issue", "close"]);
   assert.equal(docs.steps.find((step) => step.id === "review-fix")?.steps?.length, 3);
+  assert.equal(docs.steps.find((step) => step.id === "edit-document")?.actorRole, "implementation");
+  assert.deepEqual(docs.steps.find((step) => step.id === "review-fix")?.steps?.map(({ actorRole }) => actorRole), ["review", "fix", undefined]);
   assert.equal(docs.changePolicy?.kind, "documentation-only");
   assert.deepEqual(docs.gates.find((gate) => gate.id === "docs.integrity")?.command, ["wspec", "gate", "docs.integrity"]);
 });

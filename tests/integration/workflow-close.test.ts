@@ -189,6 +189,11 @@ test("Gate 集合随 Profile 增强，且只接受当前 workspace/config 的 pa
         actor: "author",
         result: { status: "completed", artifacts: [{ artifactType: "proposal", contentHash: "sha256:proposal" }] },
       },
+      "quality-check": {
+        workPackage: { attemptId: "attempt-check" },
+        actor: "gate-service",
+        result: { status: "completed", artifacts: [] },
+      },
     },
     approvals: {
       approval: {
@@ -211,7 +216,7 @@ test("Gate 集合随 Profile 增强，且只接受当前 workspace/config 的 pa
   assert.deepEqual(quick.missing.filter(({ category }) => category === "evidence"), []);
 
   const standard = closeChecklist({
-    profile: profile("standard", []),
+    profile: profile("standard", ["test"]),
     projection: { ...base, evidence: { [evidenceProjectionKey("quality-check", "test")]: freshTest } },
     gates: [{ id: "test", evidence: "trusted" }, { id: "lint", evidence: "trusted" }],
     gatePolicy: policy, workspaceTreeDigest: "sha256:workspace", configDigest: "sha256:config",
@@ -219,7 +224,7 @@ test("Gate 集合随 Profile 增强，且只接受当前 workspace/config 的 pa
   assert.deepEqual(standard.missing.filter(({ category }) => category === "evidence"), []);
 
   const governed = closeChecklist({
-    profile: profile("governed", []),
+    profile: profile("governed", ["test", "lint"]),
     projection: {
       ...base,
       evidence: {
@@ -366,6 +371,231 @@ test("Close 不要求循环内已跳过条件 Step 的 Artifact 或 Approval", (
   assert.deepEqual(decision.missing, []);
 });
 
+test("PARENT_SKIP: Close 不要求已跳过父循环的子 Artifact、Approval 或 Gate", () => {
+  const selected = profile("quick", []);
+  const parent = {
+    ...selected.steps[1]!,
+    id: "optional-loop",
+    uses: "control.loop",
+    needs: [],
+    gates: [],
+    steps: [{
+      id: "child-requirements",
+      uses: "agent.execute",
+      securityClass: "agent" as const,
+      needs: [],
+      enabled: true,
+      skills: [],
+      inputs: [],
+      outputs: [{ artifact: "child-output", required: true }],
+      gates: ["child-gate"],
+      approval: true,
+      authorizationRequired: false,
+      steps: [],
+    }],
+  };
+  const close = { ...selected.steps.at(-1)!, id: "close", needs: ["optional-loop"] };
+  selected.steps = [parent, close];
+  selected.order = ["optional-loop", "close"];
+  const current = projection({
+    stages: {
+      "optional-loop": { status: "skipped" },
+      close: { status: "ready" },
+    },
+  });
+
+  const decision = closeChecklist({
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: ["child-gate"] },
+    gates: [{ id: "child-gate", evidence: "trusted" }],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing, []);
+});
+
+test("STEP_GATE_SKIP: Close 不要求已跳过顶层 Step 的 Gate", () => {
+  const selected = profile("quick", ["test"]);
+  selected.steps[0]!.outputs = [];
+  selected.steps[0]!.approval = false;
+  const current = projection({
+    stages: {
+      "author-proposal": { status: "skipped" },
+      "quality-check": { status: "skipped" },
+      "publish-result": { status: "succeeded" },
+      "seal-work": { status: "ready" },
+    },
+  });
+
+  const decision = closeChecklist({
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: ["test"] },
+    gates: [{ id: "test", evidence: "trusted" }],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing, []);
+});
+
+test("OLD_ATTEMPT: Close 拒绝同一 Step 上不属于当前 Attempt 的 Gate Evidence", () => {
+  const selected = profile("quick", ["test"]);
+  selected.steps[0]!.outputs = [];
+  selected.steps[0]!.approval = false;
+  const current = projection({
+    stages: {
+      "author-proposal": { status: "succeeded" },
+      "quality-check": { status: "succeeded" },
+      "publish-result": { status: "succeeded" },
+      "seal-work": { status: "ready" },
+    },
+    contexts: {
+      "quality-check": {
+        workPackage: { attemptId: "attempt-current" },
+        actor: "gate-service",
+        result: { status: "completed", artifacts: [] },
+      },
+    },
+    evidence: {
+      [evidenceProjectionKey("quality-check", "test")]: evidence({ attemptId: "attempt-old" }),
+    },
+  });
+
+  const decision = closeChecklist({
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: ["test"] },
+    gates: [{ id: "test", evidence: "trusted" }],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing.filter(({ category }) => category === "evidence"), [
+    { category: "evidence", id: "test" },
+  ]);
+});
+
+test("Close 要求每个声明同名 Gate 的 Step instance 都有自身 Evidence", () => {
+  const selected = profile("quick", ["test"]);
+  const first = { ...selected.steps[1]!, id: "first-check", needs: [], gates: ["test"] };
+  const second = { ...selected.steps[1]!, id: "second-check", needs: ["first-check"], gates: ["test"] };
+  const close = { ...selected.steps.at(-1)!, id: "close", needs: ["second-check"] };
+  selected.steps = [first, second, close];
+  selected.order = ["first-check", "second-check", "close"];
+  const current = projection({
+    stages: {
+      "first-check": { status: "succeeded" },
+      "second-check": { status: "succeeded" },
+      close: { status: "ready" },
+    },
+    contexts: {
+      "first-check": {
+        workPackage: { attemptId: "attempt-first" },
+        actor: "gate-service",
+        result: { status: "completed", artifacts: [] },
+      },
+      "second-check": {
+        workPackage: { attemptId: "attempt-second" },
+        actor: "gate-service",
+        result: { status: "completed", artifacts: [] },
+      },
+    },
+    evidence: {
+      [evidenceProjectionKey("first-check", "test")]: evidence({ attemptId: "attempt-first" }),
+    },
+  });
+  const input = {
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: ["test"] },
+    gates: [{ id: "test", evidence: "trusted" as const }],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  };
+
+  assert.deepEqual(closeChecklist(input).missing.filter(({ category }) => category === "evidence"), [
+    { category: "evidence", id: "test" },
+  ]);
+  current.evidence[evidenceProjectionKey("second-check", "test")] = evidence({
+    evidenceId: "evidence-second",
+    attemptId: "attempt-second",
+  });
+  assert.deepEqual(closeChecklist(input).missing.filter(({ category }) => category === "evidence"), []);
+});
+
+test("RENAMED_REVIEW: Governed Close 按角色而不是固定 Step ID 校验独立 Review", () => {
+  const selected = profile("governed", []);
+  selected.publishing = { issueRequired: false, knowledgeRequired: false, readBackRequired: false };
+  const implementation = {
+    ...selected.steps[0]!,
+    id: "build-feature",
+    actorRole: "implementation" as const,
+    outputs: [],
+    approval: false,
+  };
+  const auditCycle = {
+    ...selected.steps[1]!,
+    id: "audit-cycle",
+    uses: "control.loop",
+    needs: ["build-feature"],
+    independentReviewActor: true,
+    steps: [{
+      id: "audit-work",
+      actorRole: "review" as const,
+      uses: "agent.execute",
+      securityClass: "agent" as const,
+      needs: [],
+      enabled: true,
+      skills: [],
+      inputs: [],
+      outputs: [],
+      gates: [],
+      approval: false,
+      authorizationRequired: false,
+      steps: [],
+    }],
+  };
+  const close = { ...selected.steps.at(-1)!, id: "close", needs: ["audit-cycle"] };
+  selected.steps = [implementation, auditCycle, close];
+  selected.order = ["build-feature", "audit-cycle", "close"];
+  const current = projection({
+    profile: { ...projection().profile, mode: "governed", selected: "governed" },
+    stages: {
+      "build-feature": { status: "succeeded" },
+      "audit-cycle": { status: "succeeded" },
+      close: { status: "ready" },
+    },
+    contexts: {
+      "build-feature": {
+        workPackage: { attemptId: "attempt-build" },
+        actor: "author",
+        result: { status: "completed", artifacts: [] },
+      },
+      "audit-cycle:1:audit-work": {
+        workPackage: { attemptId: "attempt-audit" },
+        actor: "independent-reviewer",
+        result: { status: "completed", artifacts: [] },
+      },
+    },
+    loops: { "audit-cycle": { loopId: "audit-cycle", iteration: 1, maxIterations: 5, status: "succeeded" } },
+  });
+
+  const decision = closeChecklist({
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.equal(decision.allowed, true);
+  assert.deepEqual(decision.missing, []);
+});
+
 test("Close 对相同 category/id 的缺失项只报告一次", () => {
   const selected = profile("quick", []);
   selected.steps.splice(1, 0, {
@@ -423,6 +653,13 @@ test("Close 按 Application Snapshot 的 Gate 信任级别接受 attested Eviden
         level: "attested",
       }),
     },
+    contexts: {
+      "quality-check": {
+        workPackage: { attemptId: "attempt-check" },
+        actor: "gate-service",
+        result: { status: "completed", artifacts: [] },
+      },
+    },
   });
   const decision = closeChecklist({
     profile: selected,
@@ -439,7 +676,7 @@ test("Close 按 Application Snapshot 的 Gate 信任级别接受 attested Eviden
 test("Governed Close 防御性拒绝由实现 Actor 完成的独立 Review", () => {
   const selected = profile("governed", []);
   selected.publishing = { issueRequired: false, knowledgeRequired: false, readBackRequired: false };
-  const implement = { ...selected.steps[0]!, id: "implement", outputs: [], approval: false };
+  const implement = { ...selected.steps[0]!, id: "implement", actorRole: "implementation" as const, outputs: [], approval: false };
   const reviewFix = {
     ...selected.steps[1]!,
     id: "review-fix",
@@ -448,6 +685,7 @@ test("Governed Close 防御性拒绝由实现 Actor 完成的独立 Review", () 
     independentReviewActor: true,
     steps: [{
       id: "review",
+      actorRole: "review" as const,
       uses: "agent.execute",
       securityClass: "agent" as const,
       needs: [],

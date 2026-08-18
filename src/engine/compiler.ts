@@ -84,7 +84,7 @@ const defaultDocumentationPaths = Object.freeze([
   "docs/**/*.txt",
 ]);
 
-const workflowStepKeys = new Set(["id", "uses", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
+const workflowStepKeys = new Set(["id", "uses", "actorRole", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
 const profileStepKeys = new Set(["enabled", "approval", "artifactLevel", "artifacts", "gates", "maxIterations", "independentReviewActor"]);
 const resolvedSkillKeys = new Set(["requestedRef", "ref", "source", "provider", "rootId", "entrypoint", "digest", "candidates", "required", "usedFallback", "primary", "fallback"]);
 
@@ -352,6 +352,7 @@ function compileStep(step: WorkflowStep, overlays: Readonly<Record<string, Profi
   const compiled: CompiledStep = {
     id: step.id,
     uses: step.uses,
+    ...(step.actorRole === undefined ? {} : { actorRole: step.actorRole }),
     securityClass: executor.securityClass,
     needs: [...(step.needs ?? [])],
     enabled: overlay?.enabled ?? true,

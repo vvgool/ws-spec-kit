@@ -21,7 +21,7 @@ connectors: [requirement, git, issue, knowledge]
 
 ## 2. Workflow 定义
 
-顶层字段为 `version`、`workflow`、`inputs`、`steps`、`gates` 和可选 `changePolicy`。外层 `version` 与 `workflow.version` 都必须为 `1`。每个 Step 有唯一 `id`，以 `uses` 指定执行器，可声明 `action`、`needs`、`skills`、`outputs`、`approval`、`when` 和子 `steps`。Gate 有唯一 `id`，并且只声明 `evidence`（`trusted` 或 `attested`）和 argv 形式的 `command`；Gate 不属于 Step 字段。`changePolicy.kind` 只能是 `feature` 或 `documentation-only`。
+顶层字段为 `version`、`workflow`、`inputs`、`steps`、`gates` 和可选 `changePolicy`。外层 `version` 与 `workflow.version` 都必须为 `1`。每个 Step 有唯一 `id`，以 `uses` 指定执行器，可声明 `action`、`needs`、`skills`、`outputs`、`approval`、`when` 和子 `steps`。参与独立 Review actor 隔离的 Agent Step 还应以 `actorRole` 声明 `implementation`、`review` 或 `fix` 语义，运行时不会从 `id` 猜测角色。Gate 有唯一 `id`，并且只声明 `evidence`（`trusted` 或 `attested`）和 argv 形式的 `command`；Gate 不属于 Step 字段。`changePolicy.kind` 只能是 `feature` 或 `documentation-only`。
 
 ```yaml contract=workflow-v1
 version: 1
@@ -63,6 +63,7 @@ steps:
     outputs: [tasks]
   - id: edit-document
     uses: agent.execute
+    actorRole: implementation
     needs: [plan]
     inputs: [tasks]
     skills:
@@ -84,12 +85,14 @@ steps:
     steps:
       - id: review
         uses: agent.execute
+        actorRole: review
         skills:
           - ref: builtin://skills/documentation-review
             required: true
         outputs: [review-result]
       - id: fix
         uses: agent.execute
+        actorRole: fix
         when: ${artifacts.review-result.approved == false}
         skills:
           - ref: builtin://skills/documentation-editing

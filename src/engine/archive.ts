@@ -1,6 +1,7 @@
 import { approvalBindingDigest } from "./approvals.js";
-import { isFreshGateEvidence, type EvidenceLevel } from "./verification.js";
+import { completedReviewActors, implementationActors } from "./actor-roles.js";
 import { parseLoopStepInstanceId } from "./control/loop.js";
+import { evidenceProjectionKey, isFreshGateEvidence, type EvidenceLevel } from "./verification.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import type { ProjectGatePolicy } from "./compiler.js";
 import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
@@ -52,19 +53,51 @@ function flatten(steps: readonly SnapshotStep[]): SnapshotStep[] {
   return steps.flatMap((step) => [step, ...flatten(step.steps)]);
 }
 
-function contextsForStep(projection: RuntimeProjection, step: SnapshotStep): AttemptRecord[] {
-  const values: unknown[] = [];
-  if (projection.contexts[step.id] !== undefined) values.push(projection.contexts[step.id]);
-  for (const [key, value] of Object.entries(projection.contexts)) {
-    if (key.endsWith(`:${step.id}`)) values.push(value);
-  }
-  return values.filter((value): value is AttemptRecord => record(value) !== undefined) as AttemptRecord[];
+function attemptRecord(value: unknown): AttemptRecord | undefined {
+  return record(value) as AttemptRecord | undefined;
 }
 
-function completedArtifacts(projection: RuntimeProjection, step: SnapshotStep): NonNullable<NonNullable<AttemptRecord["result"]>["artifacts"]> {
-  return contextsForStep(projection, step)
-    .filter(({ result }) => result?.status === "completed")
-    .flatMap(({ result }) => result?.artifacts ?? []);
+interface EffectiveStepInstance {
+  step: SnapshotStep;
+  stepInstanceId: string;
+  context?: AttemptRecord;
+}
+
+function skippedInstance(projection: RuntimeProjection, stepInstanceId: string): boolean {
+  return projection.stages[stepInstanceId]?.status === "skipped"
+    || attemptRecord(projection.contexts[stepInstanceId])?.skipped === true;
+}
+
+function childInstanceIds(projection: RuntimeProjection, loopId: string, stepId: string): string[] {
+  return Object.keys(projection.contexts)
+    .filter((stepInstanceId) => {
+      const parsed = parseLoopStepInstanceId(stepInstanceId);
+      return parsed?.loopId === loopId && parsed.stepId === stepId;
+    })
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function effectiveStepInstances(profile: SnapshotProfile, projection: RuntimeProjection): EffectiveStepInstance[] {
+  const result: EffectiveStepInstance[] = [];
+  const visit = (step: SnapshotStep, stepInstanceId: string, ancestorSkipped: boolean): void => {
+    const skipped = ancestorSkipped || !step.enabled || skippedInstance(projection, stepInstanceId);
+    if (!skipped) {
+      const context = attemptRecord(projection.contexts[stepInstanceId]);
+      result.push({ step, stepInstanceId, ...(context === undefined ? {} : { context }) });
+    }
+    for (const child of step.steps) {
+      const instanceIds = childInstanceIds(projection, step.id, child.id);
+      for (const childInstanceId of instanceIds.length === 0 ? [child.id] : instanceIds) {
+        visit(child, childInstanceId, skipped);
+      }
+    }
+  };
+  for (const step of profile.steps) visit(step, step.id, false);
+  return result;
+}
+
+function completedArtifacts(instance: EffectiveStepInstance): NonNullable<NonNullable<AttemptRecord["result"]>["artifacts"]> {
+  return instance.context?.result?.status === "completed" ? instance.context.result.artifacts ?? [] : [];
 }
 
 type ApprovalArtifact = NonNullable<RuntimeApproval["artifacts"]>[number];
@@ -103,97 +136,58 @@ function sortArtifacts(artifacts: readonly ApprovalArtifact[]): ApprovalArtifact
   return [...artifacts].sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`));
 }
 
-function approvalMatches(approval: RuntimeApproval, step: SnapshotStep, projection: RuntimeProjection): boolean {
-  if (approval.status !== "approved" || approval.stageId !== step.id
+function approvalMatches(approval: RuntimeApproval, instance: EffectiveStepInstance): boolean {
+  if (approval.status !== "approved" || approval.stageId !== instance.stepInstanceId
     || typeof approval.requestedBy !== "string" || approval.requestedBy === ""
     || typeof approval.decidedBy !== "string" || approval.decidedBy === "") return false;
-  const attempts = contextsForStep(projection, step).filter(({ result }) => result?.status === "completed");
-  const attempt = attempts.find(({ workPackage }) => workPackage?.attemptId === approval.attemptId);
-  if (attempt === undefined) return false;
+  const attempt = instance.context;
+  if (attempt?.result?.status !== "completed" || attempt.workPackage?.attemptId !== approval.attemptId) return false;
   const artifacts = (attempt.result?.artifacts ?? []).map(approvalArtifact);
   if (approval.artifacts === undefined || artifacts.some((artifact) => artifact === undefined)) return false;
   const completeArtifacts = sortArtifacts(artifacts as ApprovalArtifact[]);
   if (!sameArtifacts(sortArtifacts(approval.artifacts), completeArtifacts)) return false;
-  return approval.contentHash === approvalBindingDigest({ stageId: step.id, attemptId: approval.attemptId, artifacts: completeArtifacts });
+  return approval.contentHash === approvalBindingDigest({ stageId: instance.stepInstanceId, attemptId: approval.attemptId, artifacts: completeArtifacts });
 }
 
-function requiredGateIds(profile: SnapshotProfile, policy: ProjectGatePolicy): string[] {
+function requiredGateIds(profile: SnapshotProfile, policy: ProjectGatePolicy): ReadonlySet<string> {
   const gates = new Set(flatten(profile.steps).filter(({ enabled }) => enabled).flatMap(({ gates: ids }) => ids));
   if (profile.id === "standard") for (const id of policy.requiredGateIds) gates.add(id);
   if (profile.id === "governed") for (const id of policy.configuredGateIds) gates.add(id);
-  return [...gates].sort((left, right) => left.localeCompare(right));
+  return gates;
 }
 
 function gateLevel(gates: ApplicationSnapshot["gates"], gateId: string): EvidenceLevel {
   return gates.find(({ id }) => id === gateId)?.evidence ?? "trusted";
 }
 
-function hasFreshEvidence(input: CloseChecklistInput, gateId: string): boolean {
-  return Object.values(input.projection.evidence).some((evidence) => isFreshGateEvidence({
-    evidence,
+function hasFreshEvidence(input: CloseChecklistInput, instance: EffectiveStepInstance, gateId: string): boolean {
+  const attemptId = instance.context?.result?.status === "completed"
+    ? instance.context.workPackage?.attemptId
+    : undefined;
+  if (attemptId === undefined) return false;
+  return isFreshGateEvidence({
+    evidence: input.projection.evidence[evidenceProjectionKey(instance.stepInstanceId, gateId)],
     gateId,
+    attemptId,
     requiredLevel: gateLevel(input.gates, gateId),
     workspaceTreeDigest: input.workspaceTreeDigest,
     configDigest: input.configDigest,
-  }));
-}
-
-function stepWasSkipped(projection: RuntimeProjection, step: SnapshotStep): boolean {
-  if (projection.stages[step.id]?.status === "skipped") return true;
-  const contexts = contextsForStep(projection, step);
-  return contexts.length > 0 && contexts.every(({ skipped }) => skipped === true);
-}
-
-function completedActor(value: unknown): { completed: boolean; actor?: string } {
-  const source = record(value) as { actor?: unknown; result?: { status?: unknown } } | undefined;
-  return {
-    completed: source?.result?.status === "completed",
-    ...(typeof source?.actor === "string" && source.actor !== "" ? { actor: source.actor } : {}),
-  };
-}
-
-function implementationActors(input: {
-  profile: SnapshotProfile;
-  projection: RuntimeProjection;
-  loopId: string;
-  iteration: number;
-}): ReadonlySet<string> | undefined {
-  const actors = new Set<string>();
-  const topLevelIds = ["implement", "edit-document"].filter((stepId) => input.profile.steps.some(({ id }) => id === stepId));
-  if (topLevelIds.length === 0) return undefined;
-  for (const stepId of topLevelIds) {
-    const candidate = completedActor(input.projection.contexts[stepId]);
-    if (!candidate.completed || candidate.actor === undefined) return undefined;
-    actors.add(candidate.actor);
-  }
-  for (const [stepInstanceId, value] of Object.entries(input.projection.contexts)) {
-    const parsed = parseLoopStepInstanceId(stepInstanceId);
-    if (parsed?.loopId !== input.loopId || parsed.stepId !== "fix" || parsed.iteration >= input.iteration) continue;
-    const candidate = completedActor(value);
-    if (!candidate.completed) continue;
-    if (candidate.actor === undefined) return undefined;
-    actors.add(candidate.actor);
-  }
-  return actors.size === 0 ? undefined : actors;
+  });
 }
 
 function independentReviewsSatisfied(input: CloseChecklistInput, step: SnapshotStep): boolean {
   if (input.profile.id !== "governed" || step.independentReviewActor !== true) return true;
   if (input.projection.loops[step.id]?.status !== "succeeded") return false;
-  const reviews = Object.entries(input.projection.contexts)
-    .map(([stepInstanceId, value]) => ({ parsed: parseLoopStepInstanceId(stepInstanceId), value }))
-    .filter(({ parsed }) => parsed?.loopId === step.id && parsed.stepId === "review")
-    .filter(({ value }) => completedActor(value).completed);
+  const reviews = completedReviewActors({ loop: step, projection: input.projection });
   if (reviews.length === 0) return false;
-  return reviews.every(({ parsed, value }) => {
-    const reviewer = completedActor(value).actor;
+  return reviews.every(({ iteration, actor }) => {
     const actors = implementationActors({
       profile: input.profile,
       projection: input.projection,
       loopId: step.id,
-      iteration: parsed!.iteration,
+      iteration,
     });
-    return reviewer !== undefined && actors !== undefined && !actors.has(reviewer);
+    return actor !== undefined && actors !== undefined && !actors.has(actor);
   });
 }
 
@@ -226,21 +220,21 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
     }
     if (step.enabled && !independentReviewsSatisfied(input, step)) addMissing("step", step.id);
   }
-  for (const step of flatten(input.profile.steps)) {
-    if (!step.enabled || stepWasSkipped(input.projection, step)) continue;
-    const artifacts = completedArtifacts(input.projection, step);
-    for (const output of step.outputs.filter(({ required }) => required)) {
+  const requiredGates = requiredGateIds(input.profile, input.gatePolicy);
+  for (const instance of effectiveStepInstances(input.profile, input.projection)) {
+    const artifacts = completedArtifacts(instance);
+    for (const output of instance.step.outputs.filter(({ required }) => required)) {
       if (!artifacts.some(({ artifactType }) => artifactType === output.artifact)) {
         addMissing("artifact", output.artifact);
       }
     }
-    if (step.approval
-      && !Object.values(input.projection.approvals).some((approval) => approvalMatches(approval, step, input.projection))) {
-      addMissing("approval", step.id);
+    if (instance.step.approval
+      && !Object.values(input.projection.approvals).some((approval) => approvalMatches(approval, instance))) {
+      addMissing("approval", instance.step.id);
     }
-  }
-  for (const gateId of requiredGateIds(input.profile, input.gatePolicy)) {
-    if (!hasFreshEvidence(input, gateId)) addMissing("evidence", gateId);
+    for (const gateId of instance.step.gates.filter((id) => requiredGates.has(id))) {
+      if (!hasFreshEvidence(input, instance, gateId)) addMissing("evidence", gateId);
+    }
   }
   for (const target of ["issue", "knowledge"] as const) {
     const required = target === "issue" ? input.profile.publishing.issueRequired : input.profile.publishing.knowledgeRequired;

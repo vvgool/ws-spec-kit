@@ -335,13 +335,14 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
     source: ArtifactReference;
     profiles: Record<string, { steps: Array<{
       id: string;
+      actorRole?: "implementation" | "review" | "fix";
       artifactLevel?: string;
       until?: string;
       retry?: { maxAttempts: number };
       maxIterations?: number;
       independentReviewActor?: boolean;
       outputs: Array<{ artifact: string; required: boolean; contentLevel?: string }>;
-      steps?: Array<{ id: string }>;
+      steps?: Array<{ id: string; actorRole?: "implementation" | "review" | "fix" }>;
     }> }>;
   };
   const governedReviewFix = application.profiles.governed?.steps.find(({ id }) => id === "review-fix");
@@ -349,6 +350,7 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
   assert.equal(governedReviewFix?.maxIterations, 5);
   assert.equal(governedReviewFix?.independentReviewActor, true);
   assert.deepEqual(governedReviewFix?.steps?.map(({ id }) => id), ["review", "fix", "verify"]);
+  assert.deepEqual(governedReviewFix?.steps?.map(({ actorRole }) => actorRole), ["review", "fix", undefined]);
   const quickPlan = application.profiles.quick?.steps.find(({ id }) => id === "plan");
   assert.equal(quickPlan?.artifactLevel, "compact");
   assert.deepEqual(quickPlan?.retry, { maxAttempts: 3 });
@@ -449,6 +451,11 @@ test("application snapshot parser rejects unknown and malformed recursive fields
       const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
       const plan = profiles.quick!.steps.find(({ id }) => id === "plan")!;
       (plan.outputs as Array<Record<string, unknown>>)[0]!.contentLevel = 1;
+    }],
+    ["invalid actor role", (value) => {
+      const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;
+      const implementation = profiles.governed!.steps.find(({ actorRole }) => actorRole === "implementation")!;
+      implementation.actorRole = "author";
     }],
     ["legacy artifact shorthand expression", (value) => {
       const profiles = value.profiles as Record<string, { steps: Array<Record<string, unknown>> }>;

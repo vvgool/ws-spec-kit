@@ -1,5 +1,5 @@
 import type { ResolvedSkill } from "../registry/skills/types.js";
-import type { ProfileAudit, ProfilePublishing, WorkflowRetry } from "../workflow-package/types.js";
+import type { ProfileAudit, ProfilePublishing, WorkflowActorRole, WorkflowRetry } from "../workflow-package/types.js";
 
 export type SecurityClass = "agent" | "local-read" | "local-write" | "external-read" | "external-write" | "control";
 export type ProfileId = "quick" | "standard" | "governed";
@@ -18,6 +18,7 @@ export interface ArtifactDeclaration {
 export interface CompiledStep {
   id: string;
   uses: string;
+  actorRole?: WorkflowActorRole;
   securityClass: SecurityClass;
   needs: string[];
   enabled: boolean;

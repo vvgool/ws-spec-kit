@@ -11,6 +11,7 @@ steps:
     steps:
       - id: review
         uses: agent.execute
+        actorRole: review
         outputs: [review-result]
 gates:
   - id: test
@@ -46,6 +47,7 @@ export const invalidWorkflowV1Fixtures = [
   ["workflow top-level unknown", `${workflowV1Fixture}typo: true\n`],
   ["workflow nested unknown", workflowV1Fixture.replace("retry: { maxAttempts: 2 }", "retry: { maxAttempts: 2, typo: true }")],
   ["workflow nested type", workflowV1Fixture.replace("retry: { maxAttempts: 2 }", "retry: { maxAttempts: wrong }")],
+  ["workflow actor role", workflowV1Fixture.replace("actorRole: review", "actorRole: reviewer")],
 ] as const;
 
 export const invalidProfileV1Fixtures = [

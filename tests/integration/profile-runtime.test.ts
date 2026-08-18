@@ -16,6 +16,7 @@ import {
   failedResult,
   requireExecute,
   retainOnlyReadyStage,
+  rewriteSelectedSnapshot,
   submitPackage,
   worktreeFor,
   writeReviewArtifact,
@@ -535,6 +536,47 @@ test("Governed Review 拒绝原实现者和所有历史 completed Fix Actor，�
   }
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }));
   assert.equal(review.stepId, "review-fix:3:review");
+});
+
+test("Governed Review 在 Acquire 阶段按 actorRole 支持重命名 Workflow", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证重命名 Review actor 语义" }, profile: "governed" });
+  await rewriteSelectedSnapshot(fixture, started.workItemId, (selected) => {
+    const implementation = selected.steps.find(({ id }) => id === "implement")!;
+    const reviewLoop = selected.steps.find(({ id }) => id === "review-fix")!;
+    implementation.id = "build-feature";
+    reviewLoop.id = "audit-cycle";
+    reviewLoop.needs = ["build-feature"];
+    const reviewer = (reviewLoop.steps as Array<Record<string, unknown>>).find(({ id }) => id === "review")!;
+    reviewer.id = "audit-work";
+    selected.steps = [implementation, reviewLoop];
+    selected.order = ["build-feature", "audit-cycle"];
+  });
+  await retainOnlyReadyStage(fixture, started.workItemId, "audit-cycle");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-renamed-implementation-actor",
+    operationInput: {},
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        contexts: {
+          ...current.contexts,
+          "build-feature": { actor: "original-implementer", result: { status: "completed" } },
+        },
+      },
+      value: null,
+    }),
+  });
+
+  await assert.rejects(
+    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "original-implementer" }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+  );
+  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }));
+  assert.equal(review.stepId, "audit-cycle:1:audit-work");
 });
 
 test("Governed Review 在已完成实现记录缺少 actor 时 fail closed", async () => {

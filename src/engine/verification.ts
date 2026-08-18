@@ -63,6 +63,7 @@ const evidenceStrength: Record<EvidenceLevel, number> = { reported: 0, attested:
 export function isFreshGateEvidence(input: {
   evidence: unknown;
   gateId: string;
+  attemptId: string;
   requiredLevel: EvidenceLevel;
   workspaceTreeDigest: string;
   configDigest: string;
@@ -71,6 +72,7 @@ export function isFreshGateEvidence(input: {
   if (record === undefined) return false;
   const { recordHash: _recordHash, ...unsigned } = record;
   return record.gateId === input.gateId
+    && record.attemptId === input.attemptId
     && evidenceStrength[record.level] >= evidenceStrength[input.requiredLevel]
     && record.result === "passed"
     && record.workspaceTreeDigest === input.workspaceTreeDigest

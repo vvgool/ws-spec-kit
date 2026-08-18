@@ -16,9 +16,11 @@ export interface WorkflowSkillBinding { ref: string; required?: boolean; fallbac
 export interface WorkflowArtifactInput { artifact: string; required?: boolean }
 export interface WorkflowRetry { maxAttempts: number }
 export interface WorkflowLoop { until: string; maxIterations: number }
+export type WorkflowActorRole = "implementation" | "review" | "fix";
 export interface WorkflowStep {
   id: string;
   uses: string;
+  actorRole?: WorkflowActorRole;
   needs?: string[];
   when?: string;
   retry?: WorkflowRetry;

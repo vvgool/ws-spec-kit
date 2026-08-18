@@ -81,8 +81,14 @@ function parseLoop(value: unknown): WorkflowLoop {
 
 function parseStep(value: unknown): WorkflowStep {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
-  const source = record(value, code, "Workflow Step", ["id", "uses", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
+  const source = record(value, code, "Workflow Step", ["id", "uses", "actorRole", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
   const result: WorkflowStep = { id: string(source.id, code, "Step id"), uses: string(source.uses, code, "Step uses") };
+  if (source.actorRole !== undefined) {
+    if (source.actorRole !== "implementation" && source.actorRole !== "review" && source.actorRole !== "fix") {
+      error(code, "Step actorRole 不受支持。");
+    }
+    result.actorRole = source.actorRole;
+  }
   if (source.needs !== undefined) result.needs = strings(source.needs, code, "Step needs");
   if (source.when !== undefined) result.when = string(source.when, code, "Step when");
   if (source.retry !== undefined) result.retry = parseRetry(source.retry);
