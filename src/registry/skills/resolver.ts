@@ -136,13 +136,20 @@ function globalRoots(context: ResolutionContext): SearchRoot[] {
     rootId: `${context.provider}:default:${index}`,
     directory: path.join(context.home, ...relative.split("/")),
   }));
-  const additional = (context.additionalGlobalRoots ?? []).map((configured, index) => {
+  const configuredRoots = context.additionalGlobalRoots ?? [];
+  if (new Set(configuredRoots.map(({ id }) => id)).size !== configuredRoots.length) {
+    error("WSSPEC_SKILL_CONTEXT_INVALID", "附加 Global Skill 根 ID 不能重复。");
+  }
+  const additional = configuredRoots.map((configured) => {
+    if (!/^[a-z][a-z0-9-]{0,62}$/u.test(configured.id)) {
+      error("WSSPEC_SKILL_CONTEXT_INVALID", "附加 Global Skill 根 ID 必须是稳定逻辑标识。");
+    }
     let directory: string;
-    if (path.isAbsolute(configured)) directory = path.resolve(configured);
-    else if (configured === "~") directory = context.home;
-    else if (configured.startsWith("~/")) directory = path.resolve(context.home, configured.slice(2));
+    if (path.isAbsolute(configured.path)) directory = path.resolve(configured.path);
+    else if (configured.path === "~") directory = context.home;
+    else if (configured.path.startsWith("~/")) directory = path.resolve(context.home, configured.path.slice(2));
     else error("WSSPEC_SKILL_PATH_INVALID", "附加 Global Skill 根必须是绝对路径或 ~/ 路径。");
-    return { rootId: `${context.provider}:additional:${index}`, directory };
+    return { rootId: `${context.provider}:additional:${configured.id}`, directory };
   });
   return [...defaults, ...additional];
 }
@@ -252,8 +259,11 @@ function assertFallbackLock(lock: SkillLockEntry, binding: WorkflowSkillBinding,
 }
 
 function assertPrimaryLock(lock: SkillLockEntry, primary: ResolvedReference): void {
-  if (lock.rootId !== primary.rootId || lock.digest !== primary.digest) {
-    error("WSSPEC_SKILL_LOCK_CHANGED", "Skill 主项当前解析结果与已有 Lock 不一致。");
+  const currentCandidates = new Map(primary.candidates.map((candidate) => [candidate.rootId, candidate.digest]));
+  const candidatesMatch = lock.candidates.length === primary.candidates.length
+    && lock.candidates.every((candidate) => currentCandidates.get(candidate.rootId) === candidate.digest);
+  if (lock.rootId !== primary.rootId || lock.digest !== primary.digest || !candidatesMatch) {
+    error("WSSPEC_SKILL_LOCK_CHANGED", "Skill 主项或候选集当前解析结果与已有 Lock 不一致。");
   }
 }
 
@@ -338,7 +348,7 @@ export async function revalidateGlobalSkillLock(input: {
   provider: SkillProvider;
   projectRoot: string;
   home: string;
-  additionalGlobalRoots?: string[];
+  additionalGlobalRoots?: import("./types.js").AdditionalGlobalRoot[];
 }): Promise<void> {
   const lock = parseSkillLock(input.lock);
   for (const entry of lock.skills.filter(({ source }) => source === "global")) {

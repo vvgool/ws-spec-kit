@@ -63,8 +63,9 @@ function digest(value: unknown, label: string): string {
 function rootId(value: unknown, refSource: SkillSource, host: SkillProvider, label: string): string {
   const result = string(value, label);
   const defaultLimits: Record<SkillProvider, number> = { codex: 1, claude: 1, cursor: 4, generic: 0 };
-  const globalMatch = new RegExp(`^${host}:(default|additional):(0|[1-9][0-9]*)$`).exec(result);
-  const validGlobal = globalMatch !== null && (globalMatch[1] === "additional" || Number(globalMatch[2]) < defaultLimits[host]);
+  const defaultMatch = new RegExp(`^${host}:default:(0|[1-9][0-9]*)$`).exec(result);
+  const additionalMatch = new RegExp(`^${host}:additional:[a-z][a-z0-9-]{0,62}$`).exec(result);
+  const validGlobal = (defaultMatch !== null && Number(defaultMatch[1]) < defaultLimits[host]) || additionalMatch !== null;
   const valid = refSource === "builtin"
     ? result === "builtin"
     : refSource === "package"

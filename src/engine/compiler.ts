@@ -433,6 +433,7 @@ function validateArtifactDependencies(steps: readonly CompiledStep[], path: stri
     const produced = [...ancestors].flatMap((id) => producedArtifacts(byId.get(id)!));
     for (const input of current.inputs) {
       if (!input.required) continue;
+      if (input.artifact === "requirement-source") continue;
       const candidates = produced.filter(({ artifact }) => artifact === input.artifact);
       if (candidates.some(({ guaranteed }) => guaranteed)) continue;
       if (candidates.some(({ enabled }) => enabled)) fail("WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED", `${path}/${current.id}/inputs/${input.artifact}`, "必需输入只能由无条件且必需的输出满足。");

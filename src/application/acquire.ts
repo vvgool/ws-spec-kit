@@ -7,6 +7,7 @@ import { revalidateGlobalSkillLock } from "../registry/skills/resolver.js";
 import { validate } from "../schemas/index.js";
 import { applicationCloseEvidenceKey, recoverControlPlane, type ApplicationCloseEvidence, type RuntimeClaim, type RuntimeProjection } from "../storage/control-plane.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
+import { rebindAdditionalGlobalRoots } from "../storage/project-config.js";
 import type { ApplicationSnapshot, ApplicationState, SnapshotProfile, SnapshotStep } from "./state.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
 
@@ -14,6 +15,7 @@ export interface AcquireDependencies {
   now(): Date;
   executors: ExecutorRegistry;
   home: string;
+  provider: import("../registry/skills/types.js").SkillProvider;
 }
 
 export interface ApplicationAttemptRecord {
@@ -70,14 +72,56 @@ function pendingApproval(projection: RuntimeProjection, workItemId: string): Age
   };
 }
 
-function priorArtifacts(projection: RuntimeProjection, snapshot: ApplicationSnapshot): ArtifactReference[] {
-  const artifacts = [snapshot.source];
-  for (const value of Object.values(projection.contexts)) {
-    const result = (value as ApplicationAttemptRecord | undefined)?.result;
-    if (result !== undefined) artifacts.push(...result.artifacts);
+function dependencyClosure(stepId: string, profile: SnapshotProfile): Set<string> {
+  const byId = new Map(profile.steps.map((step) => [step.id, step]));
+  const result = new Set<string>();
+  const visit = (candidate: string): void => {
+    for (const dependency of byId.get(candidate)?.needs ?? []) {
+      if (result.has(dependency)) continue;
+      result.add(dependency);
+      visit(dependency);
+    }
+  };
+  visit(stepId);
+  return result;
+}
+
+function inputArtifacts(input: {
+  step: SnapshotStep;
+  profile: SnapshotProfile;
+  projection: RuntimeProjection;
+  snapshot: ApplicationSnapshot;
+}): ArtifactReference[] {
+  const ancestors = dependencyClosure(input.step.id, input.profile);
+  const order = new Map(input.profile.order.map((stepId, index) => [stepId, index]));
+  const selected: ArtifactReference[] = [];
+  const seen = new Set<string>();
+  for (const requirement of input.step.inputs) {
+    if (seen.has(requirement.artifact)) continue;
+    seen.add(requirement.artifact);
+    let artifact: ArtifactReference | undefined;
+    if (requirement.artifact === "requirement-source") {
+      artifact = input.snapshot.source;
+    } else {
+      const candidates = [...ancestors].flatMap((stepId) => {
+        const stage = input.projection.stages[stepId];
+        const result = (input.projection.contexts[stepId] as ApplicationAttemptRecord | undefined)?.result;
+        if ((stage?.status !== "succeeded" && stage?.status !== "succeeded_with_warnings") || result?.status !== "completed") return [];
+        return result.artifacts
+          .map((candidate, artifactIndex) => ({ candidate, artifactIndex, stepIndex: order.get(stepId) ?? -1 }))
+          .filter(({ candidate }) => candidate.artifactType === requirement.artifact);
+      });
+      candidates.sort((left, right) => (right.candidate.revision ?? 0) - (left.candidate.revision ?? 0)
+        || right.stepIndex - left.stepIndex
+        || right.artifactIndex - left.artifactIndex);
+      artifact = candidates[0]?.candidate;
+    }
+    if (artifact !== undefined) selected.push(artifact);
+    else if (requirement.required) {
+      throw new ApplicationAcquireError("WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING", `步骤 ${input.step.id} 缺少必需输入 Artifact ${requirement.artifact}。`);
+    }
   }
-  const unique = new Map(artifacts.map((artifact) => [`${artifact.artifactType}\0${artifact.path ?? ""}\0${artifact.contentHash ?? ""}`, artifact]));
-  return [...unique.values()];
+  return selected;
 }
 
 function workPackageFor(input: {
@@ -88,6 +132,7 @@ function workPackageFor(input: {
   expiresAt: string;
   projection: RuntimeProjection;
   snapshot: ApplicationSnapshot;
+  profile: SnapshotProfile;
 }): WorkPackage {
   const gatesById = new Map(input.snapshot.gates.map((gate) => [gate.id, gate]));
   const requiredOutputs = input.step.outputs.filter((output) => output.required).map((output) => {
@@ -107,7 +152,7 @@ function workPackageFor(input: {
     objective: input.step.objective ?? `${input.step.uses}${input.step.action === undefined ? "" : `/${input.step.action}`}`,
     ...(input.step.artifactLevel === undefined ? {} : { artifactLevel: input.step.artifactLevel }),
     skills: input.step.skills.map((skill) => ({ ...skill })),
-    artifacts: priorArtifacts(input.projection, input.snapshot),
+    artifacts: inputArtifacts(input),
     constraints: {
       allowedPaths: [...input.snapshot.changePolicy.allowedPaths],
       forbiddenActions: ["push", "merge", "release", "unapproved-external-write"],
@@ -127,6 +172,7 @@ export async function acquireNextLocked(input: {
   state: ApplicationState;
   projection: RuntimeProjection;
   actor: string;
+  root: string;
   dependencies: AcquireDependencies;
 }): Promise<{ projection: RuntimeProjection; action: AgentAction }> {
   const { state, actor, dependencies } = input;
@@ -180,12 +226,16 @@ export async function acquireNextLocked(input: {
         : completed(state.item.workItemId, "closed", "Workflow 已完成。"),
     };
   }
+  const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
+    root: input.root,
+    rootIds: state.snapshot.skillResolution.additionalGlobalRootIds,
+  });
   await revalidateGlobalSkillLock({
     lock: state.snapshot.skillLock,
     provider: state.snapshot.skillResolution.provider,
     projectRoot: state.worktree,
     home: dependencies.home,
-    additionalGlobalRoots: state.snapshot.skillResolution.additionalGlobalRoots,
+    additionalGlobalRoots,
   });
   dependencies.executors.assertStep(step as unknown as CompiledStepShape);
   if (step.uses === "control.close") {
@@ -222,7 +272,7 @@ export async function acquireNextLocked(input: {
     allowedPaths: [...state.snapshot.changePolicy.allowedPaths],
     workspaceSnapshot: await computeWorkspaceSnapshot(state.worktree),
   };
-  const workPackage = workPackageFor({ workItemId: state.item.workItemId, step, attemptId, token, expiresAt, projection, snapshot: state.snapshot });
+  const workPackage = workPackageFor({ workItemId: state.item.workItemId, step, attemptId, token, expiresAt, projection, snapshot: state.snapshot, profile });
   const priorAttempt = projection.contexts[step.id] as ApplicationAttemptRecord | undefined;
   const retryCount = priorAttempt?.result?.status === "failed" ? priorAttempt.retryCount + 1 : priorAttempt?.retryCount ?? 0;
   projection = {
@@ -252,7 +302,7 @@ export async function acquireApplication(input: AcquireInput, dependencies: Acqu
     actor: input.actor,
     operationInput: { actor: input.actor, at: dependencies.now().toISOString() },
     mutate: async (projection) => {
-      const acquired = await acquireNextLocked({ state, projection, actor: input.actor, dependencies });
+      const acquired = await acquireNextLocked({ state, projection, actor: input.actor, root: input.root, dependencies });
       return { projection: acquired.projection, value: acquired.action };
     },
   });

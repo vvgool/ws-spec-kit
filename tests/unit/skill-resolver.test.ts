@@ -110,19 +110,19 @@ test("四种 Provider 使用固定默认 Global 根顺序", async () => {
 test("附加 Global 根追加在默认根之后并使用逻辑 rootId", async () => {
   const resolverContext = await context("codex");
   const additional = path.join(resolverContext.home, "custom-skills");
-  resolverContext.additionalGlobalRoots = [additional];
+  resolverContext.additionalGlobalRoots = [{ id: "team-skills", path: additional }];
   await writeSkill(additional, "vendor/tdd", "# Added\n");
 
   const result = await resolveSkill({ ref: "global://vendor/tdd", required: true }, resolverContext);
 
-  assert.equal(result?.rootId, "codex:additional:0");
-  assert.equal(result?.candidates[0]?.rootId, "codex:additional:0");
+  assert.equal(result?.rootId, "codex:additional:team-skills");
+  assert.equal(result?.candidates[0]?.rootId, "codex:additional:team-skills");
   assert.equal(JSON.stringify(result?.candidates).includes(resolverContext.home), false);
 });
 
 test("附加 Global 根拒绝无法移植的相对路径", async () => {
   const resolverContext = await context("generic");
-  resolverContext.additionalGlobalRoots = ["relative/skills"];
+  resolverContext.additionalGlobalRoots = [{ id: "relative-skills", path: "relative/skills" }];
 
   await assert.rejects(
     resolveSkill({ ref: "global://vendor/tdd", required: true }, resolverContext),

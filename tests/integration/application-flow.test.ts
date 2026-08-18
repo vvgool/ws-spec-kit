@@ -3,6 +3,7 @@ import { access, cp, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } fr
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 
 import { createApplication, type ApplicationDependencies } from "../../src/application/application.js";
 import { parseApplicationSnapshot } from "../../src/application/snapshot.js";
@@ -109,24 +110,26 @@ async function writeArtifact(input: {
   artifactType: string;
   body: string;
   filename?: string;
+  revision?: number;
 }): Promise<ArtifactReference> {
+  const revision = input.revision ?? 1;
   const metadata = {
     artifactType: input.artifactType,
     schemaVersion: 1 as const,
     workItemId: input.workItemId,
     stageId: input.workPackage.stepId,
     attemptId: input.workPackage.attemptId,
-    revision: 1,
+    revision,
   };
   const contentHash = computeArtifactContentHash(metadata, input.body);
   const relative = `.wsspec/work-items/${input.workItemId}/artifacts/${input.filename ?? `${input.artifactType}.md`}`;
   await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
   await writeFile(
     path.join(input.worktree, relative),
-    `---\nartifactType: ${input.artifactType}\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: 1\ncontentHash: ${contentHash}\n---\n${input.body}`,
+    `---\nartifactType: ${input.artifactType}\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: ${revision}\ncontentHash: ${contentHash}\n---\n${input.body}`,
     "utf8",
   );
-  return { artifactType: input.artifactType, schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown" };
+  return { artifactType: input.artifactType, schemaVersion: 1, path: relative, revision, contentHash, mediaType: "text/markdown" };
 }
 
 async function prepareApproval(current: Fixture): Promise<{
@@ -136,9 +139,12 @@ async function prepareApproval(current: Fixture): Promise<{
   worktree: string;
 }> {
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "增加登录" }, profile: "standard" });
-  const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
-  const explore = requireExecute(await submitPackage(current, intake));
   const worktree = await worktreeFor(current.root, started.workItemId);
+  const application = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"), "utf8")) as { source: ArtifactReference };
+  const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  assert.deepEqual(intake.artifacts, [application.source]);
+  const explore = requireExecute(await submitPackage(current, intake));
+  assert.deepEqual(explore.artifacts, [application.source]);
   const exploration = await writeArtifact({
     worktree,
     workItemId: started.workItemId,
@@ -175,7 +181,7 @@ async function installArtifactContractWorkflow(current: Fixture, artifactType: s
   await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
   const workflowPath = path.join(projectPackage, "workflow.yaml");
   const workflow = await readFile(workflowPath, "utf8");
-  await writeFile(workflowPath, workflow.replace("outputs: [exploration-report]", `outputs: [${artifactType}]`), "utf8");
+  await writeFile(workflowPath, workflow.replace("outputs: [exploration-report]", `outputs: [exploration-report, ${artifactType}]`), "utf8");
   await git(current.root, "add", ".wsspec/workflows/feature-delivery");
   await git(current.root, "commit", "-m", `test: declare ${artifactType} output`);
 }
@@ -326,6 +332,7 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
   const worktree = await worktreeFor(current.root, started.workItemId);
   const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
   const application = JSON.parse(await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8")) as {
+    source: ArtifactReference;
     profiles: Record<string, { steps: Array<{
       id: string;
       artifactLevel?: string;
@@ -361,20 +368,62 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
     body: "# Exploration\n\nRepository facts.\n",
   });
   const clarify = requireExecute(await submitPackage(current, explore, completedResult(explore, [exploration])));
-  const specification = await writeArtifact({
+  assert.deepEqual(clarify.artifacts, [exploration]);
+  const specificationV1 = await writeArtifact({
     worktree,
     workItemId: started.workItemId,
     workPackage: clarify,
     artifactType: "specification",
+    filename: "specification-v1.md",
+    revision: 1,
     body: [
       "# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "需求",
       "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
     ].join("\n"),
   });
-  const plan = requireExecute(await submitPackage(current, clarify, completedResult(clarify, [specification])));
+  const specificationV2 = await writeArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    workPackage: clarify,
+    artifactType: "specification",
+    filename: "specification-v2.md",
+    revision: 2,
+    body: [
+      "# 规格", "", "## 目标与背景", "最新目标", "## 范围", "范围", "## 需求", "需求",
+      "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
+    ].join("\n"),
+  });
+  const plan = requireExecute(await submitPackage(current, clarify, completedResult(clarify, [specificationV1, specificationV2])));
   assert.equal(plan.stepId, "plan");
   assert.equal(plan.artifactLevel, "compact");
+  assert.deepEqual(plan.artifacts, [specificationV2]);
   assert.deepEqual(plan.requiredOutputs, [{ artifactType: "tasks", schemaVersion: 1, contentLevel: "compact" }]);
+});
+
+test("acquire fails closed when a compiled required input Artifact is missing", async () => {
+  const current = await fixture();
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "缺少 specification" }, profile: "quick" });
+  const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  const explore = requireExecute(await submitPackage(current, intake));
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const exploration = await writeArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    workPackage: explore,
+    artifactType: "exploration-report",
+    body: "# Exploration\n\nRepository facts.\n",
+  });
+  const clarify = requireExecute(await submitPackage(current, explore, completedResult(explore, [exploration])));
+  const projection = await readControlPlane(current.root, started.workItemId);
+  projection.stages.clarify = { status: "succeeded" };
+  delete projection.claims.clarify;
+  projection.contexts.clarify = { workPackage: clarify, retryCount: 0, result: completedResult(clarify, []) };
+  await writeProjection(projection);
+
+  await assert.rejects(
+    current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING",
+  );
 });
 
 test("application snapshot parser rejects unknown and malformed recursive fields", async () => {
@@ -665,6 +714,170 @@ test("acquire revalidates every locked Global Skill before issuing a Work Packag
       );
     });
   }
+});
+
+test("start and acquire use an uncommitted current-host config without copying it into the hidden worktree", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wsspec-uncommitted-host-"));
+  const additionalRoot = path.join(home, "shared-skills");
+  await initRepository(root);
+  await mkdir(additionalRoot, { recursive: true });
+  await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "shared", path: additionalRoot }] },
+  }, null, 2)}\n`, "utf8");
+  const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
+
+  const started = await app.start({ root, source: { type: "prompt", text: "未提交配置仍可恢复" }, profile: "quick" });
+  const worktree = await worktreeFor(root, started.workItemId);
+  await assert.rejects(
+    access(path.join(worktree, ".wsspec", "config.yaml")),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT",
+  );
+  assert.equal((await app.acquire({ root, workItemId: started.workItemId, actor: "codex" })).action, "execute");
+
+  const projection = await readControlPlane(root, started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  for (const filename of [
+    path.join(itemRoot, "snapshot", "application.json"),
+    path.join(itemRoot, "snapshot", "config.yaml"),
+    path.join(itemRoot, "snapshot", "skill.lock.json"),
+    path.join(itemRoot, "snapshot", "workflow.lock.json"),
+    path.join(projection.controlPlane, "events.jsonl"),
+  ]) {
+    const persisted = await readFile(filename, "utf8");
+    assert.equal(persisted.includes(home), false, filename);
+    assert.equal(persisted.includes(additionalRoot), false, filename);
+  }
+});
+
+test("acquire reports a missing current-host config as an unbound Global root", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wsspec-missing-host-config-"));
+  const additionalRoot = path.join(home, "shared-skills");
+  await initRepository(root);
+  await mkdir(additionalRoot, { recursive: true });
+  await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "shared", path: additionalRoot }] },
+  }, null, 2)}\n`, "utf8");
+  const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
+  const started = await app.start({ root, source: { type: "prompt", text: "缺失当前宿主配置" }, profile: "quick" });
+
+  await rm(path.join(root, ".wsspec", "config.yaml"));
+
+  await assert.rejects(
+    app.acquire({ root, workItemId: started.workItemId, actor: "codex" }),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && (error as Error & { code: string }).code === "WSSPEC_GLOBAL_ROOT_NOT_CONFIGURED",
+  );
+});
+
+test("additional Global roots retain their snapshotted provider when rebinding to the current HOME", async (t) => {
+  const firstHome = path.join(os.tmpdir(), `wsspec-first-home-${crypto.randomUUID()}`);
+  const secondHome = path.join(os.tmpdir(), `wsspec-second-home-${crypto.randomUUID()}`);
+  const firstRoot = path.join(firstHome, "shared-skills");
+  const secondRoot = path.join(secondHome, "shared-skills");
+  const configFor = (root: string): string => `${JSON.stringify({
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "shared-skills", path: root }] },
+  }, null, 2)}\n`;
+  const current = await fixture({ provider: "codex", home: firstHome, workflowTrust: { interactive: true, actor: "reviewer" } });
+  const projectPackage = path.join(current.root, ".wsspec", "workflows", "feature-delivery");
+  await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
+  const workflowPath = path.join(projectPackage, "workflow.yaml");
+  const workflow = await readFile(workflowPath, "utf8");
+  await writeFile(workflowPath, workflow.replaceAll("builtin://skills/requirement-exploration", "global://vendor/test"), "utf8");
+  await mkdir(path.join(firstRoot, "vendor", "test"), { recursive: true });
+  await writeFile(path.join(firstRoot, "vendor", "test", "SKILL.md"), "# Portable Global Test\n", "utf8");
+  await writeFile(
+    path.join(current.root, ".wsspec", "config.yaml"),
+    configFor(firstRoot),
+    "utf8",
+  );
+  await git(current.root, "add", ".wsspec/config.yaml", ".wsspec/workflows/feature-delivery");
+  await git(current.root, "commit", "-m", "test: configure portable Global Skill root");
+  await trustProjectWorkflow(current);
+
+  const started = await current.app.start({
+    root: current.root,
+    source: { type: "prompt", text: "跨 HOME 恢复 Global Skill" },
+    workflowRef: "project://workflows/feature-delivery",
+  });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const projection = await readControlPlane(current.root, started.workItemId);
+  const applicationPath = path.join(itemRoot, "snapshot", "application.json");
+  const configSnapshotPath = path.join(itemRoot, "snapshot", "config.yaml");
+  const persistedFiles = [
+    applicationPath,
+    configSnapshotPath,
+    path.join(itemRoot, "snapshot", "skill.lock.json"),
+    path.join(itemRoot, "snapshot", "workflow.lock.json"),
+  ];
+  for (const filename of persistedFiles) {
+    const persisted = await readFile(filename, "utf8");
+    assert.equal(persisted.includes(firstHome), false, filename);
+    assert.equal(persisted.includes(firstRoot), false, filename);
+  }
+  assert.deepEqual(parse(await readFile(configSnapshotPath, "utf8")), {
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "shared-skills" }] },
+  });
+  const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as {
+    skillResolution: { provider: string; additionalGlobalRootIds: string[] };
+    skillLock: { skills: Array<{ rootId?: string }> };
+  };
+  assert.deepEqual(snapshot.skillResolution, { provider: "codex", additionalGlobalRootIds: ["shared-skills"] });
+  assert.equal(snapshot.skillLock.skills.some(({ rootId }) => rootId === "codex:additional:shared-skills"), true);
+
+  await mkdir(path.join(secondRoot, "vendor", "test"), { recursive: true });
+  await writeFile(path.join(secondRoot, "vendor", "test", "SKILL.md"), "# Portable Global Test\n", "utf8");
+  await writeFile(
+    path.join(current.root, ".wsspec", "config.yaml"),
+    configFor(secondRoot),
+    "utf8",
+  );
+  await writeFile(path.join(firstRoot, "vendor", "test", "SKILL.md"), "# Changed Original Host Skill\n", "utf8");
+  const resumed = createApplication({ provider: "generic", home: secondHome, terminal: { isTTY: true } });
+  assert.equal((await resumed.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" })).action, "execute");
+  for (const filename of [...persistedFiles, path.join(projection.controlPlane, "events.jsonl")]) {
+    const persisted = await readFile(filename, "utf8");
+    for (const forbidden of [firstHome, firstRoot, secondHome, secondRoot]) {
+      assert.equal(persisted.includes(forbidden), false, `${filename} contains ${forbidden}`);
+    }
+  }
+
+  await t.test("the rebound root is still digest-checked", async () => {
+    await writeFile(path.join(firstRoot, "vendor", "test", "SKILL.md"), "# Portable Global Test\n", "utf8");
+    const different = await fixture({ provider: "generic", home: firstHome, workflowTrust: { interactive: true, actor: "reviewer" } });
+    const differentPackage = path.join(different.root, ".wsspec", "workflows", "feature-delivery");
+    await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), differentPackage, { recursive: true });
+    const differentWorkflowPath = path.join(differentPackage, "workflow.yaml");
+    const differentWorkflow = await readFile(differentWorkflowPath, "utf8");
+    await writeFile(differentWorkflowPath, differentWorkflow.replaceAll("builtin://skills/requirement-exploration", "global://vendor/test"), "utf8");
+    await writeFile(
+      path.join(different.root, ".wsspec", "config.yaml"),
+      configFor(firstRoot),
+      "utf8",
+    );
+    await git(different.root, "add", ".wsspec/config.yaml", ".wsspec/workflows/feature-delivery");
+    await git(different.root, "commit", "-m", "test: configure changed Global Skill root");
+    await trustProjectWorkflow(different);
+    const changed = await different.app.start({ root: different.root, source: { type: "prompt", text: "复验摘要" }, workflowRef: "project://workflows/feature-delivery" });
+    await writeFile(
+      path.join(different.root, ".wsspec", "config.yaml"),
+      configFor(secondRoot),
+      "utf8",
+    );
+    await writeFile(path.join(secondRoot, "vendor", "test", "SKILL.md"), "# Changed Portable Global Test\n", "utf8");
+    const changedHome = createApplication({ provider: "generic", home: secondHome, terminal: { isTTY: true } });
+    await assert.rejects(
+      changedHome.acquire({ root: different.root, workItemId: changed.workItemId, actor: "codex" }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SKILL_LOCK_CHANGED",
+    );
+  });
 });
 
 test("submit validates malformed bodies for every built-in Artifact contract", async (t) => {

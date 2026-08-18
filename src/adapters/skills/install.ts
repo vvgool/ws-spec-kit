@@ -18,6 +18,44 @@ export interface DriverSkillInstallerDependencies {
   writeSkill(target: string, content: string): Promise<void>;
 }
 
+type DriverVersion = 1 | 2;
+
+const currentDriverVersion = 2 as const;
+const driverDescription = "使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。";
+const driverFrontMatterKeys = ["description", "name", "wsspeckit-driver-content-digest", "wsspeckit-driver-version"] as const;
+
+// v1 的中文指导曾在未提升版本号时更新，因此两个历史摘要都必须显式登记。
+const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly string[]>> = {
+  codex: {
+    1: [
+      "sha256:8804ee37451e7740a488c14291d048b57a21bdd7e2efb1b1beb70a46940030e3",
+      "sha256:69b6ad68c123a711095377ffdf64d21225f4bafaab3a414497ffef6c5391773e",
+    ],
+    2: ["sha256:69b6ad68c123a711095377ffdf64d21225f4bafaab3a414497ffef6c5391773e"],
+  },
+  claude: {
+    1: [
+      "sha256:3a592093e530e6e65c46d3d0cbde567fc4674135b250b0bd807e44dcb8ff8fb7",
+      "sha256:f7876f2691e037c3d5d9e469275e8f9adb110b6ed39f3ba7eb6f962e5d70cbb1",
+    ],
+    2: ["sha256:f7876f2691e037c3d5d9e469275e8f9adb110b6ed39f3ba7eb6f962e5d70cbb1"],
+  },
+  cursor: {
+    1: [
+      "sha256:d74438d605600c54633d2262a9558163a3f0d3a5c664983e4a20d4f84708b392",
+      "sha256:2c5645323532c603f0e2b037bb3cd2cc1275d31abf0fa01180cc3ee436534a93",
+    ],
+    2: ["sha256:2c5645323532c603f0e2b037bb3cd2cc1275d31abf0fa01180cc3ee436534a93"],
+  },
+  generic: {
+    1: [
+      "sha256:a2aeea6a8e14df5fb5477d5ec37eee0a7666f10976e80ac92a8087d1484b94c5",
+      "sha256:8248d34a1ac5306701a7d8ac5fbbea175b22ceb932fbcdc3d672a01e31127c25",
+    ],
+    2: ["sha256:8248d34a1ac5306701a7d8ac5fbbea175b22ceb932fbcdc3d672a01e31127c25"],
+  },
+};
+
 function body(agent: DriverAgent): string {
   return [
     "# WSSpecKit Driver",
@@ -35,12 +73,16 @@ function body(agent: DriverAgent): string {
 
 function skill(agent: DriverAgent): string {
   const content = body(agent);
+  const digest = sha256(content);
+  if (!canonicalDriverDigests[agent][currentDriverVersion].includes(digest)) {
+    throw new Error("当前 Driver 正文未登记 canonical 摘要。");
+  }
   return [
     "---",
     "name: wsspeckit-driver",
-    "wsspeckit-driver-version: 1",
-    `wsspeckit-driver-content-digest: ${sha256(content)}`,
-    "description: 使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。",
+    `wsspeckit-driver-version: ${currentDriverVersion}`,
+    `wsspeckit-driver-content-digest: ${digest}`,
+    `description: ${driverDescription}`,
     "---",
     "",
     content,
@@ -69,10 +111,17 @@ function ownedSkill(content: string, agent: DriverAgent): boolean {
   try { frontMatter = parse(match[1]!); } catch { return false; }
   if (frontMatter === null || typeof frontMatter !== "object" || Array.isArray(frontMatter)) return false;
   const source = frontMatter as Record<string, unknown>;
+  const keys = Object.keys(source).sort();
+  const version = source["wsspeckit-driver-version"];
+  const digest = source["wsspeckit-driver-content-digest"];
   return source.name === "wsspeckit-driver"
-    && source["wsspeckit-driver-version"] === 1
-    && source["wsspeckit-driver-content-digest"] === sha256(match[2]!)
-    && content === skill(agent);
+    && source.description === driverDescription
+    && keys.length === driverFrontMatterKeys.length
+    && keys.every((key, index) => key === driverFrontMatterKeys[index])
+    && (version === 1 || version === 2)
+    && typeof digest === "string"
+    && digest === sha256(match[2]!)
+    && canonicalDriverDigests[agent][version].includes(digest);
 }
 
 async function assertOwned(target: string, agent: DriverAgent): Promise<void> {

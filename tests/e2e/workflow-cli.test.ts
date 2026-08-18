@@ -136,7 +136,7 @@ test("四类 Provider 在 validate、use 与 start 使用相同的 Project Skill
       await mkdir(path.join(globalRoot, "vendor", "test"), { recursive: true });
       await writeFile(path.join(globalRoot, "vendor", "test", "SKILL.md"), "# 测试 Skill\n", "utf8");
       await writeFile(path.join(root, ".wsspec", "config.yaml"), scenario.additional === true
-        ? `version: 1\nskills:\n  additionalGlobalRoots:\n    - ${globalRoot}\n`
+        ? `version: 1\nskills:\n  additionalGlobalRoots:\n    - id: global-root\n      path: ${globalRoot}\n`
         : "version: 1\n", "utf8");
       await git(root, "add", ".wsspec");
       await git(root, "commit", "-m", `test: ${scenario.provider} global Skill`);

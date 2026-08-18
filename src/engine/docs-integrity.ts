@@ -27,4 +27,3 @@ export async function checkDocumentationIntegrity(input: { root: string; files: 
   }
   return { ok: problems.length === 0, problems };
 }
-

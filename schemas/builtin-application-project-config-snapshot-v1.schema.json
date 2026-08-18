@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "builtin.application-project-config.v1",
+  "$id": "builtin.application-project-config-snapshot.v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -188,21 +188,17 @@
         "additionalGlobalRoots": {
           "type": "array",
           "minItems": 1,
+          "uniqueItems": true,
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "id",
-              "path"
+              "id"
             ],
             "properties": {
               "id": {
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9-]{0,62}$"
-              },
-              "path": {
-                "type": "string",
-                "minLength": 1
               }
             }
           }

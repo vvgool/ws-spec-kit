@@ -8,6 +8,7 @@ import type { RepositoryId, WorkItemId } from "../domain/ids.js";
 import { validate } from "../schemas/index.js";
 import { writeFileAtomic } from "./files.js";
 import { runGit } from "./git.js";
+import { portableProjectConfigText } from "./project-config.js";
 import { loadRepository, type RepositoryIdentity } from "./repository.js";
 
 interface PromptSource {
@@ -263,6 +264,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
   const identity = await loadRepository(input.root);
   const root = identity.repositoryRoot;
   const { workflowText, configText, config } = await readProjectContracts(root, input.application);
+  const portableConfigText = portableProjectConfigText(parse(configText));
   const worktreeRoot = repositoryRelativePath(root, config.git.worktrees.root);
   const branch = `${config.git.worktrees.branchPrefix}${input.workItemId}`;
   const worktree = path.join(worktreeRoot.absolute, input.workItemId);
@@ -289,7 +291,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     const itemRoot = path.join(worktree, ".wsspec", "work-items", input.workItemId);
     const snapshotRoot = path.join(itemRoot, "snapshot");
     await writeFileAtomic(path.join(snapshotRoot, "workflow.yaml"), workflowText);
-    await writeFileAtomic(path.join(snapshotRoot, "config.yaml"), configText);
+    await writeFileAtomic(path.join(snapshotRoot, "config.yaml"), portableConfigText);
     const schemaDigest = await snapshotSchemas(path.join(snapshotRoot, "schemas"));
     await writeFileAtomic(path.join(itemRoot, "source", "source.json"), `${JSON.stringify(source, null, 2)}\n`);
 
@@ -306,7 +308,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
         baselineRevision,
         baselineTreeDigest,
         workflowDigest: sha256(workflowText),
-        configDigest: sha256(configText),
+        configDigest: sha256(portableConfigText),
         schemaDigest,
       },
       source: {
@@ -346,8 +348,8 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
         ownerToken,
         locatorMode: "creating",
       });
-    } catch (rollbackError) {
-      throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_FAILED", `Work Item 创建失败且无法安全回滚：${String(rollbackError)}`);
+    } catch {
+      throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_FAILED", "Work Item 创建失败且无法安全回滚。");
     }
     throw error;
   }

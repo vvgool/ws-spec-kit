@@ -1,6 +1,7 @@
 export const schemaIds = [
   "builtin.workflow-selection.v1",
   "builtin.application-project-config.v1",
+  "builtin.application-project-config-snapshot.v1",
   "builtin.work-item.v1",
   "builtin.application-start-input.v1",
   "builtin.application-acquire-input.v1",
@@ -193,30 +194,10 @@ const publishBinding = (properties: Record<string, JsonSchema>): JsonSchema => (
   ],
 });
 
-export const schemas = {
-  "builtin.workflow-selection.v1": {
+function applicationProjectConfigSchema(id: "builtin.application-project-config.v1" | "builtin.application-project-config-snapshot.v1", portable: boolean): JsonSchema {
+  return {
     $schema: "https://json-schema.org/draft/2020-12/schema",
-    $id: "builtin.workflow-selection.v1",
-    type: "object",
-    additionalProperties: false,
-    required: ["version", "activeWorkflow"],
-    properties: {
-      version: { const: 1 },
-      activeWorkflow: {
-        type: "object",
-        additionalProperties: false,
-        required: ["ref", "version"],
-        properties: {
-          ref: { type: "string", pattern: "^(builtin|project)://workflows/[a-z0-9][a-z0-9-]*$" },
-          version: { const: 1 },
-        },
-      },
-      profile: { enum: ["auto", "quick", "standard", "governed"] },
-    },
-  },
-  "builtin.application-project-config.v1": {
-    $schema: "https://json-schema.org/draft/2020-12/schema",
-    $id: "builtin.application-project-config.v1",
+    $id: id,
     type: "object",
     additionalProperties: false,
     required: ["version"],
@@ -294,13 +275,46 @@ export const schemas = {
           additionalGlobalRoots: {
             type: "array",
             minItems: 1,
-            uniqueItems: true,
-            items: { type: "string", minLength: 1 },
+            ...(portable ? { uniqueItems: true } : {}),
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: portable ? ["id"] : ["id", "path"],
+              properties: {
+                id: { type: "string", pattern: idPattern },
+                ...(portable ? {} : { path: { type: "string", minLength: 1 } }),
+              },
+            },
           },
         },
       },
     },
+  };
+}
+
+export const schemas = {
+  "builtin.workflow-selection.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "builtin.workflow-selection.v1",
+    type: "object",
+    additionalProperties: false,
+    required: ["version", "activeWorkflow"],
+    properties: {
+      version: { const: 1 },
+      activeWorkflow: {
+        type: "object",
+        additionalProperties: false,
+        required: ["ref", "version"],
+        properties: {
+          ref: { type: "string", pattern: "^(builtin|project)://workflows/[a-z0-9][a-z0-9-]*$" },
+          version: { const: 1 },
+        },
+      },
+      profile: { enum: ["auto", "quick", "standard", "governed"] },
+    },
   },
+  "builtin.application-project-config.v1": applicationProjectConfigSchema("builtin.application-project-config.v1", false),
+  "builtin.application-project-config-snapshot.v1": applicationProjectConfigSchema("builtin.application-project-config-snapshot.v1", true),
   "builtin.work-item.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "builtin.work-item.v1",

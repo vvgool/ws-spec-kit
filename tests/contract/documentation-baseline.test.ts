@@ -6,10 +6,18 @@ import { parse as parseYaml } from "yaml";
 
 import { errorOutput } from "../../src/adapters/cli/output.js";
 import { parseSkillLock } from "../../src/registry/skills/lock.js";
-import { publicCommandDescriptors } from "../../src/cli/commands/public-contract.js";
+import { publicCliRouteDescriptors, publicCommandDescriptors } from "../../src/cli/commands/public-contract.js";
 import { publicRouteCommands } from "../../src/cli/commands/core.js";
 import { compileWorkflow } from "../../src/engine/compiler.js";
-import { applicationPublicErrorCodes } from "../../src/protocol/public-contract.js";
+import {
+  applicationInternalError,
+  applicationPublicErrorCodes,
+  applicationPublicErrorCodesByRoute,
+  applicationPublicErrorGroupNamesByRoute,
+  applicationPublicErrorGroups,
+  publicCliErrorRoutes,
+  publicCliRoutes,
+} from "../../src/protocol/public-contract.js";
 import { validate, type SchemaId } from "../../src/schemas/index.js";
 import { loadWorkflowPackage } from "../../src/workflow-package/loader.js";
 import type { WorkflowStep } from "../../src/workflow-package/types.js";
@@ -88,6 +96,49 @@ function assertErrorCatalogMatchesDocumentation(reference: Record<keyof typeof r
   assert.deepEqual(documentedErrorCodes(reference), [...applicationPublicErrorCodes].sort());
 }
 
+function tableSection(document: string, heading: string): string {
+  const marker = `### ${heading}`;
+  const start = document.indexOf(marker);
+  assert.notEqual(start, -1, `缺少 ${heading} 章节`);
+  const contentStart = start + marker.length;
+  const next = document.indexOf("\n### ", contentStart);
+  return document.slice(contentStart, next === -1 ? undefined : next);
+}
+
+function tableRows(section: string): Map<string, string[]> {
+  return new Map([...section.matchAll(/^\| `([^`]+)` \| ([^|]+) \|$/gmu)].map((match) => [
+    match[1]!,
+    [...match[2]!.matchAll(/`([^`]+)`/gu)].map((entry) => entry[1]!),
+  ]));
+}
+
+async function cliReachableProductionSources(): Promise<string[]> {
+  const seen = new Set<string>();
+  const visit = async (filename: string): Promise<void> => {
+    if (seen.has(filename) || filename === path.join(root, "src/protocol/public-contract.ts")) return;
+    seen.add(filename);
+    const source = await readFile(filename, "utf8");
+    for (const match of source.matchAll(/from\s+["'](\.[^"']+)["']/gu)) {
+      const imported = path.resolve(path.dirname(filename), match[1]!.replace(/\.js$/u, ".ts"));
+      try {
+        await visit(imported);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  };
+  await visit(path.join(root, "src/cli/main.ts"));
+  return [...seen].sort();
+}
+
+async function cliReachableTypedErrorCodes(): Promise<string[]> {
+  const codes = new Set<string>([applicationInternalError.code]);
+  for (const filename of await cliReachableProductionSources()) {
+    for (const match of (await readFile(filename, "utf8")).matchAll(/WSSPEC_[A-Z][A-Z0-9_]*/gu)) codes.add(match[0]);
+  }
+  return [...codes].sort();
+}
+
 test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill URI 与错误码", async () => {
   for (const filename of legacyDocuments) await assert.rejects(access(path.join(root, filename)), /ENOENT/u, filename);
   for (const filename of Object.values(referenceDocuments)) await access(path.join(root, filename));
@@ -100,6 +151,7 @@ test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill U
   const applicationReference = reference.application;
   const protocol = await readFile(path.join(root, "src/protocol/application.ts"), "utf8");
   assert.deepEqual([...publicCommandDescriptors.map(({ command }) => command)].sort(), [...publicRouteCommands].sort());
+  assert.deepEqual([...publicCliRouteDescriptors.map(({ route }) => route)].sort(), [...publicCliRoutes].sort());
   for (const value of [...schemaIds, ...publicCommandDescriptors.map(({ command }) => command)]) assert.match(applicationReference, new RegExp(escapeRegularExpression(value), "u"), value);
   for (const operation of applicationOperations(protocol)) {
     const section = operationSection(applicationReference, operation.name);
@@ -132,10 +184,50 @@ test("公开错误码文档拒绝缺失或多余条目", async () => {
   assert.throws(() => assertErrorCatalogMatchesDocumentation({ ...reference, application: `${reference.application}\nWSSPEC_UNREGISTERED_DOCUMENT_CODE` }));
 });
 
+test("CLI typed error、逐路由目录与公开文档保持双向覆盖", async () => {
+  const reachableCodes = await cliReachableTypedErrorCodes();
+  assert.deepEqual(reachableCodes, [...applicationPublicErrorCodes].sort());
+  assert.equal(new Set(applicationPublicErrorCodes).size, applicationPublicErrorCodes.length);
+  assert.deepEqual(Object.keys(applicationPublicErrorCodesByRoute).sort(), [...publicCliErrorRoutes].sort());
+  assert.deepEqual(Object.keys(applicationPublicErrorGroupNamesByRoute).sort(), [...publicCliErrorRoutes].sort());
+
+  const groupedCodes = [...new Set(Object.values(applicationPublicErrorGroups).flat())].sort();
+  assert.deepEqual(groupedCodes, [...applicationPublicErrorCodes].sort());
+  for (const route of publicCliErrorRoutes) {
+    const expected = [...new Set(applicationPublicErrorGroupNamesByRoute[route].flatMap((group) => applicationPublicErrorGroups[group]))].sort();
+    assert.deepEqual([...applicationPublicErrorCodesByRoute[route]].sort(), expected, route);
+  }
+
+  const document = (await documents()).application;
+  const documentedGroups = tableRows(tableSection(document, "错误码分组"));
+  assert.deepEqual([...documentedGroups.keys()].sort(), Object.keys(applicationPublicErrorGroups).sort());
+  for (const [group, codes] of Object.entries(applicationPublicErrorGroups)) {
+    assert.deepEqual(documentedGroups.get(group)?.sort(), [...codes].sort(), group);
+  }
+  const documentedRoutes = tableRows(tableSection(document, "CLI 路由错误合同"));
+  assert.deepEqual([...documentedRoutes.keys()].sort(), [...publicCliErrorRoutes].sort());
+  for (const route of publicCliErrorRoutes) {
+    assert.deepEqual(documentedRoutes.get(route)?.sort(), [...applicationPublicErrorGroupNamesByRoute[route]].sort(), route);
+  }
+});
+
 test("CLI 输出保留已注册的非 internal 错误码与中文消息", () => {
   assert.deepEqual(
     errorOutput(Object.assign(new Error("参数无效。"), { code: "WSSPEC_ARGUMENT_INVALID" })),
     { ok: false, error: { code: "WSSPEC_ARGUMENT_INVALID", message: "参数无效。" } },
+  );
+});
+
+test("CLI 输出只在当前 route 的错误合同中透传领域错误", () => {
+  const error = Object.assign(new Error("Work Item 不存在。"), { code: "WSSPEC_WORK_ITEM_NOT_FOUND" });
+
+  assert.deepEqual(
+    errorOutput(error, "inspect"),
+    { ok: false, error: { code: "WSSPEC_WORK_ITEM_NOT_FOUND", message: "Work Item 不存在。" } },
+  );
+  assert.deepEqual(
+    errorOutput(error, "agent install"),
+    { ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } },
   );
 });
 
@@ -155,6 +247,26 @@ test("CLI 输出将所有 internal 与未知异常折叠为固定安全消息", 
       expected,
     );
   }
+});
+
+test("CLI 输出对已登记 rollback code 只使用固定安全消息", () => {
+  const cases = [
+    ["WSSPEC_WORK_ITEM_ROLLBACK_FAILED", "Work Item 创建失败且无法安全回滚。"],
+    ["WSSPEC_WORK_ITEM_ROLLBACK_REFUSED", "Work Item 回滚被安全策略拒绝。"],
+    ["WSSPEC_START_ROLLBACK_FAILED", "Start 失败且无法安全回滚新建 Work Item。"],
+  ] as const;
+  for (const [code, message] of cases) {
+    const error = Object.assign(new Error("credential=rollback-secret /private/host stack details"), {
+      code,
+      stack: "stack rollback-secret",
+      details: { credential: "rollback-secret" },
+    });
+    assert.deepEqual(errorOutput(error, "start"), { ok: false, error: { code, message } });
+  }
+  assert.deepEqual(
+    errorOutput(Object.assign(new Error("credential=unregistered-secret"), { code: "WSSPEC_UNREGISTERED_ROLLBACK_FAILED" }), "start"),
+    { ok: false, error: { code: "WSSPEC_INTERNAL_ERROR", message: "发生未预期的内部错误。" } },
+  );
 });
 
 test("公开参考中的每个结构化示例都标注并通过正式契约", async () => {

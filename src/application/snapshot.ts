@@ -46,7 +46,7 @@ export interface ApplicationSnapshot {
   profiles: Record<ProfileId, SnapshotProfile>;
   workflowPackageLock: WorkflowPackageLock;
   skillLock: SkillLock;
-  skillResolution: { provider: SkillProvider; additionalGlobalRoots: string[] };
+  skillResolution: { provider: SkillProvider; additionalGlobalRootIds: string[] };
   gatePolicy: ProjectGatePolicy;
   changePolicy: ResolvedChangePolicy;
   source: ArtifactReference;
@@ -285,7 +285,7 @@ export function parseApplicationSnapshot(value: unknown): ApplicationSnapshot {
     const workflowPackageLock = parseWorkflowPackageLock(source.workflowPackageLock);
     const packageDigest = digest(source.packageDigest, "Application Snapshot packageDigest");
     if (packageDigest !== workflowPackageLock.contentDigest) invalid("Application Snapshot packageDigest");
-    const skillResolution = record(source.skillResolution, "Application Snapshot skillResolution", ["provider", "additionalGlobalRoots"]);
+    const skillResolution = record(source.skillResolution, "Application Snapshot skillResolution", ["provider", "additionalGlobalRootIds"]);
     const providers: SkillProvider[] = ["codex", "claude", "cursor", "generic"];
     if (!providers.includes(skillResolution.provider as SkillProvider)) invalid("Application Snapshot skillResolution.provider");
     if (!Array.isArray(source.gates)) invalid("Application Snapshot gates");
@@ -311,7 +311,10 @@ export function parseApplicationSnapshot(value: unknown): ApplicationSnapshot {
       skillLock: parseSkillLock(source.skillLock),
       skillResolution: {
         provider: skillResolution.provider as SkillProvider,
-        additionalGlobalRoots: strings(skillResolution.additionalGlobalRoots, "Application Snapshot skillResolution.additionalGlobalRoots"),
+        additionalGlobalRootIds: strings(skillResolution.additionalGlobalRootIds, "Application Snapshot skillResolution.additionalGlobalRootIds").map((id) => {
+          if (!/^[a-z][a-z0-9-]{0,62}$/u.test(id)) invalid("Application Snapshot skillResolution.additionalGlobalRootIds");
+          return id;
+        }),
       },
       gatePolicy: parseGatePolicy(source.gatePolicy),
       changePolicy,

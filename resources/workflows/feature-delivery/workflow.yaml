@@ -9,10 +9,12 @@ steps:
   - id: intake
     uses: connector.execute
     action: requirement.capture
+    inputs: [requirement-source]
     outputs: [requirement-source]
   - id: explore
     uses: agent.execute
     needs: [intake]
+    inputs: [requirement-source]
     objective: 探索代码并提取需求相关约束
     skills:
       - ref: builtin://skills/requirement-exploration
@@ -21,6 +23,7 @@ steps:
   - id: clarify
     uses: agent.execute
     needs: [explore]
+    inputs: [exploration-report]
     objective: 澄清需求并生成可验收规格
     skills:
       - ref: builtin://skills/requirement-exploration
@@ -30,6 +33,7 @@ steps:
   - id: design
     uses: agent.execute
     needs: [clarify]
+    inputs: [specification]
     objective: 形成可实施的技术方案
     skills:
       - ref: builtin://skills/solution-design
@@ -52,6 +56,7 @@ steps:
   - id: write-tests
     uses: agent.execute
     needs: [plan]
+    inputs: [tasks]
     objective: 根据当前任务先编写能够因缺少功能而失败的测试
     skills:
       - ref: builtin://skills/tdd-implementation
@@ -62,6 +67,7 @@ steps:
     action: quality.test
     expectedOutcome: test-failure
     needs: [write-tests]
+    inputs: [red-test-result]
     outputs: [red-evidence]
   - id: implement
     uses: agent.execute

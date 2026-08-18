@@ -3,6 +3,11 @@ import type { WorkflowPackage, WorkflowSkillBinding } from "../../workflow-packa
 export type SkillSource = "builtin" | "package" | "global" | "project";
 export type SkillProvider = "codex" | "claude" | "cursor" | "generic";
 
+export interface AdditionalGlobalRoot {
+  id: string;
+  path: string;
+}
+
 export interface SkillCandidate {
   rootId: string;
   digest: string;
@@ -72,7 +77,7 @@ export interface SkillResolverContext {
   home: string;
   package: WorkflowPackage;
   stepStatus: "not_started" | "started";
-  additionalGlobalRoots?: string[];
+  additionalGlobalRoots?: AdditionalGlobalRoot[];
   lock?: unknown;
 }
 

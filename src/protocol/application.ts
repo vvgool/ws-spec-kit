@@ -115,4 +115,3 @@ export interface WSSpecApplication {
   decide(input: DecisionInput): Promise<AgentAction>;
   inspect(input: InspectInput): Promise<WorkItemView>;
 }
-

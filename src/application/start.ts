@@ -12,11 +12,12 @@ import type { ResolvedSkillDescriptor } from "../protocol/work-package.js";
 import { captureLocalRequirement } from "../registry/connectors/local-requirement.js";
 import { createSkillLock } from "../registry/skills/lock.js";
 import { resolveSkill } from "../registry/skills/resolver.js";
-import type { ResolvedSkill, SkillProvider } from "../registry/skills/types.js";
+import type { AdditionalGlobalRoot, ResolvedSkill, SkillProvider } from "../registry/skills/types.js";
 import { loadBuiltinCatalog } from "../resources/catalog.js";
 import { validate } from "../schemas/index.js";
 import { initializeControlPlane, writeApplicationAnchor } from "../storage/control-plane.js";
 import { writeFileAtomic } from "../storage/files.js";
+import { additionalGlobalRootsFromConfig } from "../storage/project-config.js";
 import { loadRepository } from "../storage/repository.js";
 import { createWorkItem, creationOwnerForWorkItem, rollbackCreatedWorkItem, type WorkItem } from "../storage/work-items.js";
 import { loadWorkflowPackage } from "../workflow-package/loader.js";
@@ -44,7 +45,7 @@ export interface ProjectConfiguration {
   maxStageRetries: number;
   gatePolicy: ProjectGatePolicy;
   documentationAllowedPaths?: string[];
-  additionalGlobalRoots?: string[];
+  additionalGlobalRoots?: AdditionalGlobalRoot[];
   worktreeRoot: string;
   branchPrefix: string;
 }
@@ -88,7 +89,7 @@ export function projectConfiguration(raw: unknown, pkg: WorkflowPackage): Projec
     maxStageRetries: typeof maxStageRetries === "number" && Number.isInteger(maxStageRetries) && maxStageRetries >= 0 && maxStageRetries <= 10 ? maxStageRetries : 3,
     gatePolicy,
     ...(stringArray(documentation?.allowedPaths) === undefined ? {} : { documentationAllowedPaths: stringArray(documentation?.allowedPaths)! }),
-    ...(stringArray(skills?.additionalGlobalRoots) === undefined ? {} : { additionalGlobalRoots: stringArray(skills?.additionalGlobalRoots)! }),
+    ...(skills?.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: additionalGlobalRootsFromConfig(source) }),
     worktreeRoot: typeof worktrees?.root === "string" ? worktrees.root : ".worktrees",
     branchPrefix: typeof worktrees?.branchPrefix === "string" ? worktrees.branchPrefix : "wspec/",
   };
@@ -264,7 +265,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       skillLock: createSkillLock(resolved),
       skillResolution: {
         provider: dependencies.provider,
-        additionalGlobalRoots: configuration.additionalGlobalRoots ?? [],
+        additionalGlobalRootIds: (configuration.additionalGlobalRoots ?? []).map(({ id }) => id),
       },
       gatePolicy: configuration.gatePolicy,
       changePolicy: profiles[selected].changePolicy,

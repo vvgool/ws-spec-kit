@@ -37,18 +37,27 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
   assert.equal(catalog.stdout.trim(), "2");
 });
 
-test("打包产物不包含旧 Workflow、Project Config 协议或旧编排器", async () => {
+test("打包产物不包含旧 Workflow、Project Config、编排器或 StageContext", async () => {
   await execute("npm", ["run", "build"], { cwd: repositoryRoot });
   const packed = await execute("npm", ["pack", "--dry-run", "--json"], { cwd: repositoryRoot });
   const entries = JSON.parse(packed.stdout) as Array<{ files: Array<{ path: string }> }>;
   const paths = new Set(entries[0]?.files.map((file) => file.path));
   const definitions = await readFile(path.join(repositoryRoot, "dist", "schemas", "definitions.js"), "utf8");
 
+  assert.equal(paths.has("schemas/builtin-application-project-config-snapshot-v1.schema.json"), true, "应发布 portable Project Config snapshot Schema");
   for (const legacyPath of [
     "schemas/builtin-workflow-v1.schema.json",
     "schemas/builtin-project-config-v1.schema.json",
     "dist/engine/orchestrator.js",
     "dist/engine/orchestrator.d.ts",
+    "dist/engine/claims.js",
+    "dist/engine/claims.js.map",
+    "dist/engine/claims.d.ts",
+    "dist/engine/claims.d.ts.map",
   ]) assert.equal(paths.has(legacyPath), false, `不应发布 ${legacyPath}`);
   assert.doesNotMatch(definitions, /builtin\.workflow\.v1|builtin\.project-config\.v1/);
+  const declarations = await Promise.all([...paths]
+    .filter((filename) => filename.startsWith("dist/") && filename.endsWith(".d.ts"))
+    .map((filename) => readFile(path.join(repositoryRoot, filename), "utf8")));
+  assert.doesNotMatch(declarations.join("\n"), /\bStageContext\b/u);
 });

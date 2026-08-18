@@ -35,10 +35,12 @@ steps:
   - id: intake
     uses: connector.execute
     action: requirement.capture
+    inputs: [requirement-source]
     outputs: [requirement-source]
   - id: explore
     uses: agent.execute
     needs: [intake]
+    inputs: [requirement-source]
     skills:
       - ref: builtin://skills/documentation-exploration
         required: true
@@ -46,6 +48,7 @@ steps:
   - id: clarify
     uses: agent.execute
     needs: [explore]
+    inputs: [documentation-context]
     skills:
       - ref: builtin://skills/requirement-exploration
         required: true
@@ -53,6 +56,7 @@ steps:
   - id: plan
     uses: agent.execute
     needs: [clarify]
+    inputs: [specification]
     skills:
       - ref: builtin://skills/task-planning
         required: true
@@ -60,6 +64,7 @@ steps:
   - id: edit-document
     uses: agent.execute
     needs: [plan]
+    inputs: [tasks]
     skills:
       - ref: builtin://skills/documentation-editing
         required: true
@@ -68,10 +73,12 @@ steps:
     uses: command.execute
     action: quality.docs.integrity
     needs: [edit-document]
+    inputs: [documentation-result]
     outputs: [documentation-evidence]
   - id: review-fix
     uses: control.loop
     needs: [verify-document]
+    inputs: [documentation-evidence]
     until: ${review-result.approved}
     maxIterations: 5
     steps:

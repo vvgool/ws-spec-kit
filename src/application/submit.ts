@@ -199,7 +199,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         return { projection, value: approvalAction(state, request) };
       }
       projection.stages[input.stepId] = transitionStage(validating, { type: "transition", to: "succeeded" });
-      const next = await acquireNextLocked({ state, projection, actor: current.claims[input.stepId]!.actor, dependencies });
+      const next = await acquireNextLocked({ state, projection, actor: current.claims[input.stepId]!.actor, root: input.root, dependencies });
       return { projection: next.projection, value: next.action };
     },
   });

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 
 import {
   SchemaValidationError,
@@ -11,6 +12,7 @@ import {
   validate,
   type SchemaId,
 } from "../../src/schemas/index.js";
+import { portableProjectConfigText } from "../../src/storage/project-config.js";
 
 const validValues: Record<string, Record<string, unknown>> = {
   "builtin.workflow-selection.v1": {
@@ -19,6 +21,10 @@ const validValues: Record<string, Record<string, unknown>> = {
     profile: "auto",
   },
   "builtin.application-project-config.v1": { version: 1 },
+  "builtin.application-project-config-snapshot.v1": {
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "team-skills" }] },
+  },
   "builtin.work-item.v1": {
     version: 1,
     workItemId: "WSS-20260816-001",
@@ -142,6 +148,63 @@ test("public schemas reject missing required fields with a field path", () => {
       assert.equal(error.path, "/contentHash");
       return true;
     },
+  );
+});
+
+test("portable Project Config snapshot accepts logical root IDs only while host config still requires paths", () => {
+  const hostConfig = {
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "team-skills", path: "/host/team/skills" }] },
+  };
+  assert.deepEqual(validate("builtin.application-project-config.v1", hostConfig), hostConfig);
+  const snapshot = parse(portableProjectConfigText(hostConfig)) as Record<string, unknown>;
+  assert.deepEqual(snapshot, {
+    version: 1,
+    skills: { additionalGlobalRoots: [{ id: "team-skills" }] },
+  });
+  assert.deepEqual(validate("builtin.application-project-config-snapshot.v1" as SchemaId, snapshot), snapshot);
+
+  for (const current of [
+    {
+      name: "host path",
+      value: { version: 1, skills: { additionalGlobalRoots: [{ id: "team-skills", path: "/secret/root" }] } },
+      code: "WSSPEC_SCHEMA_UNKNOWN_FIELD",
+      fieldPath: "/skills/additionalGlobalRoots/0/path",
+    },
+    {
+      name: "unknown root field",
+      value: { version: 1, skills: { additionalGlobalRoots: [{ id: "team-skills", label: "secret" }] } },
+      code: "WSSPEC_SCHEMA_UNKNOWN_FIELD",
+      fieldPath: "/skills/additionalGlobalRoots/0/label",
+    },
+    {
+      name: "missing root id",
+      value: { version: 1, skills: { additionalGlobalRoots: [{}] } },
+      code: "WSSPEC_SCHEMA_REQUIRED_FIELD",
+      fieldPath: "/skills/additionalGlobalRoots/0/id",
+    },
+    {
+      name: "duplicate root id",
+      value: { version: 1, skills: { additionalGlobalRoots: [{ id: "team-skills" }, { id: "team-skills" }] } },
+      code: "WSSPEC_SCHEMA_INVALID_VALUE",
+      fieldPath: "/skills/additionalGlobalRoots",
+    },
+  ]) {
+    assert.throws(
+      () => validate("builtin.application-project-config-snapshot.v1" as SchemaId, current.value),
+      (error: unknown) => error instanceof SchemaValidationError && error.code === current.code && error.path === current.fieldPath,
+      current.name,
+    );
+  }
+
+  assert.throws(
+    () => validate("builtin.application-project-config.v1", {
+      version: 1,
+      skills: { additionalGlobalRoots: [{ id: "team-skills" }] },
+    }),
+    (error: unknown) => error instanceof SchemaValidationError
+      && error.code === "WSSPEC_SCHEMA_REQUIRED_FIELD"
+      && error.path === "/skills/additionalGlobalRoots/0/path",
   );
 });
 
