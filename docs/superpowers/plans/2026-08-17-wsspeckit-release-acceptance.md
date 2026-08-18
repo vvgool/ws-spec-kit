@@ -272,7 +272,7 @@ git commit -m "docs: publish the Chinese WSSpecKit guide"
 
 - [ ] **步骤 2：实现确定性门禁脚本**
 
-脚本使用 `set -euo pipefail`，依次运行文档基线、Schema 漂移、中文扫描、lint、typecheck、全部测试、
+脚本使用 `set -euo pipefail`，依次运行文档基线、Schema 漂移、Driver 中文提示契约、lint、typecheck、全部测试、
 build、pack、干净安装 E2E；任何检查不得用 `|| true` 掩盖失败。
 
 - [ ] **步骤 3：运行最终门禁**
