@@ -6,6 +6,7 @@ import { parse, stringify } from "yaml";
 import { sha256 } from "../domain/digests.js";
 import type { ProfileId } from "../domain/workflow.js";
 import { compileWorkflow, type ProjectGatePolicy } from "../engine/compiler.js";
+import { mutateControlPlane } from "../engine/scheduler.js";
 import { deriveInitialStages } from "./initial-stages.js";
 import { selectProfile } from "../policy/profile.js";
 import type { StartInput, StartResult, WorkflowProfile } from "../protocol/application.js";
@@ -294,7 +295,30 @@ export async function startApplication(input: StartInput, dependencies: StartDep
     });
 
     const initialStages = deriveInitialStages(profiles[selected]);
-    await initializeControlPlane({ cwd: identity.repositoryRoot, workItemId, stages: profiles[selected].order, initialWorkItem: { status: "active" }, initialStages });
+    const initialProfile = {
+      mode: requestedProfile,
+      selected,
+      provisional: requestedProfile === "auto",
+      reasonRuleIds: [],
+    };
+    await initializeControlPlane({
+      cwd: identity.repositoryRoot,
+      workItemId,
+      stages: profiles[selected].order,
+      initialWorkItem: { status: "active" },
+      initialStages,
+      initialProfile,
+    });
+    if (requestedProfile === "auto") {
+      await mutateControlPlane({
+        cwd: identity.repositoryRoot,
+        workItemId,
+        eventType: "profile.selected",
+        idempotencyKey: `profile:selected:${workItemId}`,
+        operationInput: initialProfile,
+        mutate: (projection) => ({ projection, value: null }),
+      });
+    }
     return { workItemId, workflowRef, profile: selected };
   } catch (error) {
     if (item !== undefined) {

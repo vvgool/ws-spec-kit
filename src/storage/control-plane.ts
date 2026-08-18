@@ -8,6 +8,7 @@ import type { LoopProjection, RetryProjection, StageState, WorkItemState } from 
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { interruptedRetry } from "../engine/control/retry.js";
+import type { RuntimeProfileProjection } from "../application/profile.js";
 import { loadRepository } from "./repository.js";
 import { appendEventUnlocked, EventStoreError, readEvents, recoverStaleControlPlaneLock, repairIncompleteEventTail, withControlPlaneLock, type DomainEvent, type StoredEvent } from "./events.js";
 import { writeFileAtomic } from "./files.js";
@@ -21,6 +22,7 @@ export interface RuntimeProjection {
   lastSequence: number;
   lastEventHash: string | null;
   idempotency: Record<string, number>;
+  profile: RuntimeProfileProjection;
   claims: Record<string, RuntimeClaim>;
   contexts: Record<string, unknown>;
   approvals: Record<string, RuntimeApproval>;
@@ -72,7 +74,7 @@ export interface ApplicationCloseEvidence {
 }
 
 interface ProjectionEventResult {
-  projection?: Pick<RuntimeProjection, "workItem" | "stages" | "claims" | "contexts" | "approvals" | "evidence" | "loops" | "retries" | "readOnly">;
+  projection?: Pick<RuntimeProjection, "workItem" | "stages" | "profile" | "claims" | "contexts" | "approvals" | "evidence" | "loops" | "retries" | "readOnly">;
   value?: unknown;
 }
 
@@ -212,6 +214,7 @@ export async function initializeControlPlane(input: {
   stages: string[];
   initialWorkItem?: WorkItemState;
   initialStages?: Record<string, StageState>;
+  initialProfile?: RuntimeProfileProjection;
 }): Promise<RuntimeProjection> {
   const resolved = await resolveControlPlane(input.cwd, input.workItemId);
   await mkdir(resolved.directory, { recursive: true });
@@ -224,6 +227,7 @@ export async function initializeControlPlane(input: {
     lastSequence: 0,
     lastEventHash: null,
     idempotency: {},
+    profile: input.initialProfile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] },
     claims: {},
     contexts: {},
     approvals: {},
@@ -245,6 +249,7 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
   }
   return {
     ...stored,
+    profile: stored.profile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] },
     claims: stored.claims ?? {},
     contexts: stored.contexts ?? {},
     approvals: stored.approvals ?? {},
@@ -264,6 +269,7 @@ export function replayEvents(input: {
   events: StoredEvent[];
   initialWorkItem?: WorkItemState;
   initialStages?: Record<string, StageState>;
+  initialProfile?: RuntimeProfileProjection;
 }): RuntimeProjection {
   let recovered: RuntimeProjection = {
     version: 1,
@@ -274,6 +280,7 @@ export function replayEvents(input: {
     lastSequence: 0,
     lastEventHash: null,
     idempotency: {},
+    profile: input.initialProfile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] },
     claims: {},
     contexts: {},
     approvals: {},
@@ -332,6 +339,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   let stageIds: string[];
   let initialWorkItem: WorkItemState | undefined;
   let initialStages: Record<string, StageState> | undefined;
+  let initialProfile: RuntimeProfileProjection | undefined;
   const anchor = await readApplicationAnchorFile(resolved.directory);
   try {
     const applicationText = await readFile(path.join(snapshotRoot, "application.json"), "utf8");
@@ -348,6 +356,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     stageIds = profile.order;
     initialWorkItem = { status: "active" };
     initialStages = deriveInitialStages(profile);
+    initialProfile = { mode: application.selectedProfile, selected: application.selectedProfile, provisional: false, reasonRuleIds: [] };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (anchor !== undefined) {
@@ -374,6 +383,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     events,
     ...(initialWorkItem === undefined ? {} : { initialWorkItem }),
     ...(initialStages === undefined ? {} : { initialStages }),
+    ...(initialProfile === undefined ? {} : { initialProfile }),
   });
   const recoveryTime = new Date();
   const abandonedStages = Object.entries(recovered.stages).filter(([stageId, stage]) => {
@@ -435,6 +445,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
         projection: {
           workItem: next.workItem,
           stages: next.stages,
+          profile: next.profile,
           claims: next.claims,
           contexts: next.contexts,
           approvals: next.approvals,

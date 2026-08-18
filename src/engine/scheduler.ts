@@ -61,6 +61,7 @@ export async function mutateControlPlane<T>(input: {
     const snapshot = {
       workItem: mutation.projection.workItem,
       stages: mutation.projection.stages,
+      profile: mutation.projection.profile,
       claims: mutation.projection.claims,
       contexts: mutation.projection.contexts,
       approvals: mutation.projection.approvals,

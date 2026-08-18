@@ -23,6 +23,8 @@ export interface DomainEvent {
     | "approval.decided"
     | "approval.expired"
     | "evidence.recorded"
+    | "profile.selected"
+    | "profile.upgraded"
     | "projection.invalidated"
     | "work-item.closed"
     | "lock.recovered";

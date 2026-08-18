@@ -106,6 +106,11 @@ export async function loadApplicationState(root: string, workItemId: string): Pr
     throw error;
   }
   await verifySnapshots(itemRoot, item, snapshot);
+  snapshot = {
+    ...snapshot,
+    selectedProfile: projection.profile.selected,
+    changePolicy: snapshot.profiles[projection.profile.selected].changePolicy,
+  };
   const sourcePath = path.join(itemRoot, item.source.snapshot);
   const [realItemRoot, realSource] = await Promise.all([realpath(itemRoot), realpath(sourcePath)]);
   const sourceRelative = path.relative(realItemRoot, realSource);

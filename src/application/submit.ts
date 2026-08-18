@@ -3,6 +3,8 @@ import path from "node:path";
 import { verifyArtifact } from "../domain/artifacts.js";
 import { computeWorkspaceSnapshot, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
+import { deriveInitialStages } from "./initial-stages.js";
+import { applyProfileDecision, type ProfileDecision } from "./profile.js";
 import { prepareArtifactApproval } from "../engine/approvals.js";
 import { parseLoopStepInstanceId, projectArtifactValues } from "../engine/control/loop.js";
 import {
@@ -13,6 +15,7 @@ import {
   stepFailureProblem,
 } from "../engine/control/retry.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
+import { evaluateSubmitProfileDecision } from "../engine/results.js";
 import type { AgentAction, SubmitInput, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
@@ -194,23 +197,69 @@ function trustedSubmitResult(
   return submitted;
 }
 
+function changedProfileSteps(state: ApplicationState, decision: ProfileDecision): string[] {
+  if (decision.previous === decision.selected) return [];
+  const previous = state.snapshot.profiles[decision.previous];
+  const selected = state.snapshot.profiles[decision.selected];
+  const previousById = new Map(previous.steps.map((step) => [step.id, step]));
+  return selected.steps
+    .filter((step) => JSON.stringify(previousById.get(step.id)) !== JSON.stringify(step))
+    .map(({ id }) => id);
+}
+
+function activateSelectedProfile(state: ApplicationState, projection: RuntimeProjection, decision: ProfileDecision): {
+  state: ApplicationState;
+  projection: RuntimeProjection;
+  invalidatedStepIds: string[];
+} {
+  const invalidatedStepIds = [...new Set([...decision.invalidatedStepIds, ...changedProfileSteps(state, decision)])].sort();
+  const applied = applyProfileDecision(projection, { ...decision, invalidatedStepIds });
+  const profile = state.snapshot.profiles[decision.selected];
+  const initial = deriveInitialStages(profile);
+  const stages = { ...applied.stages };
+  for (const stepId of invalidatedStepIds) {
+    if (stages[stepId]?.status === "invalidated" && initial[stepId] !== undefined) stages[stepId] = initial[stepId];
+  }
+  return {
+    state: {
+      ...state,
+      projection: { ...applied, stages },
+      snapshot: { ...state.snapshot, selectedProfile: decision.selected, changePolicy: profile.changePolicy },
+    },
+    projection: { ...applied, stages },
+    invalidatedStepIds,
+  };
+}
+
 export async function submitApplication(input: SubmitInput, dependencies: SubmitDependencies): Promise<AgentAction> {
   validate("builtin.application-submit-input.v1", input);
   validate<SubmitResult>("builtin.submit-result.v1", input.result);
   const state = await loadApplicationState(input.root, input.workItemId);
-  const profile = selectedProfile(state.snapshot);
   const { root: _root, ...operationInput } = input;
+  let profileEvent: "profile.selected" | "profile.upgraded" | undefined;
+  let profileInvalidatedStepIds: string[] = [];
   const action = await mutateControlPlane({
     cwd: input.root,
     workItemId: input.workItemId,
-    eventType: "attempt.submitted",
+    eventType: () => profileEvent ?? "attempt.submitted",
     idempotencyKey: `submit:${input.attemptId}`,
     stageId: input.stepId,
     attemptId: input.attemptId,
     operationInput,
+    eventDetails: () => profileInvalidatedStepIds.length === 0 ? {} : { invalidatedStepIds: profileInvalidatedStepIds },
     mutate: async (current) => {
+      let runtimeState = state;
+      if (runtimeState.snapshot.selectedProfile !== current.profile.selected) {
+        const selected = runtimeState.snapshot.profiles[current.profile.selected];
+        runtimeState = {
+          ...runtimeState,
+          projection: current,
+          snapshot: { ...runtimeState.snapshot, selectedProfile: current.profile.selected, changePolicy: selected.changePolicy },
+        };
+      }
+      const profile = selectedProfile(runtimeState.snapshot);
       const target = executionTarget(profile, current, input.stepId);
-      await validateResult(input, state, target, current, dependencies.now());
+      await validateResult(input, runtimeState, target, current, dependencies.now());
       const executorStep = { ...target.step, id: target.stageId };
       const result = trustedSubmitResult(
         input.result,
@@ -219,11 +268,13 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       if (target.internal && target.step.approval) {
         throw new ApplicationSubmitError("WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED", "循环内部 Step 暂不支持审批。 ");
       }
+      const actor = current.claims[target.stageId]!.actor;
       const active = current.contexts[target.stageId] as ApplicationAttemptRecord;
-      const artifactValues = await projectArtifactValues(state.worktree, result.artifacts);
+      const artifactValues = await projectArtifactValues(runtimeState.worktree, result.artifacts);
       const record: ApplicationAttemptRecord = {
         workPackage: active.workPackage,
         retryCount: active.retryCount,
+        actor,
         stepInstanceId: target.stepInstanceId,
         artifactValues,
         result,
@@ -236,7 +287,6 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         retries: { ...current.retries },
       };
       if (target.internal) projection.contexts[target.stepInstanceId] = record;
-      const actor = current.claims[target.stageId]!.actor;
       delete projection.claims[target.stageId];
       if (result.status === "failed") {
         const running = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "running" });
@@ -259,13 +309,31 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         };
       }
       delete projection.retries[target.stepInstanceId];
+      const decision = evaluateSubmitProfileDecision({
+        projection,
+        result,
+        stepId: target.stageId,
+        workflow: runtimeState.snapshot.changePolicy.kind,
+      });
+      if (decision !== undefined) {
+        const selectedChanged = decision.selected !== decision.previous;
+        const activated = activateSelectedProfile(runtimeState, projection, decision);
+        projection = activated.projection;
+        runtimeState = activated.state;
+        profileInvalidatedStepIds = activated.invalidatedStepIds;
+        profileEvent = selectedChanged ? "profile.upgraded" : "profile.selected";
+        if (activated.invalidatedStepIds.includes(target.stageId)) {
+          const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
+          return { projection: next.projection, value: next.action };
+        }
+      }
       if (target.internal) {
-        projection.stages[target.stageId] = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "ready" });
+        projection.stages[target.stageId] = transitionStage(projection.stages[target.stageId]!, { type: "transition", to: "ready" });
         delete projection.contexts[target.stageId];
-        const next = await acquireNextLocked({ state, projection, actor, root: input.root, dependencies });
+        const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
         return { projection: next.projection, value: next.action };
       }
-      const running = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "running" });
+      const running = transitionStage(projection.stages[target.stageId]!, { type: "transition", to: "running" });
       const validating = transitionStage(running, { type: "transition", to: "validating" });
       projection.stages[target.stageId] = validating;
       if (target.step.approval) {
@@ -278,10 +346,10 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
           stages: { ...projection.stages, [target.stageId]: transitionStage(validating, { type: "transition", to: "awaiting_approval" }) },
           approvals: { ...projection.approvals, [request.requestId]: request },
         };
-        return { projection, value: approvalAction(state, request) };
+        return { projection, value: approvalAction(runtimeState, request) };
       }
       projection.stages[target.stageId] = transitionStage(validating, { type: "transition", to: "succeeded" });
-      const next = await acquireNextLocked({ state, projection, actor, root: input.root, dependencies });
+      const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
       return { projection: next.projection, value: next.action };
     },
   });

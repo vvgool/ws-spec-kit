@@ -43,6 +43,7 @@ export interface ApplicationStepResult extends SubmitResult {
 export interface ApplicationAttemptRecord {
   workPackage: WorkPackage;
   retryCount: number;
+  actor?: string;
   stepInstanceId?: string;
   artifactValues?: Record<string, Record<string, unknown>>;
   result?: ApplicationStepResult;
@@ -450,6 +451,22 @@ async function acquireLoopStep(input: {
     }
 
     if (selected !== undefined) {
+      if (input.step.independentReviewActor === true && selected.step.id === "review") {
+        const implementationActor = [
+          input.projection.contexts[loopStepInstanceId(loop.loopId, loop.iteration - 1, "fix")],
+          ...["implement", "edit-document"].map((stepId) => input.projection.contexts[stepId]),
+        ]
+          .map((value) => value !== null && typeof value === "object" && !Array.isArray(value)
+            ? (value as { actor?: unknown }).actor
+            : undefined)
+          .find((actor): actor is string => typeof actor === "string" && actor !== "");
+        if (implementationActor === undefined || implementationActor === input.actor) {
+          throw new ApplicationAcquireError(
+            "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+            "Governed Review 必须由不同于实现者的独立 Actor 执行。",
+          );
+        }
+      }
       const acquired = await acquireExecutableStep({
         state: input.state,
         projection,

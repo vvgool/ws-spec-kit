@@ -1,0 +1,283 @@
+import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+
+import { applyProfileDecision } from "../../src/application/profile.js";
+import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
+import { mutateControlPlane } from "../../src/engine/scheduler.js";
+import type { SubmitResult } from "../../src/protocol/application.js";
+import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
+import { readControlPlane, recoverControlPlane, type RuntimeProjection } from "../../src/storage/control-plane.js";
+import { readEvents } from "../../src/storage/events.js";
+import {
+  completedResult,
+  controlRuntimeFixture,
+  requireExecute,
+  retainOnlyReadyStage,
+  submitPackage,
+  worktreeFor,
+} from "./helpers/control-runtime.js";
+
+async function writeArtifact(input: {
+  worktree: string;
+  workItemId: string;
+  workPackage: WorkPackage;
+  artifactType: string;
+  filename?: string;
+}): Promise<ArtifactReference> {
+  const body = "# Exploration\n\nRepository facts.\n";
+  const metadata = {
+    artifactType: input.artifactType,
+    schemaVersion: 1 as const,
+    workItemId: input.workItemId,
+    stageId: input.workPackage.stepId,
+    attemptId: input.workPackage.attemptId,
+    revision: 1,
+  };
+  const contentHash = computeArtifactContentHash(metadata, body);
+  const relative = `.wsspec/work-items/${input.workItemId}/artifacts/${input.filename ?? `${input.artifactType}.md`}`;
+  await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
+  await writeFile(
+    path.join(input.worktree, relative),
+    `---\nartifactType: ${input.artifactType}\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: 1\ncontentHash: ${contentHash}\n---\n${body}`,
+    "utf8",
+  );
+  return { artifactType: input.artifactType, schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown" };
+}
+
+async function submitExplore(
+  profile: "auto" | "quick" | "standard" | "governed",
+  remainingRisks: Array<Record<string, unknown>>,
+) {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({
+    root: fixture.root,
+    source: { type: "prompt", text: "验证 Profile 运行时选择" },
+    profile,
+  });
+  const initial = await readControlPlane(fixture.root, started.workItemId);
+  const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "intake-agent" }));
+  const explore = requireExecute(await submitPackage(fixture, intake));
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: explore, artifactType: "exploration-report" });
+  const result: SubmitResult = { ...completedResult(explore, [artifact]), remainingRisks };
+  const action = await submitPackage(fixture, explore, result);
+  return { fixture, started, initial, explore, result, action, projection: await readControlPlane(fixture.root, started.workItemId) };
+}
+
+test("auto 在 intake/explore 期间保持 provisional quick，且初始选择写入事件", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证 provisional quick" }, profile: "auto" });
+  const projection = await readControlPlane(fixture.root, started.workItemId);
+
+  assert.deepEqual(projection.profile, {
+    mode: "auto",
+    selected: "quick",
+    provisional: true,
+    reasonRuleIds: [],
+  });
+  assert.deepEqual(
+    Object.entries(projection.stages).filter(([, stage]) => stage.status === "ready").map(([stepId]) => stepId),
+    ["intake"],
+  );
+  assert.equal((await readEvents(projection.controlPlane)).at(-1)?.eventType, "profile.selected");
+});
+
+test("auto 在 Explore 后将 low/unknown/high 分别选择为 quick/standard/governed", async () => {
+  const cases = [
+    { label: "low", risks: [{ risk: "low" }], expected: "quick" },
+    { label: "unknown", risks: [], expected: "standard" },
+    { label: "high", risks: [{ risk: "high" }], expected: "governed" },
+  ] as const;
+
+  for (const current of cases) {
+    const completed = await submitExplore("auto", [...current.risks]);
+    assert.equal(completed.projection.profile.selected, current.expected, current.label);
+    assert.equal(completed.projection.profile.provisional, false, current.label);
+  }
+});
+
+test("explicit Profile 不因较低风险降级，但仍服从更高风险下限", async () => {
+  const standard = await submitExplore("standard", [{ risk: "low" }]);
+  assert.equal(standard.projection.profile.selected, "standard");
+
+  const quick = await submitExplore("quick", [{ risk: "high" }]);
+  assert.equal(quick.projection.profile.selected, "governed");
+});
+
+test("敏感路径规则升级 governed 并记录命中的规则", async () => {
+  const completed = await submitExplore("auto", [{ risk: "low", affectedPaths: ["src/auth/session.ts"] }]);
+  assert.equal(completed.projection.profile.selected, "governed");
+  assert.ok(completed.projection.profile.reasonRuleIds.includes("sensitive-path"));
+});
+
+test("applyProfileDecision 禁止降级并一次性失效受影响结果、Claim、Approval、Evidence、Loop 与 Retry", () => {
+  const projection = {
+    version: 1,
+    repositoryId: "repository-1",
+    workItemId: "WSS-1",
+    workItem: { status: "awaiting_approval" },
+    stages: {
+      intake: { status: "succeeded" },
+      design: { status: "skipped" },
+      plan: { status: "succeeded" },
+      "review-fix": { status: "claimed" },
+      "verify-green": { status: "awaiting_approval" },
+    },
+    lastSequence: 4,
+    lastEventHash: "hash",
+    idempotency: {},
+    profile: { mode: "auto", selected: "standard", provisional: false, reasonRuleIds: [] },
+    claims: {
+      "review-fix": { stageId: "review-fix:1:review", attemptId: "attempt-review", claimToken: "token", actor: "reviewer", claimedAt: "2026-08-18T04:00:00.000Z", expiresAt: "2026-08-18T05:00:00.000Z", inputWorkspaceTreeDigest: "sha256:test", allowedPaths: [], workspaceSnapshot: [] },
+    },
+    contexts: {
+      intake: { result: { status: "completed" } },
+      plan: { result: { status: "completed" } },
+      "review-fix": { workPackage: { stepId: "review-fix:1:review" } },
+      "review-fix:1:review": { result: { status: "completed" } },
+      "verify-green": { result: { status: "completed" } },
+    },
+    approvals: {
+      "approval-verify": { requestId: "approval-verify", stageId: "verify-green", attemptId: "attempt-verify", artifactPath: "artifact", contentHash: "sha256:test", workspaceTreeDigest: "sha256:test", status: "pending", createdAt: "2026-08-18T04:00:00.000Z" },
+    },
+    evidence: {
+      test: { gateId: "test", stageId: "verify-green" },
+      intake: { gateId: "intake", stageId: "intake" },
+    },
+    loops: { "review-fix": { loopId: "review-fix", iteration: 1, maxIterations: 5, status: "running" } },
+    retries: { "review-fix:1:review": { stepInstanceId: "review-fix:1:review", attemptsUsed: 1, maxAttempts: 3, status: "running" } },
+    readOnly: false,
+    controlPlane: "/tmp/control-plane",
+  } as RuntimeProjection;
+
+  const upgraded = applyProfileDecision(projection, {
+    previous: "standard",
+    selected: "governed",
+    reasonRuleIds: ["sensitive-path"],
+    invalidatedStepIds: ["design", "plan", "review-fix", "verify-green"],
+  });
+
+  assert.equal(upgraded.profile.selected, "governed");
+  assert.equal(upgraded.stages.intake?.status, "succeeded");
+  assert.equal(upgraded.stages.design?.status, "invalidated");
+  assert.equal(upgraded.stages.plan?.status, "succeeded");
+  assert.deepEqual(upgraded.contexts.intake, projection.contexts.intake);
+  assert.equal(upgraded.contexts.plan, undefined);
+  assert.equal(upgraded.contexts["review-fix:1:review"], undefined);
+  assert.deepEqual(upgraded.evidence.intake, projection.evidence.intake);
+  assert.equal(upgraded.evidence.test, undefined);
+  assert.deepEqual(upgraded.claims, {});
+  assert.deepEqual(upgraded.approvals, {});
+  assert.equal(upgraded.workItem.status, "active");
+  assert.deepEqual(upgraded.loops, {});
+  assert.deepEqual(upgraded.retries, {});
+
+  assert.throws(() => applyProfileDecision(upgraded, {
+    previous: "governed",
+    selected: "quick",
+    reasonRuleIds: [],
+    invalidatedStepIds: [],
+  }), (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_PROFILE_DOWNGRADE_FORBIDDEN");
+});
+
+test("Profile 升级与重复 Submit 原子幂等，恢复后不丢失 profile/loop/retry 投影", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证 Profile 原子恢复" }, profile: "auto" });
+  const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" }));
+  const explore = requireExecute(await submitPackage(fixture, intake));
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-loop-retry",
+    operationInput: {},
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        loops: { ...current.loops, unrelated: { loopId: "unrelated", iteration: 1, maxIterations: 2, status: "running" } },
+        retries: { ...current.retries, unrelated: { stepInstanceId: "unrelated", attemptsUsed: 1, maxAttempts: 2, status: "ready" } },
+      },
+      value: null,
+    }),
+  });
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: explore, artifactType: "exploration-report" });
+  const result = { ...completedResult(explore, [artifact]), remainingRisks: [{ risk: "high" }] };
+
+  const [first, second] = await Promise.all([
+    submitPackage(fixture, explore, result),
+    submitPackage(fixture, explore, result),
+  ]);
+  assert.deepEqual(second, first);
+
+  const durable = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(durable.profile.selected, "governed");
+  assert.deepEqual(durable.loops.unrelated, { loopId: "unrelated", iteration: 1, maxIterations: 2, status: "running" });
+  assert.deepEqual(durable.retries.unrelated, { stepInstanceId: "unrelated", attemptsUsed: 1, maxAttempts: 2, status: "ready" });
+  assert.equal((await readEvents(durable.controlPlane)).filter(({ eventType }) => eventType === "profile.upgraded").length, 1);
+
+  await writeFile(path.join(durable.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+  assert.deepEqual(recovered.profile, durable.profile);
+  assert.deepEqual(recovered.loops, durable.loops);
+  assert.deepEqual(recovered.retries.unrelated, durable.retries.unrelated);
+  assert.equal(recovered.retries.clarify?.status, "ready");
+});
+
+test("Governed Review 要求 reviewActor 与 implementationActor 不同", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证独立 Review Actor" }, profile: "governed" });
+  await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-implementation-actor",
+    operationInput: { actor: "codex" },
+    mutate: (current) => ({ projection: { ...current, contexts: { ...current.contexts, implement: { actor: "codex", result: { status: "completed" } } } }, value: null }),
+  });
+
+  await assert.rejects(
+    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+  );
+  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
+  assert.equal(review.stepId, "review-fix:1:review");
+});
+
+test("Governed 后续 Review 不能由上一轮 Fix Actor 执行", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证 Fix 后独立 Review Actor" }, profile: "governed" });
+  await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-latest-fix-actor",
+    operationInput: { actor: "codex", iteration: 2 },
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        contexts: {
+          ...current.contexts,
+          implement: { actor: "implementer", result: { status: "completed" } },
+          "review-fix:1:fix": { actor: "codex", result: { status: "completed" } },
+        },
+        loops: {
+          ...current.loops,
+          "review-fix": { loopId: "review-fix", iteration: 2, maxIterations: 5, status: "running" },
+        },
+      },
+      value: null,
+    }),
+  });
+
+  await assert.rejects(
+    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "codex" }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+  );
+  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
+  assert.equal(review.stepId, "review-fix:2:review");
+});
