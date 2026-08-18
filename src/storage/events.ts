@@ -17,6 +17,7 @@ export interface DomainEvent {
     | "claim.released"
     | "context.created"
     | "attempt.acquired"
+    | "step.skipped"
     | "attempt.submitted"
     | "approval.requested"
     | "approval.decided"

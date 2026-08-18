@@ -294,7 +294,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
 
     const initialStages = Object.fromEntries(profiles[selected].steps.map((step) => [
       step.id,
-      { status: !step.enabled ? "skipped" : step.needs.length === 0 ? "ready" : "pending" },
+      { status: !step.enabled ? "skipped" : step.needs.length === 0 && step.when === undefined ? "ready" : "pending" },
     ])) as Record<string, { status: "skipped" | "ready" | "pending" }>;
     await initializeControlPlane({ cwd: identity.repositoryRoot, workItemId, stages: profiles[selected].order, initialWorkItem: { status: "active" }, initialStages });
     return { workItemId, workflowRef, profile: selected };

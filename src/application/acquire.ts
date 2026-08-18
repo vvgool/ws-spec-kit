@@ -7,6 +7,7 @@ import { revalidateGlobalSkillLock } from "../registry/skills/resolver.js";
 import { validate } from "../schemas/index.js";
 import { applicationCloseEvidenceKey, recoverControlPlane, type ApplicationCloseEvidence, type RuntimeClaim, type RuntimeProjection } from "../storage/control-plane.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
+import { conditionScope, evaluateCondition } from "../engine/control/condition.js";
 import { rebindAdditionalGlobalRoots } from "../storage/project-config.js";
 import type { ApplicationSnapshot, ApplicationState, SnapshotProfile, SnapshotStep } from "./state.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
@@ -25,6 +26,11 @@ export interface ApplicationAttemptRecord {
   nextAction?: AgentAction;
 }
 
+interface AcquiredMutation {
+  action: AgentAction;
+  skippedStepIds: string[];
+}
+
 export class ApplicationAcquireError extends Error {
   constructor(readonly code: `WSSPEC_${string}`, message: string) {
     super(`${code}: ${message}`);
@@ -32,12 +38,9 @@ export class ApplicationAcquireError extends Error {
   }
 }
 
-function conditionIsFalse(step: SnapshotStep): boolean {
-  return step.when?.includes("bindings.issue.exists") === true || step.when?.includes("bindings.knowledge.exists") === true;
-}
-
-function promoteReady(projection: RuntimeProjection, profile: SnapshotProfile): RuntimeProjection {
+function promoteReady(projection: RuntimeProjection, profile: SnapshotProfile): { projection: RuntimeProjection; skippedStepIds: string[] } {
   let next = { ...projection, stages: { ...projection.stages } };
+  const skippedStepIds: string[] = [];
   let changed = true;
   while (changed) {
     changed = false;
@@ -49,12 +52,14 @@ function promoteReady(projection: RuntimeProjection, profile: SnapshotProfile): 
         return status === "succeeded" || status === "succeeded_with_warnings" || status === "skipped";
       });
       if (dependenciesComplete) {
-        next.stages[step.id] = transitionStage(state, { type: "transition", to: !step.enabled || conditionIsFalse(step) ? "skipped" : "ready" });
+        const skipped = !step.enabled || !evaluateCondition(step.when, conditionScope(next));
+        next.stages[step.id] = transitionStage(state, { type: "transition", to: skipped ? "skipped" : "ready" });
+        if (step.enabled && skipped) skippedStepIds.push(step.id);
         changed = true;
       }
     }
   }
-  return next;
+  return { projection: next, skippedStepIds };
 }
 
 function pendingApproval(projection: RuntimeProjection, workItemId: string): AgentAction | undefined {
@@ -174,14 +179,14 @@ export async function acquireNextLocked(input: {
   actor: string;
   root: string;
   dependencies: AcquireDependencies;
-}): Promise<{ projection: RuntimeProjection; action: AgentAction }> {
+}): Promise<{ projection: RuntimeProjection; action: AgentAction; skippedStepIds: string[] }> {
   const { state, actor, dependencies } = input;
   let projection = { ...input.projection, stages: { ...input.projection.stages }, claims: { ...input.projection.claims }, contexts: { ...input.projection.contexts } };
   if (projection.workItem.status === "closed" || projection.workItem.status === "cancelled") {
-    return { projection, action: completed(state.item.workItemId, projection.workItem.status, "Workflow 已结束。") };
+    return { projection, action: completed(state.item.workItemId, projection.workItem.status, "Workflow 已结束。"), skippedStepIds: [] };
   }
   const approval = pendingApproval(projection, state.item.workItemId);
-  if (approval !== undefined) return { projection, action: approval };
+  if (approval !== undefined) return { projection, action: approval, skippedStepIds: [] };
   const profile = selectedProfile(state.snapshot);
   const now = dependencies.now();
   for (const [stepId, claim] of Object.entries(projection.claims)) {
@@ -189,6 +194,7 @@ export async function acquireNextLocked(input: {
       return {
         projection,
         action: { action: "blocked", problems: [{ code: "WSSPEC_STAGE_ALREADY_CLAIMED", message: `步骤 ${stepId} 已有活动 Lease。`, retryable: true }] },
+        skippedStepIds: [],
       };
     }
     const current = projection.stages[stepId];
@@ -207,7 +213,8 @@ export async function acquireNextLocked(input: {
       }
     }
   }
-  projection = promoteReady(projection, profile);
+  const promoted = promoteReady(projection, profile);
+  projection = promoted.projection;
   const step = profile.steps.find((candidate) => projection.stages[candidate.id]?.status === "ready");
   if (step === undefined) {
     const exhausted = profile.steps.find((candidate) => projection.stages[candidate.id]?.status === "failed"
@@ -216,6 +223,7 @@ export async function acquireNextLocked(input: {
       return {
         projection,
         action: { action: "blocked", problems: [{ code: "WSSPEC_STEP_RETRY_EXHAUSTED", message: `步骤 ${exhausted.id} 已耗尽重试次数。`, retryable: false }] },
+        skippedStepIds: promoted.skippedStepIds,
       };
     }
     const unfinished = Object.values(projection.stages).some(({ status }) => !["succeeded", "succeeded_with_warnings", "skipped", "cancelled"].includes(status));
@@ -224,6 +232,7 @@ export async function acquireNextLocked(input: {
       action: unfinished
         ? { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_BLOCKED", message: "没有可执行的步骤。", retryable: true }] }
         : completed(state.item.workItemId, "closed", "Workflow 已完成。"),
+      skippedStepIds: promoted.skippedStepIds,
     };
   }
   const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
@@ -256,7 +265,7 @@ export async function acquireNextLocked(input: {
       evidence: { ...projection.evidence, [applicationCloseEvidenceKey]: applicationClose },
       readOnly: true,
     };
-    return { projection, action: completed(state.item.workItemId, "closed", "Workflow 已完成。") };
+    return { projection, action: completed(state.item.workItemId, "closed", "Workflow 已完成。"), skippedStepIds: promoted.skippedStepIds };
   }
   const attemptId = `attempt-${crypto.randomUUID()}`;
   const token = crypto.randomUUID();
@@ -283,7 +292,7 @@ export async function acquireNextLocked(input: {
   };
   const executor = dependencies.executors.assertStep(step as unknown as CompiledStepShape);
   const action = await executor.acquire(step as never, projection);
-  return { projection, action };
+  return { projection, action, skippedStepIds: promoted.skippedStepIds };
 }
 
 type CompiledStepShape = Pick<import("../domain/workflow.js").CompiledStep, "uses" | "action" | "securityClass">;
@@ -294,20 +303,22 @@ export async function acquireApplication(input: AcquireInput, dependencies: Acqu
   if (state.projection.workItem.status === "closed" || state.projection.workItem.status === "cancelled") {
     return completed(state.item.workItemId, state.projection.workItem.status, "Workflow 已结束。");
   }
-  const action = await mutateControlPlane({
+  const action = await mutateControlPlane<AcquiredMutation>({
     cwd: input.root,
     workItemId: input.workItemId,
-    eventType: "attempt.acquired",
+    eventType: (value) => value.skippedStepIds.length > 0 ? "step.skipped" : "attempt.acquired",
+    stageId: (value) => value.skippedStepIds[0],
     idempotencyKey: `acquire:${crypto.randomUUID()}`,
     actor: input.actor,
     operationInput: { actor: input.actor, at: dependencies.now().toISOString() },
+    eventDetails: (value) => value.skippedStepIds.length === 0 ? {} : { skippedStepIds: value.skippedStepIds },
     mutate: async (projection) => {
       const acquired = await acquireNextLocked({ state, projection, actor: input.actor, root: input.root, dependencies });
-      return { projection: acquired.projection, value: acquired.action };
+      return { projection: acquired.projection, value: { action: acquired.action, skippedStepIds: acquired.skippedStepIds } };
     },
   });
-  if (action.action === "completed" && action.summary.status === "closed") {
+  if (action.action.action === "completed" && action.action.summary.status === "closed") {
     await recoverControlPlane({ cwd: input.root, workItemId: input.workItemId });
   }
-  return action;
+  return action.action;
 }

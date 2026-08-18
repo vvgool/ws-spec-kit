@@ -54,6 +54,9 @@ export const applicationPublicErrorGroups = {
     "WSSPEC_COMPILE_SKILL_AMBIGUOUS", "WSSPEC_COMPILE_SKILL_MISMATCH", "WSSPEC_COMPILE_SKILL_POLICY_OVERRIDE",
     "WSSPEC_COMPILE_STEP_INVALID", "WSSPEC_COMPILE_TDD_REQUIRED", "WSSPEC_COMPILE_UNKNOWN_DEPENDENCY", "WSSPEC_COMPILE_UNKNOWN_GATE",
   ],
+  expression: [
+    "WSSPEC_EXPRESSION_FORBIDDEN", "WSSPEC_EXPRESSION_INVALID", "WSSPEC_EXPRESSION_LIMIT_EXCEEDED", "WSSPEC_EXPRESSION_TYPE_INVALID",
+  ],
   executor: [
     "WSSPEC_EXECUTOR_ACTION_NOT_FOUND", "WSSPEC_EXECUTOR_CONTEXT_INVALID", "WSSPEC_EXECUTOR_DUPLICATE", "WSSPEC_EXECUTOR_NOT_FOUND",
     "WSSPEC_EXECUTOR_SECURITY_MISMATCH",
@@ -140,7 +143,7 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
     "compiler", "executor", "source", "workItem", "runtime", "start",
   ],
-  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire"],
+  acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire"],
   submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval"],
   decide: [
     "internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit",

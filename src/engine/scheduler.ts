@@ -33,12 +33,13 @@ type MutationEventType = Exclude<DomainEvent["eventType"], "work-item.transition
 export async function mutateControlPlane<T>(input: {
   cwd: string;
   workItemId: string;
-  eventType: MutationEventType;
+  eventType: MutationEventType | ((value: T) => MutationEventType);
   idempotencyKey: string;
   actor?: string;
-  stageId?: string;
+  stageId?: string | ((value: T) => string | undefined);
   attemptId?: string;
   operationInput: unknown;
+  eventDetails?: (value: T) => Record<string, unknown>;
   simulateProjectionFailure?: boolean;
   mutate: (projection: RuntimeProjection) => Promise<{ projection: RuntimeProjection; value: T }> | { projection: RuntimeProjection; value: T };
 }): Promise<T> {
@@ -68,12 +69,12 @@ export async function mutateControlPlane<T>(input: {
     };
     const event: DomainEvent = {
       eventId: `event-${crypto.randomUUID()}`,
-      eventType: input.eventType,
+      eventType: typeof input.eventType === "function" ? input.eventType(mutation.value) : input.eventType,
       occurredAt: new Date().toISOString(),
       actor: input.actor ?? "engine",
       repositoryId: projection.repositoryId,
       workItemId: projection.workItemId,
-      stageId: input.stageId ?? null,
+      stageId: (typeof input.stageId === "function" ? input.stageId(mutation.value) : input.stageId) ?? null,
       attemptId: input.attemptId ?? null,
       from: projection.workItem.status,
       to: mutation.projection.workItem.status,
@@ -82,7 +83,7 @@ export async function mutateControlPlane<T>(input: {
       inputWorkspaceTreeDigest: metadata.baselineTreeDigest,
       outputWorkspaceTreeDigest: null,
       inputDigest,
-      result: { projection: snapshot, value: mutation.value },
+      result: { projection: snapshot, value: mutation.value, ...(input.eventDetails?.(mutation.value) ?? {}) },
     };
     const stored = await appendEventUnlocked(projection.controlPlane, event);
     const next = mutation.projection;
