@@ -561,9 +561,8 @@ git commit -m "feat: add the WSSpecKit application facade"
 - 创建：`src/adapters/cli/output.ts`
 - 创建：`src/adapters/cli/workflow.ts`
 - 创建：`src/adapters/skills/{install,codex,claude,cursor,generic}.ts`
-- 创建：`src/resources/chinese-content.ts`
 - 替换：`tests/contract/integrations.test.ts`
-- 创建：`tests/contract/chinese-content.test.ts`
+- 创建：`tests/contract/chinese-guidance.test.ts`
 - 创建：`tests/e2e/{driver-install,application-cli}.test.ts`
 - 创建：`tests/e2e/workflow-cli.test.ts`
 
@@ -577,7 +576,7 @@ git commit -m "feat: add the WSSpecKit application facade"
 
 - [ ] **步骤 2：运行测试，确认旧 CLI 仍存在**
 
-运行：`node --import tsx --test tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts tests/contract/integrations.test.ts tests/contract/chinese-content.test.ts`
+运行：`node --import tsx --test tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts tests/contract/integrations.test.ts tests/contract/chinese-guidance.test.ts`
 
 预期：失败，因为旧命令仍存在且没有安装器。
 
@@ -605,7 +604,7 @@ Claude 安装到 `~/.claude/skills/wsspeckit-driver`，Cursor 默认安装到
 `~/.cursor/skills/wsspeckit-driver`，Generic 使用显式 `--target`。安装器不向
 `~/.cursor/rules` 写入 `.mdc`；Driver Skill 的触发描述和手动调用示例都使用中文。
 
-实现中文内容检查器：只扫描 `docs/`、`resources/skills/`、`resources/templates/` 和 CLI 用户文案；忽略 fenced code、内联代码、URL、路径和协议标识，并维护显式英文术语允许表。失败输出必须包含文件、行号和未登记文本。
+Driver Skill 必须提示 Agent：面向用户的说明、文档和交互文案默认使用中文；协议字段、类型名、URI、命令名和错误码保持英文。WSSpecKit 不静态分析任意 TypeScript 文案，也不检查用户输入或用户安装的 Global/Project Skill 语言。
 
 - [ ] **步骤 5：运行完整基础门禁**
 
@@ -617,12 +616,12 @@ npm run build
 npm pack --dry-run
 ```
 
-预期：全部退出码为 0；发布资源中不存在旧公开 Schema、旧命令、旧产品名或未登记英文用户文案。
+预期：全部退出码为 0；发布资源中不存在旧公开 Schema、旧命令、旧产品名或中文静态分析器。
 
 - [ ] **步骤 6：提交**
 
 ```bash
-git add src/cli src/adapters src/resources/chinese-content.ts tests/contract/integrations.test.ts tests/contract/chinese-content.test.ts tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts
+git add src/cli src/adapters tests/contract/integrations.test.ts tests/contract/chinese-guidance.test.ts tests/e2e/application-cli.test.ts tests/e2e/driver-install.test.ts tests/e2e/workflow-cli.test.ts
 git commit -m "feat: expose the Chinese WSSpecKit driver protocol"
 ```
 
@@ -662,7 +661,7 @@ Workflow Package 信任与锁定、Connector/Provider/审批/回读契约。文�
 
 - [ ] **步骤 4：运行文档与完整基础门禁**
 
-运行：`node --import tsx --test tests/contract/documentation-baseline.test.ts tests/contract/chinese-content.test.ts && npm test && npm run build`
+运行：`node --import tsx --test tests/contract/documentation-baseline.test.ts tests/contract/requirements-traceability.test.ts && npm test && npm run build`
 
 预期：全部通过；`docs/specs`、`docs/reference`、`docs/plans` 中不存在旧协议文件。
 

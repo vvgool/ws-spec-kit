@@ -37,7 +37,7 @@
 
 - [ ] **Step 1：编写失败的 Driver 提示与发布面契约测试**
 
-创建 `tests/contract/chinese-guidance.test.ts`，用临时 HOME 安装四类 Driver，并断言每份 `SKILL.md` 包含完全相同的提示；同时断言源码、npm scripts 和 pack 文件清单不再暴露扫描器。
+创建 `tests/contract/chinese-guidance.test.ts`，用临时 HOME 安装四类 Driver，并断言每份 `SKILL.md` 包含完全相同的提示；同时断言源码和 npm scripts 不再暴露扫描器。pack 文件清单在 build 后的完整发布门禁中验证，避免并行测试修改共享 `dist`。
 
 ```ts
 const guidance = "面向用户的说明、文档和交互文案默认使用中文；协议字段、类型名、URI、命令名和错误码保持英文。";
@@ -53,7 +53,6 @@ assert.match(await readFile(path.join(generic.target, "SKILL.md"), "utf8"), new 
 assert.equal("check:chinese" in packageJson.scripts, false);
 await assert.rejects(access(path.join(root, "src/resources/chinese-content.ts")), /ENOENT/u);
 await assert.rejects(access(path.join(root, "scripts/check-chinese-content.ts")), /ENOENT/u);
-assert.equal(packFiles.some((file) => file.includes("chinese-content")), false);
 ```
 
 - [ ] **Step 2：运行契约测试并确认 RED**

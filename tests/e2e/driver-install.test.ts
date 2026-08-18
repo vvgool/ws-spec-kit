@@ -14,6 +14,8 @@ test("Codex Driver 安装只写入临时 HOME 的官方目录，并包含中文�
   const skill = await readFile(path.join(result.target, "SKILL.md"), "utf8");
   assert.match(skill, /新任务判断功能\/文档 Workflow/);
   assert.match(skill, /已有任务 inspect -> acquire/);
+  assert.match(skill, /面向用户的说明、文档和交互文案默认使用中文/);
+  assert.match(skill, /协议字段、类型名、URI、命令名和错误码保持英文/);
   await assert.rejects(access(path.join(home, ".cursor", "rules", "wsspeckit-driver.mdc")), /ENOENT/);
 });
 

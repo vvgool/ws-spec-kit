@@ -219,21 +219,21 @@ git commit -m "test: record live Feishu acceptance"
 - 创建：`README.md`
 - 创建：`docs/guide/{getting-started,workflow,skills,profiles,connectors,recovery}.md`
 - 修改：`package.json`
-- 修改：`tests/contract/chinese-content.test.ts`
+- 修改：`tests/contract/chinese-guidance.test.ts`
 - 创建：`tests/e2e/packed-install.test.ts`
 
 **接口：**
 - 输入：前述实现、参考文档和验收矩阵。
 - 输出：只含正式 WSSpecKit v1 内容的 npm tarball。
 
-- [ ] **步骤 1：扩展中文与发布清单失败测试**
+- [ ] **步骤 1：扩展 Driver 提示与发布清单失败测试**
 
-扫描 README、指南、模板、CLI 和内置 Skill；允许英文协议字段、命令、URI、Schema ID 和错误码，
-其他用户文案必须中文。Tarball 只允许 `dist`、`schemas`、`resources`、中文 README、LICENSE、package manifest。
+验证四类 Driver 安装产物都提示 Agent 默认使用中文，并断言发布包不包含中文静态分析器。
+Tarball 只允许 `dist`、`schemas`、`resources`、中文 README、LICENSE、package manifest。
 
 - [ ] **步骤 2：运行测试确认文档缺失**
 
-运行：`node --import tsx --test tests/contract/chinese-content.test.ts tests/e2e/packed-install.test.ts`
+运行：`node --import tsx --test tests/contract/chinese-guidance.test.ts tests/e2e/packed-install.test.ts`
 
 预期：FAIL，列出缺失指南或发布清单差异。
 
@@ -243,12 +243,12 @@ git commit -m "test: record live Feishu acceptance"
 
 - [ ] **步骤 4：运行并提交**
 
-运行：`npm pack --dry-run && node --import tsx --test tests/e2e/packed-install.test.ts tests/contract/chinese-content.test.ts`
+运行：`npm pack --dry-run && node --import tsx --test tests/e2e/packed-install.test.ts tests/contract/chinese-guidance.test.ts`
 
 预期：PASS。
 
 ```bash
-git add README.md docs/guide package.json tests/contract/chinese-content.test.ts tests/e2e/packed-install.test.ts
+git add README.md docs/guide package.json tests/contract/chinese-guidance.test.ts tests/e2e/packed-install.test.ts
 git commit -m "docs: publish the Chinese WSSpecKit guide"
 ```
 

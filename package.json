@@ -17,8 +17,7 @@
     "./resources/catalog": "./dist/resources/catalog.js"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && npm run check:chinese -- --build",
-    "check:chinese": "tsx scripts/check-chinese-content.ts",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test tests/**/*.test.ts",
     "test:contract": "node --import tsx --test tests/contract/**/*.test.ts",
