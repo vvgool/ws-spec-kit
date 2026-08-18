@@ -1,5 +1,5 @@
 import type { ProfileId } from "../domain/workflow.js";
-import type { ProfileMode } from "../policy/profile.js";
+import type { ProfileMode, RiskLevel } from "../policy/profile.js";
 import type { RuntimeProjection } from "../storage/control-plane.js";
 
 export interface ProfileDecision {
@@ -14,6 +14,20 @@ export interface RuntimeProfileProjection {
   selected: ProfileId;
   provisional: boolean;
   reasonRuleIds: string[];
+  riskSignals: RuntimeRiskSignals;
+}
+
+export interface RuntimeRiskSignals {
+  levels: RiskLevel[];
+  affectedPaths: string[];
+  modifiedPaths: string[];
+  issueLabels: string[];
+  fileTypes: string[];
+  plannedActions: string[];
+}
+
+export function emptyRuntimeRiskSignals(): RuntimeRiskSignals {
+  return { levels: [], affectedPaths: [], modifiedPaths: [], issueLabels: [], fileTypes: [], plannedActions: [] };
 }
 
 export class ProfileRuntimeError extends Error {

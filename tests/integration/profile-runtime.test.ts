@@ -8,11 +8,12 @@ import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import type { SubmitResult } from "../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
-import { readControlPlane, recoverControlPlane, type RuntimeProjection } from "../../src/storage/control-plane.js";
-import { readEvents } from "../../src/storage/events.js";
+import { readControlPlane, recoverControlPlane, replayEvents, type RuntimeProjection } from "../../src/storage/control-plane.js";
+import { readEvents, type StoredEvent } from "../../src/storage/events.js";
 import {
   completedResult,
   controlRuntimeFixture,
+  failedResult,
   requireExecute,
   retainOnlyReadyStage,
   submitPackage,
@@ -46,6 +47,36 @@ async function writeArtifact(input: {
   return { artifactType: input.artifactType, schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown" };
 }
 
+test("旧事件投影恢复时补齐累计风险信号", () => {
+  const legacyProfile = { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] };
+  const event = {
+    eventType: "projection.invalidated",
+    repositoryId: "repository",
+    workItemId: "work-item",
+    sequence: 1,
+    eventHash: "event-hash",
+    idempotencyKey: "legacy-profile",
+    result: { projection: { profile: legacyProfile } },
+  } as unknown as StoredEvent;
+
+  const recovered = replayEvents({
+    repositoryId: "repository",
+    workItemId: "work-item",
+    stageIds: [],
+    controlPlane: "/control-plane",
+    events: [event],
+  });
+
+  assert.deepEqual(recovered.profile.riskSignals, {
+    levels: [],
+    affectedPaths: [],
+    modifiedPaths: [],
+    issueLabels: [],
+    fileTypes: [],
+    plannedActions: [],
+  });
+});
+
 async function submitExplore(
   profile: "auto" | "quick" | "standard" | "governed",
   remainingRisks: Array<Record<string, unknown>>,
@@ -76,6 +107,7 @@ test("auto 在 intake/explore 期间保持 provisional quick，且初始选择�
     selected: "quick",
     provisional: true,
     reasonRuleIds: [],
+    riskSignals: { levels: [], affectedPaths: [], modifiedPaths: [], issueLabels: [], fileTypes: [], plannedActions: [] },
   });
   assert.deepEqual(
     Object.entries(projection.stages).filter(([, stage]) => stage.status === "ready").map(([stepId]) => stepId),
@@ -128,7 +160,13 @@ test("applyProfileDecision 禁止降级并一次性失效受影响结果、Claim
     lastSequence: 4,
     lastEventHash: "hash",
     idempotency: {},
-    profile: { mode: "auto", selected: "standard", provisional: false, reasonRuleIds: [] },
+    profile: {
+      mode: "auto",
+      selected: "standard",
+      provisional: false,
+      reasonRuleIds: [],
+      riskSignals: { levels: [], affectedPaths: [], modifiedPaths: [], issueLabels: [], fileTypes: [], plannedActions: [] },
+    },
     claims: {
       "review-fix": { stageId: "review-fix:1:review", attemptId: "attempt-review", claimToken: "token", actor: "reviewer", claimedAt: "2026-08-18T04:00:00.000Z", expiresAt: "2026-08-18T05:00:00.000Z", inputWorkspaceTreeDigest: "sha256:test", allowedPaths: [], workspaceSnapshot: [] },
     },
@@ -280,4 +318,143 @@ test("Governed 后续 Review 不能由上一轮 Fix Actor 执行", async () => {
   );
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
   assert.equal(review.stepId, "review-fix:2:review");
+});
+
+test("失败 Attempt 的敏感实际改动与 Retry 状态原子升档，并在无新 diff 的重试和恢复后保持 Governed", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证失败 Attempt 风险" }, profile: "quick" });
+  const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "intake" }));
+  const explore = requireExecute(await submitPackage(fixture, intake));
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  await mkdir(path.join(worktree, "src/auth"), { recursive: true });
+  await writeFile(path.join(worktree, "src/auth/session.ts"), "export const session = true;\n", "utf8");
+  const failed = { ...failedResult(explore), modifiedFiles: ["src/auth/session.ts"] };
+
+  const [first, duplicate] = await Promise.all([
+    submitPackage(fixture, explore, failed),
+    submitPackage(fixture, explore, failed),
+  ]);
+  assert.deepEqual(duplicate, first);
+  const failedProjection = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(failedProjection.profile.selected, "governed");
+  assert.equal(failedProjection.retries.explore?.status, "ready");
+  assert.equal((await readEvents(failedProjection.controlPlane)).filter(({ eventType }) => eventType === "profile.upgraded").length, 1);
+
+  const retry = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "explorer" }));
+  const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: retry, artifactType: "exploration-report" });
+  await submitPackage(fixture, retry, completedResult(retry, [artifact]));
+  const durable = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(durable.profile.selected, "governed");
+
+  await writeFile(path.join(durable.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+  assert.equal(recovered.profile.selected, "governed");
+});
+
+test("Auto 在 Intake low/high 后保持 provisional，并由 Explore 合并累计 high 后首次选档", async () => {
+  for (const intakeRisk of ["low", "high"] as const) {
+    const fixture = await controlRuntimeFixture();
+    const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: `验证 Intake ${intakeRisk} 累计` }, profile: "auto" });
+    const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "intake" }));
+    requireExecute(await submitPackage(fixture, intake, {
+      ...completedResult(intake),
+      remainingRisks: [{ risk: intakeRisk }],
+    }));
+    const beforeExplore = await readControlPlane(fixture.root, started.workItemId);
+    assert.equal(beforeExplore.profile.selected, "quick", intakeRisk);
+    assert.equal(beforeExplore.profile.provisional, true, intakeRisk);
+
+    await writeFile(path.join(beforeExplore.controlPlane, "runtime.json"), "not-json\n", "utf8");
+    const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+    assert.equal(recovered.profile.provisional, true, intakeRisk);
+    const resumedExplore = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "explorer" }));
+    const worktree = await worktreeFor(fixture.root, started.workItemId);
+    const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: resumedExplore, artifactType: "exploration-report" });
+    await submitPackage(fixture, resumedExplore, {
+      ...completedResult(resumedExplore, [artifact]),
+      remainingRisks: [{ risk: "low" }],
+    });
+    const selected = await readControlPlane(fixture.root, started.workItemId);
+    assert.equal(selected.profile.selected, intakeRisk === "high" ? "governed" : "quick", intakeRisk);
+    assert.equal(selected.profile.provisional, false, intakeRisk);
+  }
+});
+
+test("显式 Profile 不受 provisional 边界限制，Intake high 立即单向升级", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证显式 Profile Intake 升档" }, profile: "quick" });
+  const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "intake" }));
+  await submitPackage(fixture, intake, { ...completedResult(intake), remainingRisks: [{ risk: "high" }] });
+  const projection = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(projection.profile.selected, "governed");
+  assert.equal(projection.profile.provisional, false);
+});
+
+test("Governed Review 拒绝原实现者和所有历史 completed Fix Actor，并在恢复后保持完整集合", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证完整 Review Actor 集合" }, profile: "governed" });
+  await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-all-implementation-actors",
+    operationInput: { iteration: 3 },
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        contexts: {
+          ...current.contexts,
+          implement: { actor: "original-implementer", result: { status: "completed" } },
+          "review-fix:1:fix": { actor: "old-fixer", result: { status: "completed" } },
+          "review-fix:2:fix": { actor: "latest-fixer", result: { status: "completed" } },
+        },
+        loops: { ...current.loops, "review-fix": { loopId: "review-fix", iteration: 3, maxIterations: 5, status: "running" } },
+      },
+      value: null,
+    }),
+  });
+  const durable = await readControlPlane(fixture.root, started.workItemId);
+  await writeFile(path.join(durable.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+
+  for (const actor of ["original-implementer", "old-fixer", "latest-fixer"]) {
+    await assert.rejects(
+      fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor }),
+      (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+      actor,
+    );
+  }
+  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }));
+  assert.equal(review.stepId, "review-fix:3:review");
+});
+
+test("Governed Review 在已完成实现记录缺少 actor 时 fail closed", async () => {
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证缺失实现 Actor" }, profile: "governed" });
+  await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:seed-missing-implementation-actor",
+    operationInput: {},
+    mutate: (current) => ({
+      projection: {
+        ...current,
+        contexts: {
+          ...current.contexts,
+          implement: { actor: "original-implementer", result: { status: "completed" } },
+          "review-fix:1:fix": { result: { status: "completed" } },
+        },
+        loops: { ...current.loops, "review-fix": { loopId: "review-fix", iteration: 2, maxIterations: 5, status: "running" } },
+      },
+      value: null,
+    }),
+  });
+
+  await assert.rejects(
+    fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "independent-reviewer" }),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
+  );
 });

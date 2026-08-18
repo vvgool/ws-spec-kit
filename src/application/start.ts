@@ -8,6 +8,7 @@ import type { ProfileId } from "../domain/workflow.js";
 import { compileWorkflow, type ProjectGatePolicy } from "../engine/compiler.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
 import { deriveInitialStages } from "./initial-stages.js";
+import { emptyRuntimeRiskSignals } from "./profile.js";
 import { selectProfile } from "../policy/profile.js";
 import type { StartInput, StartResult, WorkflowProfile } from "../protocol/application.js";
 import type { ResolvedSkillDescriptor } from "../protocol/work-package.js";
@@ -300,6 +301,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       selected,
       provisional: requestedProfile === "auto",
       reasonRuleIds: [],
+      riskSignals: emptyRuntimeRiskSignals(),
     };
     await initializeControlPlane({
       cwd: identity.repositoryRoot,

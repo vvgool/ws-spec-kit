@@ -13,6 +13,7 @@ import {
   blockLoop,
   loopLimitProblem,
   loopStepInstanceId,
+  parseLoopStepInstanceId,
   startLoop,
   succeedLoop,
 } from "../engine/control/loop.js";
@@ -71,6 +72,39 @@ function attemptRecord(value: unknown): ApplicationAttemptRecord | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Partial<ApplicationAttemptRecord>;
   return record.workPackage === undefined ? undefined : record as ApplicationAttemptRecord;
+}
+
+function implementationActors(input: {
+  profile: SnapshotProfile;
+  projection: RuntimeProjection;
+  loopId: string;
+  iteration: number;
+}): ReadonlySet<string> | undefined {
+  const actors = new Set<string>();
+  const topLevelIds = ["implement", "edit-document"].filter((stepId) => input.profile.steps.some(({ id }) => id === stepId));
+  if (topLevelIds.length === 0) return undefined;
+  const completed = (value: unknown): { completed: boolean; actor?: string } => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return { completed: false };
+    const source = value as { actor?: unknown; result?: { status?: unknown } };
+    return {
+      completed: source.result?.status === "completed",
+      ...(typeof source.actor === "string" && source.actor !== "" ? { actor: source.actor } : {}),
+    };
+  };
+  for (const stepId of topLevelIds) {
+    const candidate = completed(input.projection.contexts[stepId]);
+    if (!candidate.completed || candidate.actor === undefined) return undefined;
+    actors.add(candidate.actor);
+  }
+  for (const [stepInstanceId, value] of Object.entries(input.projection.contexts)) {
+    const parsed = parseLoopStepInstanceId(stepInstanceId);
+    if (parsed?.loopId !== input.loopId || parsed.stepId !== "fix" || parsed.iteration >= input.iteration) continue;
+    const candidate = completed(value);
+    if (!candidate.completed) continue;
+    if (candidate.actor === undefined) return undefined;
+    actors.add(candidate.actor);
+  }
+  return actors.size === 0 ? undefined : actors;
 }
 
 function skippedRecord(value: unknown): ApplicationSkippedStepRecord | undefined {
@@ -452,15 +486,8 @@ async function acquireLoopStep(input: {
 
     if (selected !== undefined) {
       if (input.step.independentReviewActor === true && selected.step.id === "review") {
-        const implementationActor = [
-          input.projection.contexts[loopStepInstanceId(loop.loopId, loop.iteration - 1, "fix")],
-          ...["implement", "edit-document"].map((stepId) => input.projection.contexts[stepId]),
-        ]
-          .map((value) => value !== null && typeof value === "object" && !Array.isArray(value)
-            ? (value as { actor?: unknown }).actor
-            : undefined)
-          .find((actor): actor is string => typeof actor === "string" && actor !== "");
-        if (implementationActor === undefined || implementationActor === input.actor) {
+        const actors = implementationActors({ profile: input.profile, projection: input.projection, loopId: loop.loopId, iteration: loop.iteration });
+        if (actors === undefined || actors.has(input.actor)) {
           throw new ApplicationAcquireError(
             "WSSPEC_INDEPENDENT_REVIEW_REQUIRED",
             "Governed Review 必须由不同于实现者的独立 Actor 执行。",

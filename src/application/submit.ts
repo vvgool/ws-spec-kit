@@ -288,6 +288,24 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       };
       if (target.internal) projection.contexts[target.stepInstanceId] = record;
       delete projection.claims[target.stageId];
+      const profileEvaluation = evaluateSubmitProfileDecision({
+        projection,
+        result,
+        stepId: target.stageId,
+        workflow: runtimeState.snapshot.changePolicy.kind,
+      });
+      projection.profile = profileEvaluation.profile;
+      const decision = profileEvaluation.decision;
+      let invalidatesTarget = false;
+      if (decision !== undefined) {
+        const selectedChanged = decision.selected !== decision.previous;
+        const activated = activateSelectedProfile(runtimeState, projection, decision);
+        projection = activated.projection;
+        runtimeState = activated.state;
+        profileInvalidatedStepIds = activated.invalidatedStepIds;
+        profileEvent = selectedChanged ? "profile.upgraded" : "profile.selected";
+        invalidatesTarget = activated.invalidatedStepIds.includes(target.stageId);
+      }
       if (result.status === "failed") {
         const running = transitionStage(current.stages[target.stageId]!, { type: "transition", to: "running" });
         projection.stages[target.stageId] = transitionStage(running, { type: "transition", to: "failed" });
@@ -309,23 +327,9 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         };
       }
       delete projection.retries[target.stepInstanceId];
-      const decision = evaluateSubmitProfileDecision({
-        projection,
-        result,
-        stepId: target.stageId,
-        workflow: runtimeState.snapshot.changePolicy.kind,
-      });
-      if (decision !== undefined) {
-        const selectedChanged = decision.selected !== decision.previous;
-        const activated = activateSelectedProfile(runtimeState, projection, decision);
-        projection = activated.projection;
-        runtimeState = activated.state;
-        profileInvalidatedStepIds = activated.invalidatedStepIds;
-        profileEvent = selectedChanged ? "profile.upgraded" : "profile.selected";
-        if (activated.invalidatedStepIds.includes(target.stageId)) {
-          const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
-          return { projection: next.projection, value: next.action };
-        }
+      if (invalidatesTarget) {
+        const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
+        return { projection: next.projection, value: next.action };
       }
       if (target.internal) {
         projection.stages[target.stageId] = transitionStage(projection.stages[target.stageId]!, { type: "transition", to: "ready" });

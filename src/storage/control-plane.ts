@@ -8,7 +8,7 @@ import type { LoopProjection, RetryProjection, StageState, WorkItemState } from 
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { interruptedRetry } from "../engine/control/retry.js";
-import type { RuntimeProfileProjection } from "../application/profile.js";
+import { emptyRuntimeRiskSignals, type RuntimeProfileProjection } from "../application/profile.js";
 import { loadRepository } from "./repository.js";
 import { appendEventUnlocked, EventStoreError, readEvents, recoverStaleControlPlaneLock, repairIncompleteEventTail, withControlPlaneLock, type DomainEvent, type StoredEvent } from "./events.js";
 import { writeFileAtomic } from "./files.js";
@@ -227,7 +227,7 @@ export async function initializeControlPlane(input: {
     lastSequence: 0,
     lastEventHash: null,
     idempotency: {},
-    profile: input.initialProfile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] },
+    profile: input.initialProfile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [], riskSignals: emptyRuntimeRiskSignals() },
     claims: {},
     contexts: {},
     approvals: {},
@@ -249,7 +249,9 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
   }
   return {
     ...stored,
-    profile: stored.profile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] },
+    profile: stored.profile === undefined
+      ? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [], riskSignals: emptyRuntimeRiskSignals() }
+      : { ...stored.profile, riskSignals: stored.profile.riskSignals ?? emptyRuntimeRiskSignals() },
     claims: stored.claims ?? {},
     contexts: stored.contexts ?? {},
     approvals: stored.approvals ?? {},
@@ -280,7 +282,7 @@ export function replayEvents(input: {
     lastSequence: 0,
     lastEventHash: null,
     idempotency: {},
-    profile: input.initialProfile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [] },
+    profile: input.initialProfile ?? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [], riskSignals: emptyRuntimeRiskSignals() },
     claims: {},
     contexts: {},
     approvals: {},
@@ -311,6 +313,10 @@ export function replayEvents(input: {
     recovered.lastEventHash = event.eventHash;
     recovered.idempotency[event.idempotencyKey] = event.sequence;
   }
+  recovered.profile = {
+    ...recovered.profile,
+    riskSignals: recovered.profile.riskSignals ?? emptyRuntimeRiskSignals(),
+  };
   recovered.readOnly = recovered.workItem.status === "closed";
   return recovered;
 }
@@ -356,7 +362,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     stageIds = profile.order;
     initialWorkItem = { status: "active" };
     initialStages = deriveInitialStages(profile);
-    initialProfile = { mode: application.selectedProfile, selected: application.selectedProfile, provisional: false, reasonRuleIds: [] };
+    initialProfile = { mode: application.selectedProfile, selected: application.selectedProfile, provisional: false, reasonRuleIds: [], riskSignals: emptyRuntimeRiskSignals() };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     if (anchor !== undefined) {
