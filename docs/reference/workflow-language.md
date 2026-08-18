@@ -135,14 +135,32 @@ profile:
   id: governed
   workflow: documentation-delivery
 steps:
-  write-document:
+  clarify:
     approval: true
+    artifacts:
+      specification: { required: true, contentLevel: complete }
+  plan:
+    approval: true
+    artifacts:
+      tasks: { required: true, contentLevel: complete }
+  edit-document:
+    approval: true
+  review-fix:
+    maxIterations: 5
+    independentReviewActor: true
+  verify-document:
+    gates: [docs.integrity]
 publishing:
   issueRequired: true
   knowledgeRequired: true
   readBackRequired: true
 audit:
   level: complete
+  retention: extended
+  recordDecisions: true
+  recordApprovals: true
+  recordActors: true
+  recordPublishing: true
 ```
 
 Builtin Package 只在可验证的内置来源中自动信任。非 Builtin Package 首次使用、内容摘要变化或能力摘要变化时必须创建信任请求；非交互环境不能默认信任，返回 `WSSPEC_WORKFLOW_TRUST_REQUIRED`。拒绝返回 `WSSPEC_WORKFLOW_TRUST_REJECTED`，摘要不匹配返回 `WSSPEC_WORKFLOW_TRUST_CHANGED`。`decide` 记录的 actor、Package 摘要和能力摘要必须与请求完全一致。

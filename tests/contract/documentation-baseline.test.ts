@@ -5,7 +5,13 @@ import test from "node:test";
 import { parse as parseYaml } from "yaml";
 
 import { parseSkillLock } from "../../src/registry/skills/lock.js";
+import { publicCommandDescriptors } from "../../src/cli/commands/public-contract.js";
+import { publicRouteCommands } from "../../src/cli/commands/core.js";
+import { compileWorkflow } from "../../src/engine/compiler.js";
+import { applicationPublicErrorCodes } from "../../src/protocol/public-contract.js";
 import { validate, type SchemaId } from "../../src/schemas/index.js";
+import { loadWorkflowPackage } from "../../src/workflow-package/loader.js";
+import type { WorkflowStep } from "../../src/workflow-package/types.js";
 import { parseProfileV1, parseWorkflowV1 } from "../../src/workflow-package/workflow-v1.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
@@ -28,16 +34,6 @@ const referenceDocuments = {
   skills: "docs/reference/skill-resolution.md",
   connectors: "docs/reference/connector-contracts.md",
 } as const;
-const publicErrorSources = [
-  "src/adapters/cli/output.ts",
-  "src/cli/commands/core.ts",
-  "src/application/start.ts",
-  "src/application/acquire.ts",
-  "src/application/submit.ts",
-  "src/application/decide.ts",
-  "src/application/inspect.ts",
-  "src/schemas/index.ts",
-] as const;
 
 async function files(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -65,21 +61,22 @@ function examples(document: string): Array<{ language: "json" | "yaml"; contract
   }));
 }
 
-function commands(cliMain: string): string[] {
-  return [...cliMain.matchAll(/"wspec ([^"]+)"/gu)].map((match) => {
-    const words = match[1]!.split(" ");
-    return words[0] === "agent" ? "agent install" : words[0]!;
-  });
-}
-
 function applicationOperations(protocol: string): Array<{ name: string; result: string }> {
   return [...protocol.matchAll(/^  ([a-z]+)\(input: [A-Za-z]+\): Promise<([A-Za-z]+)>;/gmu)]
     .map((match) => ({ name: match[1]!, result: match[2]! }));
 }
 
-async function publicErrorCodes(): Promise<string[]> {
-  const sources = await Promise.all(publicErrorSources.map(async (filename) => readFile(path.join(root, filename), "utf8")));
-  return [...new Set(sources.flatMap((source) => [...source.matchAll(/WSSPEC_[A-Z_]+/gu)].map((match) => match[0])))].sort();
+function operationSection(document: string, operation: string): string {
+  const heading = `### \`${operation}\``;
+  const start = document.indexOf(heading);
+  assert.notEqual(start, -1, `缺少 ${operation} 章节`);
+  const contentStart = start + heading.length;
+  const next = document.indexOf("\n### ", contentStart);
+  return document.slice(contentStart, next === -1 ? undefined : next);
+}
+
+function allSteps(steps: readonly WorkflowStep[]): WorkflowStep[] {
+  return steps.flatMap((step) => [step, ...allSteps(step.steps ?? [])]);
 }
 
 test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill URI 与错误码", async () => {
@@ -92,14 +89,13 @@ test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill U
     .map(async (filename) => JSON.parse(await readFile(path.join(root, "schemas", filename), "utf8")) as { $id: string }));
   const schemaIds = schemas.map(({ $id }) => $id).sort();
   const applicationReference = reference.application;
-  const [cliMain, protocol] = await Promise.all([
-    readFile(path.join(root, "src/cli/main.ts"), "utf8"),
-    readFile(path.join(root, "src/protocol/application.ts"), "utf8"),
-  ]);
-  for (const value of [...schemaIds, ...commands(cliMain)]) assert.match(applicationReference, new RegExp(escapeRegularExpression(value), "u"), value);
+  const protocol = await readFile(path.join(root, "src/protocol/application.ts"), "utf8");
+  assert.deepEqual([...publicCommandDescriptors.map(({ command }) => command)].sort(), [...publicRouteCommands].sort());
+  for (const value of [...schemaIds, ...publicCommandDescriptors.map(({ command }) => command)]) assert.match(applicationReference, new RegExp(escapeRegularExpression(value), "u"), value);
   for (const operation of applicationOperations(protocol)) {
-    const pattern = ["### `", operation.name, "`[\\s\\S]*?输入[\\s\\S]*?输出[\\s\\S]*?`", operation.result, "`"].join("");
-    assert.match(applicationReference, new RegExp(pattern, "u"), operation.name);
+    const section = operationSection(applicationReference, operation.name);
+    assert.match(section, /输入/u, operation.name);
+    assert.match(section, new RegExp(["输出：`", operation.result, "`"].join(""), "u"), operation.name);
   }
 
   const workflowReferences = `${reference.workflow}\n${reference.connectors}`;
@@ -111,7 +107,13 @@ test("公开参考替换旧协议文档，并覆盖生成 Schema、CLI、Skill U
     for (const match of (await readFile(filename, "utf8")).matchAll(/builtin:\/\/skills\/[a-z0-9-]+/gu)) skillUris.add(match[0]);
   }
   for (const uri of skillUris) assert.match(reference.skills, new RegExp(escapeRegularExpression(uri), "u"), uri);
-  for (const code of await publicErrorCodes()) assert.match(`${reference.application}\n${reference.workflow}\n${reference.skills}\n${reference.connectors}`, new RegExp(code, "u"), code);
+  for (const code of applicationPublicErrorCodes) assert.match(`${reference.application}\n${reference.workflow}\n${reference.skills}\n${reference.connectors}`, new RegExp(code, "u"), code);
+});
+
+test("操作章节不能借用下一章节的输出类型", async () => {
+  const document = (await documents()).application;
+  const mutated = document.replace("### `acquire`\n\n输入：`AcquireInput`，对应 `builtin.application-acquire-input.v1`，包含 `root`、`workItemId` 与必填 `actor`。输出：`AgentAction`。", "### `acquire`\n\n输入：`AcquireInput`，对应 `builtin.application-acquire-input.v1`，包含 `root`、`workItemId` 与必填 `actor`。");
+  assert.doesNotMatch(operationSection(mutated, "acquire"), /输出：`AgentAction`/u);
 });
 
 test("公开参考中的每个结构化示例都标注并通过正式契约", async () => {
@@ -130,7 +132,14 @@ test("公开参考中的每个结构化示例都标注并通过正式契约", as
           parseWorkflowV1(parseYaml(await readFile(path.join(root, "resources/workflows/documentation-delivery/workflow.yaml"), "utf8"))),
         );
       } else if (block.contract === "profile-v1") {
-        parseProfileV1(value);
+        const profile = parseProfileV1(value);
+        const pkg = await loadWorkflowPackage({ root, ref: "builtin://workflows/documentation-delivery" });
+        const workflow = parseWorkflowV1(parseYaml(await readFile(path.join(root, "resources/workflows/documentation-delivery/workflow.yaml"), "utf8")));
+        const bindings = new Map(allSteps(workflow.steps).flatMap((step) => (step.skills ?? []).map((binding) => [binding.ref, binding])));
+        const skills = [...bindings.values()].map((binding) => ({
+          requestedRef: binding.ref, ref: binding.ref, source: "builtin" as const, provider: "generic" as const, rootId: "builtin", entrypoint: "/builtin/SKILL.md", digest: "sha256:documentation", candidates: [], required: binding.required ?? true, usedFallback: false,
+        }));
+        compileWorkflow({ ...pkg, profiles: new Map(pkg.profiles).set(profile.profile.id, profile) }, { id: profile.profile.id as "quick" | "standard" | "governed", skills }, { requiredGateIds: ["docs.integrity"], configuredGateIds: ["docs.integrity"] });
       } else if (block.contract === "skill-lock-v1") {
         parseSkillLock(value);
       } else if (block.contract === "builtin-documentation-manifest") {

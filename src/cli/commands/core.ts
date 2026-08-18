@@ -110,13 +110,20 @@ async function agent(argv: string[], home: string): Promise<unknown> {
 export async function runCommand(cwd: string, argv: string[]): Promise<unknown> {
   const [command, ...args] = argv;
   const home = process.env.HOME ?? os.homedir();
-  if (command === "init") { parseArguments(args, 0, []); return initRepository(cwd); }
-  if (command === "start") return start(cwd, args, home);
-  if (command === "acquire") return acquire(cwd, args, home);
-  if (command === "submit") return submit(cwd, args, home);
-  if (command === "decide") return decide(cwd, args, home);
-  if (command === "inspect") return inspect(cwd, args, home);
-  if (command === "workflow") return runWorkflowCommand({ root: cwd, argv: args, home, interactive: process.stdin.isTTY === true });
-  if (command === "agent") return agent(args, home);
+  const handler = routes[command ?? ""];
+  if (handler !== undefined) return handler(cwd, args, home);
   throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知命令：${command ?? ""}`);
 }
+
+const routes: Readonly<Record<string, (cwd: string, args: string[], home: string) => Promise<unknown>>> = Object.freeze({
+  init: async (cwd, args) => { parseArguments(args, 0, []); return initRepository(cwd); },
+  start,
+  acquire,
+  submit,
+  decide,
+  inspect,
+  workflow: (cwd, args, home) => runWorkflowCommand({ root: cwd, argv: args, home, interactive: process.stdin.isTTY === true }),
+  agent: async (_cwd, args, home) => agent(args, home),
+});
+
+export const publicRouteCommands = Object.freeze(Object.keys(routes));
