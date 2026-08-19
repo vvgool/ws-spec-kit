@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, realpath, rmdir } from "node:fs/promises";
 import path from "node:path";
+import * as canonicalizeModule from "canonicalize";
 import { parse } from "yaml";
 
 import { parseApplicationSnapshot } from "../application/snapshot.js";
@@ -7,6 +8,7 @@ import { deriveInitialStages } from "../application/initial-stages.js";
 import type { LoopProjection, RetryProjection, StageState, WorkItemState } from "../domain/states.js";
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { assertExternalReceipts } from "../domain/external-receipt.js";
+import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "../engine/tdd/red-gate.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { interruptedRetry } from "../engine/control/retry.js";
 import { emptyRuntimeRiskSignals, type RuntimeProfileProjection } from "../application/profile.js";
@@ -95,6 +97,79 @@ export class ControlPlaneStorageError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
     this.name = "ControlPlaneStorageError";
+  }
+}
+
+const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
+
+function sameCanonicalValue(left: unknown, right: unknown): boolean {
+  const encoded = canonicalize(left);
+  return encoded !== undefined && encoded === canonicalize(right);
+}
+
+function assertedTddEvidence(projection: RuntimeProjection): { red?: import("../engine/tdd/types.js").TrustedEvidence; cycle?: import("../engine/tdd/types.js").TddCycleEvidence } {
+  const prefix = `tdd:${projection.workItemId}:`;
+  const entries = Object.entries(projection.evidence).filter(([key]) => key.startsWith("tdd:"));
+  if (entries.length === 0) return {};
+  const red = parseTrustedEvidence(projection.evidence[`${prefix}red`]);
+  if (red === undefined || red.phase !== "red" || red.taskId !== projection.workItemId) {
+    throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件重放包含无效或不兼容的 Red Evidence。");
+  }
+  let cycle: import("../engine/tdd/types.js").TddCycleEvidence | undefined;
+  const greens = new Map<string, import("../engine/tdd/types.js").TrustedEvidence>();
+  for (const [key, value] of entries) {
+    if (key === `${prefix}red`) continue;
+    if (key === `${prefix}cycle`) {
+      cycle = parseTddCycleEvidence(value);
+      if (cycle === undefined || cycle.taskId !== projection.workItemId || cycle.redEvidenceId !== red.evidenceId
+        || cycle.commandId !== red.commandId || cycle.testAssetsDigest !== red.testAssetsDigest
+        || !sameCanonicalValue(cycle.testPaths, red.testPaths)
+        || !sameCanonicalValue(cycle.testPathRules, red.testPathRules)
+        || !sameCanonicalValue(cycle.testAssets, red.testAssets)
+        || !sameCanonicalValue(cycle.testAssetPaths, red.testAssetPaths)
+        || !sameCanonicalValue(cycle.productPaths, red.productPaths)) {
+        throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件重放包含无效或不兼容的 TDD Cycle Evidence。");
+      }
+      continue;
+    }
+    if (!key.startsWith(`${prefix}green:`)) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件重放包含未知 TDD Evidence key：${key}`);
+    const green = parseTrustedEvidence(value);
+    if (green === undefined || green.phase !== "green" || green.taskId !== projection.workItemId
+      || key !== `${prefix}green:${green.evidenceId}`
+      || green.commandId !== red.commandId || green.commandDigest !== red.commandDigest
+      || green.testPathsDigest !== red.testPathsDigest || green.testAssetsDigest !== red.testAssetsDigest
+      || !sameCanonicalValue(green.testPaths, red.testPaths)
+      || !sameCanonicalValue(green.testFiles, red.testFiles)
+      || !sameCanonicalValue(green.testPathRules, red.testPathRules)
+      || !sameCanonicalValue(green.testAssets, red.testAssets)
+      || !sameCanonicalValue(green.testAssetPaths, red.testAssetPaths)
+      || !sameCanonicalValue(green.productPaths, red.productPaths)) {
+      throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件重放包含未绑定当前 Red 的 Green Evidence。");
+    }
+    greens.set(green.evidenceId, green);
+  }
+  if (cycle !== undefined && (!greens.has(cycle.greenEvidenceId)
+    || (cycle.refactorEvidenceId !== undefined && !greens.has(cycle.refactorEvidenceId)))) {
+    throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件重放的 TDD Cycle 引用了不存在或不兼容的 Green Evidence。");
+  }
+  return { red, ...(cycle === undefined ? {} : { cycle }) };
+}
+
+async function assertRecoveredTddScope(worktree: string, projection: RuntimeProjection): Promise<void> {
+  const { red } = assertedTddEvidence(projection);
+  if (red === undefined) return;
+  let tests: Awaited<ReturnType<typeof testFileManifest>>;
+  let assets: Awaited<ReturnType<typeof testAssetScopeManifest>>;
+  try {
+    [tests, assets] = await Promise.all([
+      testFileManifest(worktree, red.testPaths, red.testPathRules),
+      testAssetScopeManifest(worktree, { testAssetPaths: red.testAssetPaths, productPaths: red.productPaths }),
+    ]);
+  } catch {
+    throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件恢复时测试资产作用域已新增、删除或修改，旧 Red Evidence 失效。");
+  }
+  if (tests.digest !== red.testPathsDigest || assets.digest !== red.testAssetsDigest) {
+    throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件恢复时测试资产作用域摘要失配（tests ${red.testPathsDigest} -> ${tests.digest}; assets ${red.testAssetsDigest} -> ${assets.digest}）。`);
   }
 }
 
@@ -315,6 +390,7 @@ export function replayEvents(input: {
       if (result.projection === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件 ${event.eventType} 缺少可重放投影。`);
       recovered = { ...recovered, ...result.projection };
       assertExternalReceipts(recovered.evidence, "WSSPEC_EVENT_CHAIN_INVALID");
+      assertedTddEvidence(recovered);
     }
     recovered.lastSequence = event.sequence;
     recovered.lastEventHash = event.eventHash;
@@ -398,6 +474,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     ...(initialStages === undefined ? {} : { initialStages }),
     ...(initialProfile === undefined ? {} : { initialProfile }),
   });
+  await assertRecoveredTddScope(path.join(resolved.repositoryRoot, resolved.worktree), recovered);
   const recoveryTime = new Date();
   const abandonedStages = Object.entries(recovered.stages).filter(([stageId, stage]) => {
     if (stage.status === "running") return true;

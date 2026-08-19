@@ -1,5 +1,5 @@
 import { computeWorkspaceTreeDigest } from "../../domain/digests.js";
-import { executeTrustedTestGate, parseTrustedEvidence, testAssetManifest, testFileManifest } from "./red-gate.js";
+import { executeTrustedTestGate, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./red-gate.js";
 import type { GreenEvidenceInput, TddCycleEvidence, TrustedEvidence } from "./types.js";
 import { VerificationError } from "./types.js";
 
@@ -14,7 +14,7 @@ export async function recordGreenEvidenceDetails(input: GreenEvidenceInput): Pro
   if (parsedRed === undefined) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 结构或内容摘要无效。 ");
   const [currentTests, currentAssets] = await Promise.all([
     testFileManifest(input.worktree, parsedRed.testPaths, parsedRed.testPathRules),
-    testAssetManifest(input.worktree, parsedRed.testAssets.map(({ path }) => path)),
+    testAssetScopeManifest(input.worktree, input.gate),
   ]);
   if (parsedRed.taskId !== input.taskId
     || input.redEvidence.commandId !== input.gate.commandId

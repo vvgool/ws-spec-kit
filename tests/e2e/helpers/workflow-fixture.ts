@@ -7,7 +7,8 @@ import { createApplication, type ApplicationDependencies } from "../../../src/ap
 import { loadApplicationState } from "../../../src/application/state.js";
 import { runWorkflowCommand } from "../../../src/adapters/cli/workflow.js";
 import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
-import { computeWorkspaceTreeDigest, sha256 } from "../../../src/domain/digests.js";
+import { computeWorkspaceTreeDigest } from "../../../src/domain/digests.js";
+import { createExternalBinding } from "../../../src/domain/external-receipt.js";
 import { checkDocumentationIntegrity } from "../../../src/engine/docs-integrity.js";
 import { parseTrustedEvidence } from "../../../src/engine/tdd/red-gate.js";
 import { evidenceProjectionKey, evidenceRecordHash } from "../../../src/engine/verification.js";
@@ -54,6 +55,8 @@ interface FeatureOptions {
   upgradeAtStep?: string;
   interruptAfterProfileUpgrade?: boolean;
   interruptAfterApprovalStep?: string;
+  addIgnoredTestAssetDuringFix?: boolean;
+  tamperPublishArtifactAtStep?: "update-issue" | "update-wiki";
 }
 
 interface FeatureArtifacts {
@@ -138,7 +141,7 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
       registry.register(documentationExecutor(input.root));
       continue;
     }
-    const target = id.includes("knowledge.publish") ? "knowledge" : id.includes("issue.") ? "issue" : undefined;
+    const target = id === "connector.execute/knowledge.publish" ? "knowledge" : id === "connector.execute/issue.update" ? "issue" : undefined;
     registry.register(executor(id, securityClass, async (_result, runtime) => {
       if (id === "connector.execute/requirement.capture" && input.externalTargets) {
         runtime.evidence = {
@@ -150,12 +153,25 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
         };
       }
       if (target === undefined || !input.externalTargets) return;
+      const binding = runtime.evidence[`external-binding:${target}`] as {
+        publishStepId?: unknown;
+        publishAttemptId?: unknown;
+        publishInputDigest?: unknown;
+        expectedPublishedContentDigest?: unknown;
+      } | undefined;
       const stored = JSON.parse(await readFile(path.join(input.externalRoot, `${target}.json`), "utf8")) as {
         workItemId?: unknown;
         target?: unknown;
         status?: unknown;
+        publishStepId?: unknown;
+        publishAttemptId?: unknown;
+        publishInputDigest?: unknown;
+        publishedContentDigest?: unknown;
       };
-      if (stored.workItemId !== runtime.workItemId || stored.target !== target || stored.status !== "confirmed") {
+      if (binding === undefined) throw new Error(`local ${target} fixture missing runtime publication binding`);
+      if (stored.workItemId !== runtime.workItemId || stored.target !== target || stored.status !== "confirmed"
+        || stored.publishStepId !== binding?.publishStepId || stored.publishAttemptId !== binding.publishAttemptId
+        || stored.publishInputDigest !== binding.publishInputDigest || stored.publishedContentDigest !== binding.expectedPublishedContentDigest) {
         throw new Error(`local ${target} fixture read-back mismatch`);
       }
       runtime.evidence = {
@@ -166,8 +182,11 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
           target,
           stableId: `local:${target}`,
           externalWorkItemId: runtime.workItemId,
-          publishedContentDigest: sha256(`${JSON.stringify(stored)}\n`),
-          readBackContentDigest: sha256(`${JSON.stringify(stored)}\n`),
+          publishStepId: binding.publishStepId,
+          publishAttemptId: binding.publishAttemptId,
+          publishInputDigest: binding.publishInputDigest,
+          publishedContentDigest: binding.expectedPublishedContentDigest,
+          readBackContentDigest: binding.expectedPublishedContentDigest,
           status: "confirmed",
           readBackStatus: "confirmed",
         },
@@ -244,6 +263,8 @@ export async function createWorkflowFixture(options: { externalTargets?: boolean
   await writeFile(path.join(root, "package.json"), "{\"name\":\"fixture\",\"version\":\"1.0.0\"}\n", "utf8");
   await writeFile(path.join(root, "tsconfig.json"), "{\"compilerOptions\":{\"strict\":true}}\n", "utf8");
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify(projectConfig(options.documentation === true), null, 2)}\n`, "utf8");
+  const ignored = await readFile(path.join(root, ".gitignore"), "utf8");
+  await writeFile(path.join(root, ".gitignore"), `${ignored}tests/ignored-late.json\n`, "utf8");
   await git(root, "add", ".wsspec", "src/feature.mjs", "package.json", "tsconfig.json", ".gitignore");
   await git(root, "commit", "-m", "test: seed local workflow fixture");
 
@@ -408,10 +429,11 @@ export async function executeFeatureWorkflow(
   let profileInterrupted = false;
   let approvalInterrupted = false;
   let highRiskInjected = false;
+  let ignoredTestAssetAdded = false;
   let writeTestsCount = 0;
   let safety = 0;
   while (action.action !== "completed") {
-    if (safety++ > 80) throw new Error("feature workflow exceeded bounded E2E steps");
+    if (safety++ > 80) throw new Error(`feature workflow exceeded bounded E2E steps at ${action.action === "execute" ? action.workPackage.stepId : action.action}; reviews=${reviewIndex}; writeTests=${writeTestsCount}`);
     if (action.action === "await_approval") {
       const beforeDecision = await readControlPlane(fixture.root, started.workItemId);
       const approval = beforeDecision.approvals[action.approval.requestId];
@@ -469,24 +491,52 @@ export async function executeFeatureWorkflow(
         "import { readFileSync } from 'node:fs';",
         "import test from 'node:test';",
         "test('feature delivery reaches value 1', () => assert.match(readFileSync('src/feature.mjs', 'utf8'), /value = 1/));",
+        ...(options.addIgnoredTestAssetDuringFix === true && writeTestsCount > 1
+          ? ["test('review regression is fixed', () => assert.match(readFileSync('src/feature.mjs', 'utf8'), /regression fixed/));"]
+          : []),
         ...(writeTestsCount === 1 ? [] : [`// governed revision ${writeTestsCount}`]),
         "",
       ].join("\n"), "utf8");
       modifiedFiles = ["tests/workflow-feature.test.mjs"];
     } else if (pkg.stepId === "implement") {
-      await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
+      await writeFile(path.join(worktree, "src", "feature.mjs"), `export const value = 1;\n${options.addIgnoredTestAssetDuringFix === true && writeTestsCount > 1 ? "// regression fixed\n" : ""}`, "utf8");
       modifiedFiles = ["src/feature.mjs"];
     } else if (pkg.stepId.endsWith(":fix")) {
       await writeFile(path.join(worktree, "src", "feature.mjs"), "export const value = 1;\n// reviewed fix\n", "utf8");
+      if (options.addIgnoredTestAssetDuringFix === true && !ignoredTestAssetAdded) {
+        await writeFile(path.join(worktree, "tests", "ignored-late.json"), "{}\n", "utf8");
+        ignoredTestAssetAdded = true;
+      }
       modifiedFiles = ["src/feature.mjs"];
     } else if (pkg.stepId === "commit") {
       await git(worktree, "add", "src/feature.mjs", "tests/workflow-feature.test.mjs");
       await git(worktree, "commit", "-m", "fixture: complete local feature");
-    } else if (options.externalTargets === true && ["update-issue", "update-wiki", "close-issue"].includes(pkg.stepId)) {
+    } else if (options.externalTargets === true && ["update-issue", "update-wiki"].includes(pkg.stepId)) {
       const target = pkg.stepId === "update-wiki" ? "knowledge" : "issue";
-      const record = { workItemId: started.workItemId, target, status: "confirmed", action: pkg.stepId };
+      const binding = createExternalBinding({
+        target,
+        workPackage: pkg,
+        discoveryBinding: { exists: true, stableId: `local:${target}`, externalWorkItemId: started.workItemId },
+      });
+      const record = {
+        workItemId: started.workItemId,
+        target,
+        status: "confirmed",
+        action: pkg.stepId,
+        publishStepId: binding.publishStepId,
+        publishAttemptId: binding.publishAttemptId,
+        publishInputDigest: binding.publishInputDigest,
+        publishedContentDigest: binding.expectedPublishedContentDigest,
+      };
       await writeFile(path.join(fixture.externalRoot, `${target}.json`), `${JSON.stringify(record, null, 2)}\n`, "utf8");
       externalWrites = [{ kind: "local-fixture", target, stableId: `local:${target}` }];
+    } else if (options.externalTargets === true && pkg.stepId === "close-issue") {
+      externalWrites = [{ kind: "local-fixture", target: "issue", stableId: "local:issue" }];
+    }
+    if (pkg.stepId === options.tamperPublishArtifactAtStep) {
+      const artifact = pkg.artifacts[0];
+      assert.ok(artifact?.path);
+      await writeFile(path.join(worktree, artifact.path), "tampered after acquire\n", "utf8");
     }
     for (const type of required) {
       if (["red-evidence", "tdd-evidence"].includes(type)) continue;

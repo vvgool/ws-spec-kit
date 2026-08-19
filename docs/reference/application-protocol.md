@@ -72,6 +72,7 @@
 | `builtin.application-submit-input.v1` | Attempt、租约和 `builtin.submit-result.v1`。 |
 | `builtin.artifact.v1` | 可版本化 Artifact 的身份、路径和摘要。 |
 | `builtin.evidence.v1` | Gate 的可信 Evidence 记录。 |
+| `builtin.external-binding.v1` | 将外部目标稳定身份绑定到当前发布 Step、Attempt、输入与预期内容摘要。 |
 | `builtin.external-receipt.v1` | 绑定外部目标身份、发布内容摘要与回读结果的严格回执。 |
 | `builtin.submit-result.v1` | Step 的状态、执行摘要、修改文件、Artifact、命令和风险。 |
 | `builtin.tdd-trusted-evidence.v1` | 引擎执行 Red 或 Green Gate 后形成的单次可信 TDD Evidence。 |

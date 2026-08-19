@@ -109,11 +109,13 @@ steps:
     uses: connector.execute
     action: issue.update
     needs: [commit]
+    inputs: [documentation-result]
     when: ${bindings.issue.exists}
   - id: update-wiki
     uses: connector.execute
     action: knowledge.publish
     needs: [update-issue]
+    inputs: [documentation-result]
     when: ${bindings.knowledge.exists}
   - id: close-issue
     uses: connector.execute

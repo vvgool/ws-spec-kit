@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { constants, realpathSync } from "node:fs";
-import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,8 +25,8 @@ const canonicalize = canonicalizeModule.default as unknown as (input: unknown) =
 const summaryLimit = 8_192;
 const captureLimit = summaryLimit * 4;
 const reportLimit = 1024 * 1024;
-const traceLimit = 4_096;
-const traceByteLimit = 1024 * 1024;
+const testAssetLimit = 4_096;
+const testAssetByteLimit = 1024 * 1024;
 
 const nodeTestReporterSource = [
   "import path from 'node:path';",
@@ -82,51 +82,6 @@ const nodeTestReporterSource = [
   "",
 ].join("\n");
 
-const nodeTestTraceSource = [
-  "import fs from 'node:fs';",
-  "import path from 'node:path';",
-  "import { fileURLToPath } from 'node:url';",
-  "import { registerHooks, syncBuiltinESMExports } from 'node:module';",
-  "const root = path.resolve(process.env.WS_SPEC_TDD_TRACE_ROOT || '');",
-  "const directory = path.resolve(process.env.WS_SPEC_TDD_TRACE_DIR || '');",
-  "const limit = Number(process.env.WS_SPEC_TDD_TRACE_LIMIT || '0');",
-  "const target = path.join(directory, `trace-${process.pid}.jsonl`);",
-  "const handle = fs.openSync(target, 'wx', 0o600);",
-  "const seen = new Set();",
-  "let count = 0;",
-  "let truncated = false;",
-  "function absolute(value) {",
-  "  if (typeof value === 'number') return undefined;",
-  "  try {",
-  "    const raw = value instanceof URL ? fileURLToPath(value) : Buffer.isBuffer(value) ? value.toString() : String(value);",
-  "    return path.resolve(raw);",
-  "  } catch { return undefined; }",
-  "}",
-  "function record(value) {",
-  "  const filename = absolute(value);",
-  "  if (!filename) return;",
-  "  const relative = path.relative(root, filename);",
-  "  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative) || seen.has(filename)) return;",
-  "  seen.add(filename);",
-  "  if (count >= limit) {",
-  "    if (!truncated) { fs.writeSync(handle, `${JSON.stringify({ version: 1, truncated: true })}\\n`); truncated = true; }",
-  "    return;",
-  "  }",
-  "  count += 1;",
-  "  fs.writeSync(handle, `${JSON.stringify({ version: 1, path: filename })}\\n`);",
-  "}",
-  "const readFileSync = fs.readFileSync;",
-  "fs.readFileSync = function(value, ...args) { record(value); return readFileSync.call(this, value, ...args); };",
-  "const readFile = fs.readFile;",
-  "fs.readFile = function(value, ...args) { record(value); return readFile.call(this, value, ...args); };",
-  "const promisesReadFile = fs.promises.readFile;",
-  "fs.promises.readFile = function(value, ...args) { record(value); return promisesReadFile.call(this, value, ...args); };",
-  "syncBuiltinESMExports();",
-  "registerHooks({ load(url, context, nextLoad) { if (url.startsWith('file:')) record(fileURLToPath(url)); return nextLoad(url, context); } });",
-  "process.once('exit', () => fs.closeSync(handle));",
-  "",
-].join("\n");
-
 interface NodeTestReport {
   version: 1;
   adapter: "node-test";
@@ -149,7 +104,6 @@ interface CommandResult {
   timedOut: boolean;
   output: string;
   report?: string;
-  trace?: string;
 }
 
 function normalizedRelative(filename: string): string {
@@ -191,8 +145,64 @@ export async function testFileManifest(worktree: string, testPaths: readonly str
   return fileManifest(worktree, paths, "Test Gate 至少需要一个测试文件。 ");
 }
 
-export async function testAssetManifest(worktree: string, assetPaths: readonly string[]): Promise<{ files: TestFileDigest[]; digest: string }> {
-  return fileManifest(worktree, assetPaths, "Test Gate trace 至少需要一个测试资产。 ");
+type TestingScope = Pick<FixedTestGate, "testAssetPaths" | "productPaths">;
+
+function scopeRoot(pattern: string): string {
+  const segments = pattern.split("/");
+  const firstPattern = segments.findIndex((segment) => /[*?]/u.test(segment));
+  return firstPattern < 0 ? segments.slice(0, -1).join("/") : segments.slice(0, firstPattern).join("/");
+}
+
+export async function testAssetScopeManifest(worktree: string, scope: TestingScope): Promise<{ files: TestFileDigest[]; digest: string }> {
+  const canonicalRoot = await realpath(worktree);
+  const configuredRoots = [...new Set(scope.testAssetPaths.map(scopeRoot))];
+  const roots = configuredRoots.includes("") ? [""] : configuredRoots
+    .filter((candidate) => !configuredRoots.some((other) => other !== candidate && candidate.startsWith(`${other}/`)))
+    .sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+  const candidates = new Set<string>();
+  const walk = async (relativeDirectory: string): Promise<void> => {
+    const absoluteDirectory = relativeDirectory === "" ? canonicalRoot : path.join(canonicalRoot, ...relativeDirectory.split("/"));
+    let entries;
+    try { entries = await readdir(absoluteDirectory, { withFileTypes: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域无法读取：${relativeDirectory || "."}`);
+    }
+    entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    for (const entry of entries) {
+      if (relativeDirectory === "" && entry.name === ".git") continue;
+      const relative = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
+      const testAsset = scope.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, relative));
+      const product = scope.productPaths.some((pattern) => matchesRepositoryPath(pattern, relative));
+      if (testAsset && product) throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", `测试资产路径无法唯一分类：${relative}`);
+      if (entry.isSymbolicLink()) {
+        if (testAsset) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域不允许 symlink：${relative}`);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await walk(relative);
+        continue;
+      }
+      if (!testAsset) continue;
+      if (!entry.isFile()) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产必须是普通文件：${relative}`);
+      candidates.add(relative);
+      if (candidates.size > testAssetLimit) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域超过 ${testAssetLimit} 个文件。`);
+    }
+  };
+  for (const root of roots) await walk(root);
+  const files: TestFileDigest[] = [];
+  let totalBytes = 0;
+  for (const filename of [...candidates].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)))) {
+    let canonical: string;
+    try { canonical = await resolveRepositoryRegularFile(canonicalRoot, filename); }
+    catch { throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产必须是工作区内 canonical regular file：${filename}`); }
+    const content = await readFile(canonical);
+    totalBytes += content.byteLength;
+    if (totalBytes > testAssetByteLimit) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域超过 ${testAssetByteLimit} 字节。`);
+    files.push({ path: filename, digest: sha256(content) });
+  }
+  if (files.length === 0) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", "Test Gate 配置的测试资产作用域为空。 ");
+  return { files, digest: sha256(`${JSON.stringify({ version: 1, files })}\n`) };
 }
 
 function effectiveEnvironment(gate: FixedTestGate): Record<string, string> {
@@ -247,7 +257,7 @@ async function resolveGate(gate: FixedTestGate, worktree: string): Promise<Resol
     throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "首版 trusted TDD 仅支持由引擎注入 reporter 的当前 node:test runner。 ");
   }
   const environmentDigest = sha256(`${JSON.stringify(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)))}\n`);
-  const commandDigest = sha256(`${JSON.stringify({ version: 3, gate: gateConfiguration(gate), executablePathDigest: sha256(executable), executableDigest, environmentDigest, reporterDigest: sha256(nodeTestReporterSource), traceDigest: sha256(nodeTestTraceSource) })}\n`);
+  const commandDigest = sha256(`${JSON.stringify({ version: 4, gate: gateConfiguration(gate), executablePathDigest: sha256(executable), executableDigest, environmentDigest, reporterDigest: sha256(nodeTestReporterSource) })}\n`);
   return { executable, executableDigest, environment, commandDigest };
 }
 
@@ -262,20 +272,15 @@ async function runFixedGate(gate: FixedTestGate, resolved: ResolvedGate, worktre
   const reportRoot = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-report-"));
   const reporterPath = path.join(reportRoot, "reporter.mjs");
   const resultPath = path.join(reportRoot, "result.json");
-  const traceRoot = path.join(reportRoot, "trace");
-  const tracePath = path.join(reportRoot, "trace-preload.mjs");
-  await mkdir(traceRoot);
   await writeFile(reporterPath, nodeTestReporterSource, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  await writeFile(tracePath, nodeTestTraceSource, { encoding: "utf8", mode: 0o600, flag: "wx" });
   await writeFile(resultPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
   const initialResultStat = await lstat(resultPath);
-  const canonicalWorktree = await realpath(worktree);
-  const argv = [`--import=${pathToFileURL(tracePath).href}`, `--test-reporter=${pathToFileURL(reporterPath).href}`, `--test-reporter-destination=${resultPath}`, ...gate.argv.slice(1)];
+  const argv = [`--test-reporter=${pathToFileURL(reporterPath).href}`, `--test-reporter-destination=${resultPath}`, ...gate.argv.slice(1)];
   let output = "";
   try {
     const child = spawn(resolved.executable, argv, {
       cwd: worktree,
-      env: { ...resolved.environment, WS_SPEC_TDD_TRACE_ROOT: canonicalWorktree, WS_SPEC_TDD_TRACE_DIR: traceRoot, WS_SPEC_TDD_TRACE_LIMIT: String(traceLimit) },
+      env: resolved.environment,
       shell: false,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
@@ -305,65 +310,18 @@ async function runFixedGate(gate: FixedTestGate, resolved: ResolvedGate, worktre
       child.once("close", (code, closeSignal) => { clearTimeout(timer); closed = true; exitCode = code; signal = closeSignal; finish(); });
     });
     let report: string | undefined;
-    let trace: string | undefined;
     if (!result.timedOut && result.signal === null) {
       const finalResultStat = await lstat(resultPath);
       if (!finalResultStat.isFile() || finalResultStat.isSymbolicLink() || finalResultStat.dev !== initialResultStat.dev || finalResultStat.ino !== initialResultStat.ino || finalResultStat.size > reportLimit) {
         throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test reporter 结果目标被替换或超出大小限制。 ");
       }
       report = await readFile(resultPath, "utf8");
-      const canonicalTraceRoot = await realpath(traceRoot);
-      const entries = await readdir(traceRoot, { withFileTypes: true });
-      if (entries.length === 0 || entries.some((entry) => !entry.isFile() || !/^trace-[1-9][0-9]*\.jsonl$/u.test(entry.name))) {
-        throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 缺失或包含非法条目。 ");
-      }
-      let total = 0;
-      const chunks: string[] = [];
-      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-        const filename = path.join(traceRoot, entry.name);
-        const stat = await lstat(filename);
-        const canonical = await realpath(filename);
-        if (!stat.isFile() || stat.isSymbolicLink() || path.dirname(canonical) !== canonicalTraceRoot || stat.size > traceByteLimit) {
-          throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 不是受控普通文件或超出大小限制。 ");
-        }
-        total += stat.size;
-        if (total > traceByteLimit) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 汇总超出大小限制。 ");
-        chunks.push(await readFile(filename, "utf8"));
-      }
-      trace = chunks.join("");
     }
     if (sha256(await readFile(resolved.executable)) !== resolved.executableDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 可执行文件在运行期间发生变化。 ");
-    return { ...result, output, ...(report === undefined ? {} : { report }), ...(trace === undefined ? {} : { trace }) };
+    return { ...result, output, ...(report === undefined ? {} : { report }) };
   } finally {
     await rm(reportRoot, { recursive: true, force: true });
   }
-}
-
-export function parseTestAssetTrace(records: string, worktree: string, gate: FixedTestGate): string[] {
-  if (Buffer.byteLength(records) > traceByteLimit || records === "") throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 缺失或超出大小限制。 ");
-  let canonicalRoot: string;
-  try { canonicalRoot = realpathSync(worktree); }
-  catch { throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test trace 工作区根目录无法规范化。 "); }
-  const assets = new Set<string>();
-  let count = 0;
-  for (const line of records.split("\n")) {
-    if (line === "") continue;
-    let value: { version?: unknown; path?: unknown; truncated?: unknown };
-    try { value = JSON.parse(line) as typeof value; }
-    catch { throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 不是合法 JSONL。 "); }
-    if (value.version !== 1 || value.truncated === true) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 被截断或版本无效。 ");
-    if (typeof value.path !== "string") throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 缺少路径。 ");
-    count += 1;
-    if (count > traceLimit) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 超出条目上限。 ");
-    const absolute = path.resolve(value.path);
-    const relative = path.relative(canonicalRoot, absolute).replaceAll("\\", "/");
-    if (relative === "" || relative.startsWith("../") || path.isAbsolute(relative)) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test 资产 trace 越出工作区。 ");
-    const testAsset = gate.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, relative));
-    const product = gate.productPaths.some((pattern) => matchesRepositoryPath(pattern, relative));
-    if (testAsset === product) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", `node:test trace 路径无法唯一分类：${relative}`);
-    if (testAsset) assets.add(relative);
-  }
-  return [...assets].sort((left, right) => left.localeCompare(right));
 }
 
 async function fileManifest(worktree: string, paths: readonly string[], emptyMessage: string): Promise<{ files: TestFileDigest[]; digest: string }> {
@@ -439,6 +397,7 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
   const resolved = await resolveGate(input.gate, input.worktree);
   if (input.expectedCommandDigest !== undefined && input.expectedCommandDigest !== resolved.commandDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 与当前命令环境或可执行文件不再一致。 ");
   const manifest = await testFileManifest(input.worktree, input.testPaths, input.gate.testPathRules);
+  const initialAssetManifest = await testAssetScopeManifest(input.worktree, input.gate);
   const result = await runFixedGate(input.gate, resolved, input.worktree).catch((error: unknown) => {
     if (error instanceof VerificationError) throw error;
     throw new VerificationError("WSSPEC_TDD_GATE_EXECUTION_FAILED", `Test Gate 无法启动：${(error as Error).message}`);
@@ -446,15 +405,14 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
   if (result.timedOut) throw new VerificationError("WSSPEC_TDD_RED_TIMEOUT", "Test Gate 超时，不能形成可信 Evidence。 ");
   if (result.signal !== null || result.exitCode === null) throw new VerificationError("WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE", "Test Gate 被 signal 终止，不能形成可信 Evidence。 ");
   const report = parseNodeTestReport(result.report);
-  const tracedAssets = parseTestAssetTrace(result.trace ?? "", input.worktree, input.gate);
   const [outputWorkspaceDigest, outputManifest, assetManifest] = await Promise.all([
     computeWorkspaceTreeDigest(input.worktree),
     testFileManifest(input.worktree, input.testPaths, input.gate.testPathRules),
-    testAssetManifest(input.worktree, tracedAssets),
+    testAssetScopeManifest(input.worktree, input.gate),
   ]);
-  if (outputWorkspaceDigest !== currentWorkspaceDigest || outputManifest.digest !== manifest.digest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 执行期间修改了 workspace 或 Red 测试。 ");
+  if (outputWorkspaceDigest !== currentWorkspaceDigest || outputManifest.digest !== manifest.digest || assetManifest.digest !== initialAssetManifest.digest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 执行期间修改了 workspace 或测试资产。 ");
   if (manifest.files.some(({ path: filename }) => !assetManifest.files.some((asset) => asset.path === filename))) {
-    throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test trace 未覆盖固定 Gate 执行的测试文件。 ");
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "测试入口不在 Project Config 的 testAssetPaths 作用域内。 ");
   }
   if (report.truncated || report.failureTotal !== report.failures.length || report.failureTotal !== report.summary.failed) {
     throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test reporter failure 聚合不完整，不能形成可信 Evidence。 ");

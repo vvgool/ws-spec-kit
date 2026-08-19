@@ -12,7 +12,7 @@ import {
   tddRedEvidenceKey,
   type EvidenceLevel,
 } from "./verification.js";
-import { parseTddCycleEvidence, parseTrustedEvidence } from "./tdd/red-gate.js";
+import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./tdd/red-gate.js";
 import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
@@ -213,8 +213,7 @@ function independentReviewsSatisfied(input: CloseChecklistInput, step: SnapshotS
 }
 
 function externalReceiptSatisfied(input: CloseChecklistInput, target: "issue" | "knowledge"): boolean {
-  const bindings = record(input.projection.evidence.bindings);
-  const binding = record(bindings?.[target]);
+  const binding = input.projection.evidence[`external-binding:${target}`];
   if (binding === undefined) return false;
   return Object.values(input.projection.evidence).some((receipt) => externalReceiptMatches({
     receipt,
@@ -378,5 +377,22 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
 }
 
 export async function closeChecklistForWorktree(input: WorktreeCloseChecklistInput): Promise<CloseDecision> {
-  return closeChecklist({ ...input, projection: await projectionWithVerifiedArtifacts(input) });
+  let projection = await projectionWithVerifiedArtifacts(input);
+  const red = closeRedEvidence({ ...input, projection });
+  if (red !== undefined) {
+    try {
+      const [tests, assets] = await Promise.all([
+        testFileManifest(input.worktree, red.testPaths, red.testPathRules),
+        testAssetScopeManifest(input.worktree, { testAssetPaths: red.testAssetPaths, productPaths: red.productPaths }),
+      ]);
+      if (tests.digest !== red.testPathsDigest || assets.digest !== red.testAssetsDigest) throw new Error("TDD scope mismatch");
+    } catch {
+      projection = {
+        ...projection,
+        evidence: Object.fromEntries(Object.entries(projection.evidence)
+          .filter(([key]) => !key.startsWith(`tdd:${projection.workItemId}:`))),
+      };
+    }
+  }
+  return closeChecklist({ ...input, projection });
 }

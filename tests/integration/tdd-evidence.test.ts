@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { link, mkdir, readFile, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
 import test from "node:test";
@@ -440,7 +440,7 @@ test("deleting or weakening the Red test invalidates implement and Green evidenc
   );
 });
 
-test("trusted Red binds traced helper, fixture, snapshot, config and indirect imports", async () => {
+test("trusted Red binds the configured helper, fixture, snapshot, config and indirect import scope", async () => {
   const root = await workspace([
     "import assert from 'node:assert/strict';",
     "import test from 'node:test';",
@@ -508,16 +508,90 @@ test("trusted Red binds traced helper, fixture, snapshot, config and indirect im
   }
 });
 
-test("test asset trace truncation fails closed", async () => {
-  const module = await import("../../src/engine/tdd/red-gate.js") as Record<string, unknown>;
-  assert.equal(typeof module.parseTestAssetTrace, "function");
-  assert.throws(
-    () => (module.parseTestAssetTrace as (records: string, root: string, gate: FixedTestGate) => unknown)(
-      `${JSON.stringify({ version: 1, truncated: true })}\n`,
-      "/tmp/worktree",
-      nodeGate(),
-    ),
-    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_REPORT_INVALID",
+test("trusted Red binds every regular file in the configured test asset scope despite trace replacement", async () => {
+  const root = await workspace([
+    "import assert from 'node:assert/strict';",
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    "import test from 'node:test';",
+    "import { expected } from './support/helper.mjs';",
+    "const traceDir = process.env.WS_SPEC_TDD_TRACE_DIR;",
+    "if (traceDir) {",
+    "  for (const name of fs.readdirSync(traceDir)) fs.unlinkSync(path.join(traceDir, name));",
+    "  fs.writeFileSync(path.join(traceDir, `trace-${process.pid}.jsonl`), `${JSON.stringify({ version: 1, path: path.resolve('tests/feature.test.mjs') })}\\n`);",
+    "}",
+    "test('replacement probe stays red', () => assert.equal(expected, 1));",
+    "",
+  ].join("\n"));
+  await mkdir(path.join(root, "tests", "support"), { recursive: true });
+  await mkdir(path.join(root, "tests", "fixtures"), { recursive: true });
+  await mkdir(path.join(root, "tests", "__snapshots__"), { recursive: true });
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 0;\n", "utf8");
+  await writeFile(path.join(root, "tests", "fixtures", "unused.json"), "{\"value\":0}\n", "utf8");
+  await writeFile(path.join(root, "tests", "__snapshots__", "unused.snap"), "snapshot 0\n", "utf8");
+  await writeFile(path.join(root, "tests", "test.config.json"), "{\"mode\":\"red\"}\n", "utf8");
+  await git(root, "add", "tests");
+  await git(root, "commit", "-m", "test: seed complete configured asset scope");
+
+  const gate = featureGate();
+  const red = await recordRedEvidence(await redInput(root, gate));
+  assert.deepEqual(red.testPaths, ["tests/feature.test.mjs"]);
+  assert.deepEqual(red.testAssets.map(({ path: filename }) => filename), [
+    "tests/__snapshots__/unused.snap",
+    "tests/feature.test.mjs",
+    "tests/fixtures/unused.json",
+    "tests/support/helper.mjs",
+    "tests/test.config.json",
+  ]);
+
+  await writeFile(path.join(root, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
+  await assert.doesNotReject(assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }));
+
+  for (const [name, mutate, restore] of [
+    ["modified helper", () => writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 1;\n", "utf8"), () => writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 0;\n", "utf8")],
+    ["new fixture", () => writeFile(path.join(root, "tests", "fixtures", "new.json"), "{}\n", "utf8"), () => rm(path.join(root, "tests", "fixtures", "new.json"))],
+    ["deleted snapshot", () => rm(path.join(root, "tests", "__snapshots__", "unused.snap")), () => writeFile(path.join(root, "tests", "__snapshots__", "unused.snap"), "snapshot 0\n", "utf8")],
+    ["modified config", () => writeFile(path.join(root, "tests", "test.config.json"), "{\"mode\":\"green\"}\n", "utf8"), () => writeFile(path.join(root, "tests", "test.config.json"), "{\"mode\":\"red\"}\n", "utf8")],
+  ] as const) {
+    await mutate();
+    await assert.rejects(
+      assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }),
+      (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+      name,
+    );
+    await restore();
+  }
+});
+
+test("configured test asset scope fails closed on symlinks, ambiguous classification, entry limits and byte limits", async () => {
+  const symlinkRoot = await workspace();
+  await writeFile(path.join(symlinkRoot, "outside-test-asset.txt"), "outside\n", "utf8");
+  await symlink(path.join(symlinkRoot, "outside-test-asset.txt"), path.join(symlinkRoot, "tests", "linked-fixture.txt"));
+  await assert.rejects(
+    async () => recordRedEvidence(await redInput(symlinkRoot, featureGate())),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_TEST_PATH_INVALID",
+  );
+
+  const ambiguousRoot = await workspace();
+  const ambiguousGate = { ...featureGate(), productPaths: ["src/**", "tests/**"] };
+  await assert.rejects(
+    recordRedEvidence(await redInput(ambiguousRoot, ambiguousGate)),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_GATE_CONFIGURATION_INVALID",
+  );
+
+  const entryRoot = await workspace();
+  await mkdir(path.join(entryRoot, "tests", "generated"), { recursive: true });
+  await Promise.all(Array.from({ length: 4_096 }, (_, index) => writeFile(path.join(entryRoot, "tests", "generated", `${index}.txt`), "", "utf8")));
+  await assert.rejects(
+    recordRedEvidence(await redInput(entryRoot, featureGate())),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_TEST_PATH_INVALID",
+  );
+
+  const byteRoot = await workspace();
+  await writeFile(path.join(byteRoot, "tests", "oversized.fixture"), Buffer.alloc(1024 * 1024 + 1));
+  await assert.rejects(
+    recordRedEvidence(await redInput(byteRoot, featureGate())),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_TEST_PATH_INVALID",
   );
 });
 
@@ -782,6 +856,13 @@ test("Application submit replaces Agent-reported Red with engine-executed truste
   assert.deepEqual(evidence.failedTests, ["feature remains red"]);
   assert.deepEqual((projection.contexts["verify-red"] as { result: { commands: unknown[]; evidence: unknown[] } }).result.commands, []);
   assert.deepEqual((projection.contexts["verify-red"] as { result: { commands: unknown[]; evidence: unknown[] } }).result.evidence, []);
+
+  await writeFile(path.join(await worktreeFor(current.root, started.workItemId), "tests", "late-added-fixture.json"), "{}\n", "utf8");
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  await assert.rejects(
+    recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+  );
 });
 
 test("invalid Red atomically releases verify-red and routes back to write-tests", async () => {

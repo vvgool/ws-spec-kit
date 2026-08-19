@@ -1,8 +1,9 @@
 import path from "node:path";
 
-import { verifyArtifact } from "../domain/artifacts.js";
+import { computeArtifactContentHash, readArtifact, verifyArtifact } from "../domain/artifacts.js";
+import { createExternalBinding, externalPublishTarget } from "../domain/external-receipt.js";
 import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, type TreeEntry } from "../domain/digests.js";
-import { matchesRepositoryPath } from "../domain/repository-path.js";
+import { matchesRepositoryPath, resolveRepositoryRegularFile } from "../domain/repository-path.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { deriveInitialStages } from "./initial-stages.js";
 import { applyProfileDecision, type ProfileDecision } from "./profile.js";
@@ -127,6 +128,26 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
     || verified.contentHash !== reference.contentHash
     || (reference.mediaType !== undefined && verified.mediaType !== reference.mediaType)) {
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 身份与提交引用不一致。 `);
+  }
+}
+
+async function verifyPublicationArtifacts(state: ApplicationState, artifacts: readonly ArtifactReference[]): Promise<void> {
+  for (const reference of artifacts) {
+    try {
+      if (reference.path === undefined || reference.contentHash === undefined || reference.revision === undefined) throw new Error("incomplete reference");
+      const normalized = reference.path.replaceAll("\\", "/");
+      const filename = await resolveRepositoryRegularFile(state.worktree, normalized);
+      const artifact = await readArtifact(filename);
+      const { contentHash: storedHash, ...metadataWithoutHash } = artifact.metadata;
+      const actualHash = computeArtifactContentHash(metadataWithoutHash, artifact.body);
+      if (artifact.metadata.workItemId !== state.item.workItemId
+        || artifact.metadata.artifactType !== reference.artifactType
+        || artifact.metadata.revision !== reference.revision
+        || storedHash !== actualHash
+        || reference.contentHash !== actualHash) throw new Error("artifact content mismatch");
+    } catch {
+      throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `External publish Artifact ${reference.artifactType} 的实际内容与输入引用不一致。 `);
+    }
   }
 }
 
@@ -406,6 +427,21 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       }
       let trustedTddEvidence: TrustedEvidence | undefined;
       let trustedTddCycle: TddCycleEvidence | undefined;
+      let executionProjection = current;
+      const publishTarget = externalPublishTarget(target.step.action);
+      if (publishTarget !== undefined) {
+        const active = current.contexts[target.stageId] as ApplicationAttemptRecord;
+        await verifyPublicationArtifacts(runtimeState, active.workPackage.artifacts);
+        const bindings = current.evidence.bindings as Record<string, unknown> | undefined;
+        const binding = createExternalBinding({
+          target: publishTarget,
+          workPackage: active.workPackage,
+          discoveryBinding: bindings?.[publishTarget],
+        });
+        const evidence = { ...current.evidence, [`external-binding:${publishTarget}`]: binding };
+        delete evidence[`external-receipt:${publishTarget}`];
+        executionProjection = { ...current, evidence };
+      }
       let result: ApplicationStepResult;
       if (target.step.id === "verify-red") {
         const writeTests = current.contexts["write-tests"] as ApplicationAttemptRecord | undefined;
@@ -468,7 +504,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       } else {
         result = trustedSubmitResult(
           input.result,
-          await dependencies.executors.assertStep(executorStep as never).validate(executorStep as never, input.result, current),
+          await dependencies.executors.assertStep(executorStep as never).validate(executorStep as never, input.result, executionProjection),
         );
       }
       if (target.internal && target.step.approval) {
@@ -486,7 +522,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         result,
       };
       let projection: RuntimeProjection = {
-        ...current,
+        ...executionProjection,
         stages: { ...current.stages },
         claims: { ...current.claims },
         contexts: { ...current.contexts, [target.stageId]: record },
@@ -570,22 +606,26 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       delete projection.retries[target.stepInstanceId];
       if (target.internal && target.step.id === "fix") {
         const cycle = projection.evidence[tddCycleEvidenceKey(runtimeState.item.workItemId)] as TddCycleEvidence | undefined;
-        if (cycle !== undefined && evaluateReviewFixEvidence({ modifiedFiles: changed, cycle }).action === "restart-cycle") {
-          const resetIds = ["write-tests", "verify-red", "implement", "verify-green", target.stageId];
-          projection.stages = { ...projection.stages };
-          projection.contexts = { ...projection.contexts };
-          for (const stepId of resetIds) {
-            if (projection.stages[stepId] !== undefined) projection.stages[stepId] = { status: stepId === "write-tests" ? "ready" : "pending" };
-            delete projection.contexts[stepId];
+        if (cycle !== undefined) {
+          let restart = evaluateReviewFixEvidence({ modifiedFiles: changed, cycle }).action === "restart-cycle";
+          if (!restart) {
+            try {
+              await assertImplementHasTrustedRed({
+                taskId: runtimeState.item.workItemId,
+                commandId: cycle.commandId,
+                worktree: runtimeState.worktree,
+                redEvidence: projection.evidence[tddRedEvidenceKey(runtimeState.item.workItemId)] as TrustedEvidence | undefined,
+              });
+            } catch (error) {
+              if (!(error instanceof VerificationError) || error.code !== "WSSPEC_TDD_EVIDENCE_INVALIDATED") throw error;
+              restart = true;
+            }
           }
-          projection.contexts = Object.fromEntries(Object.entries(projection.contexts).filter(([key]) => !key.startsWith(`${target.stageId}:`)));
-          projection.loops = { ...projection.loops };
-          delete projection.loops[target.stageId];
-          projection.retries = Object.fromEntries(Object.entries(projection.retries).filter(([key]) => !key.startsWith(`${target.stageId}:`)));
-          projection.evidence = Object.fromEntries(Object.entries(projection.evidence).filter(([key]) => !key.startsWith(`tdd:${runtimeState.item.workItemId}:`)));
-          delete projection.evidence[evidenceProjectionKey("verify-green", "test")];
-          const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
-          return { projection: next.projection, value: next.action };
+          if (restart) {
+            projection = restartTddCycle(projection, runtimeState.item.workItemId);
+            const next = await acquireNextLocked({ state: runtimeState, projection, actor, root: input.root, dependencies });
+            return { projection: next.projection, value: next.action };
+          }
         }
       }
       if (invalidatesTarget) {

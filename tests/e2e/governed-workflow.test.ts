@@ -9,6 +9,7 @@ import {
   executeFeatureWorkflow,
   worktreeFor,
 } from "./helpers/workflow-fixture.js";
+import { readControlPlane } from "../../src/storage/control-plane.js";
 
 test("Governed requires an independent reviewer, complete audit, and read-back local receipts", async () => {
   const fixture = await createWorkflowFixture({ externalTargets: true });
@@ -33,13 +34,27 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.equal(review.actor, "independent-reviewer");
   assert.notEqual(review.actor, implementation.actor);
   for (const target of ["issue", "knowledge"] as const) {
+    const binding = result.recovered.evidence[`external-binding:${target}`] as Record<string, unknown>;
     const receipt = result.recovered.evidence[`external-receipt:${target}`] as Record<string, unknown>;
+    assert.equal(binding.kind, "external-binding");
+    assert.equal(binding.target, target);
+    assert.equal(binding.exists, true);
+    assert.equal(binding.externalWorkItemId, started.workItemId);
+    assert.equal(binding.stableId, `local:${target}`);
+    assert.equal(binding.publishStepId, target === "issue" ? "update-issue" : "update-wiki");
+    assert.match(String(binding.publishAttemptId), /^attempt-/u);
+    assert.match(String(binding.publishInputDigest), /^sha256:/u);
+    assert.match(String(binding.expectedPublishedContentDigest), /^sha256:/u);
     assert.equal(receipt.kind, "external-receipt");
     assert.equal(receipt.target, target);
     assert.equal(receipt.status, "confirmed");
     assert.equal(receipt.readBackStatus, "confirmed");
     assert.equal(receipt.externalWorkItemId, started.workItemId);
     assert.equal(receipt.stableId, `local:${target}`);
+    assert.equal(receipt.publishStepId, binding.publishStepId);
+    assert.equal(receipt.publishAttemptId, binding.publishAttemptId);
+    assert.equal(receipt.publishInputDigest, binding.publishInputDigest);
+    assert.equal(receipt.publishedContentDigest, binding.expectedPublishedContentDigest);
     assert.equal(receipt.readBackContentDigest, receipt.publishedContentDigest);
     const external = JSON.parse(await readFile(path.join(fixture.externalRoot, `${target}.json`), "utf8")) as { workItemId: string };
     assert.equal(external.workItemId, started.workItemId);
@@ -69,13 +84,42 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.ok(decisions.every(({ status, requestedBy, decidedBy, decidedAt }) => status === "approved" && requestedBy !== undefined && decidedBy === "fixture-owner" && decidedAt !== undefined));
   assert.ok(new Set(Object.values(audit.projection.contexts).map(({ actor }) => actor)).has("independent-reviewer"));
   for (const target of ["issue", "knowledge"] as const) {
+    const binding = audit.projection.evidence[`external-binding:${target}`] as Record<string, unknown>;
     const publishing = audit.projection.evidence[`external-receipt:${target}`] as Record<string, unknown>;
     assert.equal(publishing.target, target);
     assert.equal(publishing.status, "confirmed");
     assert.equal(publishing.readBackStatus, "confirmed");
     assert.equal(publishing.externalWorkItemId, started.workItemId);
     assert.equal(publishing.stableId, `local:${target}`);
+    assert.equal(publishing.publishStepId, binding.publishStepId);
+    assert.equal(publishing.publishAttemptId, binding.publishAttemptId);
+    assert.equal(publishing.publishInputDigest, binding.publishInputDigest);
+    assert.equal(publishing.publishedContentDigest, binding.expectedPublishedContentDigest);
     assert.equal(publishing.readBackContentDigest, publishing.publishedContentDigest);
   }
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
+});
+
+test("Governed rejects publish artifact tampering before creating an external binding", async () => {
+  const fixture = await createWorkflowFixture({ externalTargets: true });
+  const started = await fixture.app.start({
+    root: fixture.root,
+    source: { type: "prompt", text: "发布前重新校验输入 Artifact" },
+    workflowRef: "builtin://workflows/feature-delivery",
+    profile: "governed",
+  });
+
+  await assert.rejects(
+    executeFeatureWorkflow(fixture, started, {
+      first: await fixture.acquire(started.workItemId, "governed-author"),
+      implementationActor: "governed-author",
+      reviewActors: ["independent-reviewer"],
+      reviewApprovals: [true],
+      externalTargets: true,
+      tamperPublishArtifactAtStep: "update-issue",
+    }),
+    /WSSPEC_ARTIFACT_REFERENCE_INVALID/u,
+  );
+  const projection = await readControlPlane(fixture.root, started.workItemId);
+  assert.equal(projection.evidence["external-binding:issue"], undefined);
 });

@@ -8,7 +8,7 @@ import { isRepositoryRelativePattern, matchesRepositoryPath } from "../domain/re
 import { validate } from "../schemas/index.js";
 import { mutateControlPlane } from "./scheduler.js";
 import { loadApplicationState, selectedProfile, type SnapshotStep } from "../application/state.js";
-import { fixedGateCommandDigest, parseTrustedEvidence, testAssetManifest, testFileManifest } from "./tdd/red-gate.js";
+import { fixedGateCommandDigest, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./tdd/red-gate.js";
 import { testPathRules, type FixedTestGate, type TddCycleEvidence, type TrustedEvidence } from "./tdd/types.js";
 import { VerificationError } from "./tdd/types.js";
 
@@ -101,7 +101,7 @@ export function assertImplementHasTrustedRed(input: {
   }
   return Promise.all([
     testFileManifest(input.worktree, evidence.testPaths, evidence.testPathRules),
-    testAssetManifest(input.worktree, evidence.testAssets.map(({ path }) => path)),
+    testAssetScopeManifest(input.worktree, { testAssetPaths: evidence.testAssetPaths, productPaths: evidence.productPaths }),
     computeWorkspaceTreeDigest(input.worktree),
     input.gate === undefined ? Promise.resolve(evidence.commandDigest) : fixedGateCommandDigest(input.gate, input.worktree),
   ]).then(([manifest, assets, workspaceDigest, commandDigest]) => {

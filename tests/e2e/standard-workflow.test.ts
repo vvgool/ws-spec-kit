@@ -34,3 +34,22 @@ test("Standard executes approved complete artifacts and resumes the two-round Re
   assert.ok(result.recovered.evidence["verify-green:gate:test"]);
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
 });
+
+test("Standard restarts TDD when Review-Fix adds an ignored file inside the configured test scope", async () => {
+  const fixture = await createWorkflowFixture();
+  const started = await fixture.app.start({
+    root: fixture.root,
+    source: { type: "prompt", text: "Review-Fix ignored test scope" },
+    workflowRef: "builtin://workflows/feature-delivery",
+    profile: "standard",
+  });
+  const result = await executeFeatureWorkflow(fixture, started, {
+    first: await fixture.acquire(started.workItemId, "standard-author"),
+    implementationActor: "standard-author",
+    reviewActors: ["standard-reviewer", "standard-reviewer"],
+    reviewApprovals: [false, true],
+    addIgnoredTestAssetDuringFix: true,
+  });
+  const red = result.recovered.evidence[`tdd:${started.workItemId}:red`] as { testAssets?: Array<{ path: string }> };
+  assert.ok(red.testAssets?.some(({ path: filename }) => filename === "tests/ignored-late.json"));
+});
