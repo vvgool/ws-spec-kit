@@ -6,16 +6,15 @@ import path from "node:path";
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
 import { loadApplicationState } from "../../../src/application/state.js";
 import { runWorkflowCommand } from "../../../src/adapters/cli/workflow.js";
-import { computeArtifactContentHash, readArtifact } from "../../../src/domain/artifacts.js";
-import { computeWorkspaceTreeDigest, sha256 } from "../../../src/domain/digests.js";
-import { createExternalBinding } from "../../../src/domain/external-receipt.js";
+import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
+import { computeWorkspaceTreeDigest } from "../../../src/domain/digests.js";
 import { checkDocumentationIntegrity } from "../../../src/engine/docs-integrity.js";
 import { parseTrustedEvidence } from "../../../src/engine/tdd/red-gate.js";
 import { evidenceProjectionKey, evidenceRecordHash } from "../../../src/engine/verification.js";
 import type { AgentAction, StartResult, SubmitResult } from "../../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
 import { ExecutorRegistry, type StepExecutor } from "../../../src/registry/executors/registry.js";
-import { canonicalRequirementText } from "../../../src/registry/connectors/local-requirement.js";
+import type { ExternalActionExecutor } from "../../../src/application/external-action.js";
 import { readControlPlane, type RuntimeProjection } from "../../../src/storage/control-plane.js";
 import { readEvents, type StoredEvent } from "../../../src/storage/events.js";
 import { initRepository } from "../../../src/storage/repository.js";
@@ -123,7 +122,7 @@ function executor(
   };
 }
 
-function fixtureExecutors(input: { root: string; externalRoot: string; externalTargets: boolean; documentation: boolean }): ExecutorRegistry {
+function fixtureExecutors(input: { root: string; externalTargets: boolean; documentation: boolean }): ExecutorRegistry {
   const registry = new ExecutorRegistry();
   for (const [id, securityClass] of [
     ["agent.execute", "agent"],
@@ -142,7 +141,6 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
       registry.register(documentationExecutor(input.root));
       continue;
     }
-    const target = id === "connector.execute/knowledge.publish" ? "knowledge" : id === "connector.execute/issue.update" ? "issue" : undefined;
     registry.register(executor(id, securityClass, async (_result, runtime) => {
       if (id === "connector.execute/requirement.capture" && input.externalTargets) {
         runtime.evidence = {
@@ -153,49 +151,58 @@ function fixtureExecutors(input: { root: string; externalRoot: string; externalT
           },
         };
       }
-      if (target === undefined || !input.externalTargets) return;
-      const binding = runtime.evidence[`external-binding:${target}`] as {
-        publishStepId?: unknown;
-        publishAttemptId?: unknown;
-        publishInputDigest?: unknown;
-        expectedPublishedContentDigest?: unknown;
-      } | undefined;
-      const stored = JSON.parse(await readFile(path.join(input.externalRoot, `${target}.json`), "utf8")) as {
-        workItemId?: unknown;
-        target?: unknown;
-        status?: unknown;
-        publishStepId?: unknown;
-        publishAttemptId?: unknown;
-        publishInputDigest?: unknown;
-        publishedContentDigest?: unknown;
-      };
-      if (binding === undefined) throw new Error(`local ${target} fixture missing runtime publication binding`);
-      if (stored.workItemId !== runtime.workItemId || stored.target !== target || stored.status !== "confirmed"
-        || stored.publishStepId !== binding?.publishStepId || stored.publishAttemptId !== binding.publishAttemptId
-        || stored.publishInputDigest !== binding.publishInputDigest || stored.publishedContentDigest !== binding.expectedPublishedContentDigest) {
-        throw new Error(`local ${target} fixture read-back mismatch`);
-      }
-      runtime.evidence = {
-        ...runtime.evidence,
-        [`external-receipt:${target}`]: {
-          version: 1,
-          kind: "external-receipt",
-          target,
-          stableId: `local:${target}`,
-          externalWorkItemId: runtime.workItemId,
-          publishStepId: binding.publishStepId,
-          publishAttemptId: binding.publishAttemptId,
-          publishInputDigest: binding.publishInputDigest,
-          publishedContentDigest: binding.expectedPublishedContentDigest,
-          readBackContentDigest: binding.expectedPublishedContentDigest,
-          status: "confirmed",
-          readBackStatus: "confirmed",
-        },
-      };
-      return;
     }));
   }
   return registry;
+}
+
+function fixtureExternalExecutor(externalRoot: string, now: () => Date): ExternalActionExecutor {
+  const recordFor = (request: Parameters<ExternalActionExecutor["execute"]>[0]["request"], grantDigest: string) => ({
+    workItemId: request.workItemId,
+    target: request.target.kind,
+    stableId: request.target.stableId,
+    status: "confirmed",
+    action: request.action,
+    requestId: request.requestId,
+    requestDigest: request.requestDigest,
+    grantDigest,
+    attemptId: request.attemptId,
+    payloadDigest: request.payloadDigest,
+    bindingDigest: request.bindingDigest,
+    inputDigest: request.inputDigest,
+    artifactDigests: request.artifactDigests,
+  });
+  return {
+    async execute({ request, grant, markDispatched }) {
+      await markDispatched();
+      const expected = recordFor(request, grant.grantDigest);
+      const targetPath = path.join(externalRoot, `${request.target.kind}.json`);
+      await writeFile(targetPath, `${JSON.stringify(expected, null, 2)}\n`, "utf8");
+      const stored = JSON.parse(await readFile(targetPath, "utf8")) as unknown;
+      assert.deepEqual(stored, expected);
+      return {
+        targetStableId: request.target.stableId,
+        contentDigest: request.payloadDigest,
+        verifiedAt: now().toISOString(),
+      };
+    },
+    async reconcile({ request, grant }) {
+      try {
+        const stored = JSON.parse(await readFile(path.join(externalRoot, `${request.target.kind}.json`), "utf8")) as unknown;
+        if (JSON.stringify(stored) !== JSON.stringify(recordFor(request, grant.grantDigest))) {
+          return { outcome: "failed", checkedAt: now().toISOString(), reason: "local fixture read-back mismatch" };
+        }
+        return {
+          outcome: "verified",
+          targetStableId: request.target.stableId,
+          contentDigest: request.payloadDigest,
+          checkedAt: now().toISOString(),
+        };
+      } catch {
+        return { outcome: "unknown", checkedAt: now().toISOString(), reason: "local fixture unavailable" };
+      }
+    },
+  };
 }
 
 function projectConfig(documentation: boolean): Record<string, unknown> {
@@ -275,7 +282,8 @@ export async function createWorkflowFixture(options: { externalTargets?: boolean
     home: os.homedir(),
     terminal: { isTTY: true },
     now: () => new Date(now),
-    executors: fixtureExecutors({ root, externalRoot, externalTargets: options.externalTargets === true, documentation: options.documentation === true }),
+    executors: fixtureExecutors({ root, externalTargets: options.externalTargets === true, documentation: options.documentation === true }),
+    externalExecutor: () => fixtureExternalExecutor(externalRoot, () => new Date(now)),
   });
   const fixture: WorkflowFixture = {
     root,
@@ -291,7 +299,10 @@ export async function createWorkflowFixture(options: { externalTargets?: boolean
 
 function requireExecute(action: AgentAction): WorkPackage {
   const actionName = action.action;
-  if (actionName !== "execute") throw new Error(`expected execute, received ${actionName}`);
+  if (actionName !== "execute") {
+    const details = actionName === "blocked" ? `: ${action.problems.map(({ code }) => code).join(",")}` : "";
+    throw new Error(`expected execute, received ${actionName}${details}`);
+  }
   return action.workPackage;
 }
 
@@ -406,6 +417,17 @@ export async function interruptAfterAcquire(
 }
 
 async function approve(fixture: WorkflowFixture, workItemId: StartResult["workItemId"], action: Extract<AgentAction, { action: "await_approval" }>): Promise<AgentAction> {
+  if (action.approval.kind === "external_action") {
+    return fixture.app.decide({
+      kind: "external_action",
+      root: fixture.root,
+      workItemId,
+      requestId: action.approval.requestId,
+      decision: "approved",
+      expectedDigest: action.approval.digest,
+      actor: "fixture-owner",
+    });
+  }
   return fixture.app.decide({
     kind: "approval",
     root: fixture.root,
@@ -439,7 +461,8 @@ export async function executeFeatureWorkflow(
       const beforeDecision = await readControlPlane(fixture.root, started.workItemId);
       const approval = beforeDecision.approvals[action.approval.requestId];
       action = await approve(fixture, started.workItemId, action);
-      if (!approvalInterrupted && approval?.stageId === options.interruptAfterApprovalStep) {
+      if (!approvalInterrupted && options.interruptAfterApprovalStep !== undefined
+        && approval?.stageId === options.interruptAfterApprovalStep) {
         assert.equal(action.action, "execute");
         if (action.action !== "execute") throw new Error("expected active Attempt after governed approval");
         const interrupted = action.workPackage;
@@ -514,29 +537,24 @@ export async function executeFeatureWorkflow(
       await git(worktree, "commit", "-m", "fixture: complete local feature");
     } else if (options.externalTargets === true && ["update-issue", "update-wiki"].includes(pkg.stepId)) {
       const target = pkg.stepId === "update-wiki" ? "knowledge" : "issue";
-      const publishedArtifact = target === "knowledge" && pkg.artifacts.length === 1 && pkg.artifacts[0]!.path !== undefined
-        ? await readArtifact(path.join(worktree, pkg.artifacts[0]!.path!))
-        : undefined;
-      const binding = createExternalBinding({
-        target,
-        workPackage: pkg,
-        discoveryBinding: { exists: true, stableId: `local:${target}`, externalWorkItemId: started.workItemId },
-        ...(publishedArtifact === undefined ? {} : { expectedPublishedContentDigest: sha256(canonicalRequirementText(publishedArtifact.body)) }),
-      });
-      const record = {
-        workItemId: started.workItemId,
-        target,
-        status: "confirmed",
-        action: pkg.stepId,
-        publishStepId: binding.publishStepId,
-        publishAttemptId: binding.publishAttemptId,
-        publishInputDigest: binding.publishInputDigest,
-        publishedContentDigest: binding.expectedPublishedContentDigest,
-      };
-      await writeFile(path.join(fixture.externalRoot, `${target}.json`), `${JSON.stringify(record, null, 2)}\n`, "utf8");
-      externalWrites = [{ kind: "local-fixture", target, stableId: `local:${target}` }];
+      const actionName = target === "knowledge" ? "knowledge.publish" : "issue.update";
+      externalWrites = [{
+        kind: "external-action",
+        provider: "local-fixture",
+        action: actionName,
+        target: { kind: target, stableId: `local:${target}` },
+        payload: { summary: `${pkg.stepId} local publication`, artifactDigests: pkg.artifacts.map(({ contentHash }) => contentHash) },
+        sideEffects: [target === "knowledge" ? "更新本地知识目标" : "更新本地 Issue 目标"],
+      }];
     } else if (options.externalTargets === true && pkg.stepId === "close-issue") {
-      externalWrites = [{ kind: "local-fixture", target: "issue", stableId: "local:issue" }];
+      externalWrites = [{
+        kind: "external-action",
+        provider: "local-fixture",
+        action: "issue.close",
+        target: { kind: "issue", stableId: "local:issue" },
+        payload: { summary: "close local issue after verified delivery" },
+        sideEffects: ["关闭本地 Issue 目标"],
+      }];
     }
     if (pkg.stepId === options.tamperPublishArtifactAtStep) {
       const artifact = pkg.artifacts[0];
@@ -567,6 +585,9 @@ export async function executeFeatureWorkflow(
     }
     try {
       action = await submit(fixture, pkg, stepResult);
+      if (externalWrites.length === 1 && action.action !== "await_approval") {
+        assert.deepEqual(await submit(fixture, pkg, stepResult), action);
+      }
     } catch (error) {
       if (error instanceof Error) error.message = `after ${pkg.stepId}: ${error.message}`;
       throw error;

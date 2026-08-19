@@ -5,6 +5,7 @@ import { parse } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
 import { assertExternalReceipts } from "../domain/external-receipt.js";
+import { assertExternalActionProjection } from "./external-effects/authorization.js";
 import { transitionStage, transitionWorkItem, type StageStatus, type WorkItemStatus } from "../domain/states.js";
 import { appendEventUnlocked, readEvents, withControlPlaneLock, type DomainEvent } from "../storage/events.js";
 import { readControlPlane, replayEvents, writeProjection, type RuntimeProjection } from "../storage/control-plane.js";
@@ -58,6 +59,7 @@ export async function mutateControlPlane<T>(input: {
     }
     if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const mutation = await input.mutate(projection);
+    assertExternalActionProjection(mutation.projection.externalActions, mutation.projection.externalActionIdempotency);
     assertExternalReceipts(mutation.projection.evidence, "WSSPEC_EVENT_INVALID");
     const metadata = await eventMetadata(projection);
     const snapshot = {
@@ -67,6 +69,8 @@ export async function mutateControlPlane<T>(input: {
       claims: mutation.projection.claims,
       contexts: mutation.projection.contexts,
       approvals: mutation.projection.approvals,
+      externalActions: mutation.projection.externalActions,
+      externalActionIdempotency: mutation.projection.externalActionIdempotency,
       evidence: mutation.projection.evidence,
       loops: mutation.projection.loops,
       retries: mutation.projection.retries,

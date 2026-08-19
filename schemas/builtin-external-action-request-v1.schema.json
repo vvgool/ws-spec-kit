@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.external-action-request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "requestId",
+    "workItemId",
+    "stepId",
+    "attemptId",
+    "provider",
+    "action",
+    "securityClass",
+    "target",
+    "payloadDigest",
+    "bindingDigest",
+    "inputDigest",
+    "artifactDigests",
+    "idempotencyKey",
+    "profile",
+    "profileDigest",
+    "workspaceDigest",
+    "configDigest",
+    "sideEffects",
+    "createdAt",
+    "expiresAt",
+    "requestDigest"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^external-request-[a-f0-9]{64}$"
+    },
+    "requestDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSS-[A-Za-z0-9-]+$"
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-.+$"
+    },
+    "provider": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "action": {
+      "enum": [
+        "issue.update",
+        "knowledge.publish",
+        "issue.close"
+      ]
+    },
+    "securityClass": {
+      "const": "external-write"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "stableId"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "issue",
+            "knowledge"
+          ]
+        },
+        "stableId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "payloadDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "bindingDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "inputDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "artifactDigests": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^sha256:[a-f0-9]{64}$"
+      }
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^external:[a-f0-9]{64}$"
+    },
+    "profile": {
+      "enum": [
+        "quick",
+        "standard",
+        "governed"
+      ]
+    },
+    "profileDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "workspaceDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "configDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "sideEffects": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "knowledge.publish"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "knowledge"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "issue.update",
+              "issue.close"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "issue"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

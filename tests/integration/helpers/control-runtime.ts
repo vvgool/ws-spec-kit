@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
+import type { ExternalActionExecutor } from "../../../src/application/external-action.js";
 import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
 import { sha256 } from "../../../src/domain/digests.js";
 import { mutateControlPlane } from "../../../src/engine/scheduler.js";
@@ -27,6 +28,8 @@ type TestFailureCode =
 
 interface ControlRuntimeFixtureOptions {
   validatedFailureCode?: TestFailureCode;
+  externalExecutor?: ExternalActionExecutor;
+  now?: () => Date;
 }
 
 function executorContext(runtime: Awaited<ReturnType<typeof readControlPlane>>, stepId: string): WorkPackage {
@@ -55,13 +58,14 @@ export async function controlRuntimeFixture(options: ControlRuntimeFixtureOption
   await initRepository(root);
   await git(root, "add", ".wsspec", ".gitignore");
   await git(root, "commit", "-m", "test: initialize control runtime");
-  const dependencies: ApplicationDependencies = {
+  const dependencies = {
     provider: "codex",
     home: os.homedir(),
     terminal: { isTTY: true },
-    now: () => new Date("2026-08-18T04:00:00.000Z"),
+    now: options.now ?? (() => new Date("2026-08-18T04:00:00.000Z")),
     executors: runtimeExecutors(options),
-  };
+    ...(options.externalExecutor === undefined ? {} : { externalExecutor: () => options.externalExecutor! }),
+  } as ApplicationDependencies;
   const fixture: ControlRuntimeFixture = {
     root,
     app: createApplication(dependencies),

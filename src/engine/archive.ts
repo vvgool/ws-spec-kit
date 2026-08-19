@@ -190,6 +190,24 @@ function approvalMatches(approval: RuntimeApproval, instance: EffectiveStepInsta
   return approval.contentHash === approvalBindingDigest({ stageId: instance.stepInstanceId, attemptId: approval.attemptId, artifacts: completeArtifacts });
 }
 
+function externalApprovalMatches(projection: RuntimeProjection, instance: EffectiveStepInstance): boolean {
+  const attemptId = instance.context?.workPackage?.attemptId;
+  if (attemptId === undefined || instance.context?.result?.status !== "completed") return false;
+  return Object.values(projection.externalActions).some((action) => action.status === "verified"
+    && action.request.stepId === instance.stepInstanceId
+    && action.request.attemptId === attemptId
+    && action.grant.requestId === action.request.requestId
+    && action.grant.requestDigest === action.request.requestDigest
+    && action.grant.actor !== ""
+    && action.receipt.requestId === action.request.requestId
+    && action.receipt.attemptId === attemptId);
+}
+
+function approvalSatisfied(projection: RuntimeProjection, instance: EffectiveStepInstance): boolean {
+  return Object.values(projection.approvals).some((approval) => approvalMatches(approval, instance))
+    || (instance.step.securityClass === "external-write" && externalApprovalMatches(projection, instance));
+}
+
 function requiredGateIds(profile: SnapshotProfile, policy: ProjectGatePolicy): ReadonlySet<string> {
   const gates = new Set(flatten(profile.steps).filter(({ enabled }) => enabled).flatMap(({ gates: ids }) => ids));
   if (profile.id === "standard") for (const id of policy.requiredGateIds) gates.add(id);
@@ -324,8 +342,7 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
         addMissing("artifact", output.artifact);
       }
     }
-    if (instance.step.approval
-      && !Object.values(input.projection.approvals).some((approval) => approvalMatches(approval, instance))) {
+    if (instance.step.approval && !approvalSatisfied(input.projection, instance)) {
       addMissing("approval", instance.step.id);
     }
     for (const gateId of instance.step.gates.filter((id) => requiredGates.has(id))) {
@@ -369,7 +386,7 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
     const attempt = instance.context;
     if (attempt?.result?.status !== "completed" || typeof attempt.workPackage?.attemptId !== "string") continue;
     const requiredTypes = new Set(instance.step.outputs.filter(({ required }) => required).map(({ artifact }) => artifact));
-    const approvalBound = Object.values(input.projection.approvals).some((approval) => approvalMatches(approval, instance));
+    const approvalBound = approvalSatisfied(input.projection, instance);
     const references = attempt.result.artifacts ?? [];
     const verified: ApprovalArtifact[] = [];
     const invalidRequiredTypes = new Set<string>();

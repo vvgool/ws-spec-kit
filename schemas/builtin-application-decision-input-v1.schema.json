@@ -89,6 +89,50 @@
           "minLength": 1
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "root",
+        "workItemId",
+        "requestId",
+        "decision",
+        "expectedDigest",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "external_action"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workItemId": {
+          "type": "string",
+          "pattern": "^WSS-[A-Za-z0-9-]+$"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "rejected"
+          ]
+        },
+        "expectedDigest": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   ]
 }

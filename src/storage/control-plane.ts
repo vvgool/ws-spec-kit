@@ -17,6 +17,7 @@ import { emptyRuntimeRiskSignals, type RuntimeProfileProjection } from "../appli
 import { loadRepository } from "./repository.js";
 import { appendEventUnlocked, EventStoreError, readEvents, recoverStaleControlPlaneLock, repairIncompleteEventTail, withControlPlaneLock, type DomainEvent, type StoredEvent } from "./events.js";
 import { writeFileAtomic } from "./files.js";
+import { assertExternalActionProjection, type ExternalActionState } from "../engine/external-effects/authorization.js";
 
 export interface RuntimeProjection {
   version: 1;
@@ -31,6 +32,8 @@ export interface RuntimeProjection {
   claims: Record<string, RuntimeClaim>;
   contexts: Record<string, unknown>;
   approvals: Record<string, RuntimeApproval>;
+  externalActions: Record<string, ExternalActionState>;
+  externalActionIdempotency: Record<string, string>;
   evidence: Record<string, unknown>;
   loops: Record<string, LoopProjection>;
   retries: Record<string, RetryProjection>;
@@ -83,7 +86,7 @@ export interface ApplicationCloseEvidence {
 }
 
 interface ProjectionEventResult {
-  projection?: Pick<RuntimeProjection, "workItem" | "stages" | "profile" | "claims" | "contexts" | "approvals" | "evidence" | "loops" | "retries" | "readOnly">;
+  projection?: Pick<RuntimeProjection, "workItem" | "stages" | "profile" | "claims" | "contexts" | "approvals" | "externalActions" | "externalActionIdempotency" | "evidence" | "loops" | "retries" | "readOnly">;
   value?: unknown;
 }
 
@@ -449,6 +452,8 @@ export async function initializeControlPlane(input: {
     claims: {},
     contexts: {},
     approvals: {},
+    externalActions: {},
+    externalActionIdempotency: {},
     evidence: {},
     loops: {},
     retries: {},
@@ -465,7 +470,7 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
   if (stored.repositoryId !== resolved.repositoryId || stored.workItemId !== workItemId) {
     throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
   }
-  return {
+  const projection: RuntimeProjection = {
     ...stored,
     profile: stored.profile === undefined
       ? { mode: "quick", selected: "quick", provisional: false, reasonRuleIds: [], riskSignals: emptyRuntimeRiskSignals() }
@@ -473,12 +478,16 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
     claims: stored.claims ?? {},
     contexts: stored.contexts ?? {},
     approvals: stored.approvals ?? {},
+    externalActions: stored.externalActions ?? {},
+    externalActionIdempotency: stored.externalActionIdempotency ?? {},
     evidence: stored.evidence ?? {},
     loops: stored.loops ?? {},
     retries: stored.retries ?? {},
     readOnly: stored.readOnly ?? false,
     controlPlane: resolved.directory,
   };
+  assertExternalActionProjection(projection.externalActions, projection.externalActionIdempotency);
+  return projection;
 }
 
 export function replayEvents(input: {
@@ -504,6 +513,8 @@ export function replayEvents(input: {
     claims: {},
     contexts: {},
     approvals: {},
+    externalActions: {},
+    externalActionIdempotency: {},
     evidence: {},
     loops: {},
     retries: {},
@@ -526,6 +537,7 @@ export function replayEvents(input: {
       const result = event.result as ProjectionEventResult;
       if (result.projection === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件 ${event.eventType} 缺少可重放投影。`);
       recovered = { ...recovered, ...result.projection };
+      assertExternalActionProjection(recovered.externalActions, recovered.externalActionIdempotency);
       assertExternalReceipts(recovered.evidence, "WSSPEC_EVENT_CHAIN_INVALID");
       assertedTddEvidence(recovered);
     }
@@ -614,9 +626,12 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   const approvalStages = Object.entries(recovered.stages)
     .filter(([stageId, stage]) => stage.status === "awaiting_approval" && !durableApprovalStages.has(stageId))
     .map(([stageId]) => stageId);
+  const uncertainExternalActionIds = Object.entries(recovered.externalActions)
+    .filter(([, action]) => action.status === "executing" && action.dispatch === "sent_or_unknown")
+    .map(([requestId]) => requestId);
   const recoveryStages = [...new Set([...abandonedStages, ...approvalStages])];
   const recoverWorkItem = recovered.workItem.status === "awaiting_approval" && durableApprovalIds.size === 0;
-  if (recoveryStages.length > 0 || recoverWorkItem || invalidPendingApprovalIds.size > 0) {
+  if (recoveryStages.length > 0 || recoverWorkItem || invalidPendingApprovalIds.size > 0 || uncertainExternalActionIds.length > 0) {
     const recoveredAt = recoveryTime.toISOString();
     const next = {
       ...recovered,
@@ -625,6 +640,8 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       claims: { ...recovered.claims },
       contexts: { ...recovered.contexts },
       approvals: { ...recovered.approvals },
+      externalActions: { ...recovered.externalActions },
+      externalActionIdempotency: { ...recovered.externalActionIdempotency },
       retries: { ...recovered.retries },
     };
     for (const stageId of recoveryStages) {
@@ -640,6 +657,17 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     for (const requestId of invalidPendingApprovalIds) {
       const approval = next.approvals[requestId]!;
       next.approvals[requestId] = { ...approval, status: "expired", decidedAt: recoveredAt };
+    }
+    for (const requestId of uncertainExternalActionIds) {
+      const action = next.externalActions[requestId]!;
+      if (action.status !== "executing") throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "外部动作恢复状态不一致。");
+      next.externalActions[requestId] = {
+        status: "reconciliation_required",
+        request: action.request,
+        grant: action.grant,
+        reason: "process recovery after dispatch",
+        requiredAt: recoveredAt,
+      };
     }
     const previous = events.at(-1);
     if (previous === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "活动 Claim 缺少对应事件历史。");
@@ -659,12 +687,14 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
           claims: next.claims,
           contexts: next.contexts,
           approvals: next.approvals,
+          externalActions: next.externalActions,
+          externalActionIdempotency: next.externalActionIdempotency,
           evidence: next.evidence,
           loops: next.loops,
           retries: next.retries,
           readOnly: next.readOnly,
         },
-        value: { abandonedStages, approvalStages },
+        value: { abandonedStages, approvalStages, uncertainExternalActionIds },
       },
     };
     const stored = await appendEventUnlocked(resolved.directory, event);

@@ -9,7 +9,7 @@ import {
   executeFeatureWorkflow,
   worktreeFor,
 } from "./helpers/workflow-fixture.js";
-import { readControlPlane } from "../../src/storage/control-plane.js";
+import { readControlPlane, type RuntimeProjection } from "../../src/storage/control-plane.js";
 
 test("Governed requires an independent reviewer, complete audit, and read-back local receipts", async () => {
   const fixture = await createWorkflowFixture({ externalTargets: true });
@@ -62,6 +62,8 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.equal(result.snapshot.profiles.governed.audit.level, "complete");
   assert.equal(result.snapshot.profiles.governed.audit.retention, "extended");
   assert.ok(Object.values(result.recovered.approvals).every(({ status }) => status === "approved"));
+  assert.equal(Object.values(result.recovered.externalActions).filter(({ status }) => status === "verified").length, 3);
+  assert.ok(Object.values(result.recovered.externalActions).every((action) => action.status === "verified" && action.grant.actor === "fixture-owner"));
   assert.deepEqual(result.recoveryEvidence, {
     governedStep: "update-issue",
     governedAttemptChanged: true,
@@ -77,12 +79,14 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
       approvals: Record<string, { status: string; requestedBy?: string; decidedBy?: string; decidedAt?: string }>;
       contexts: Record<string, { actor?: string }>;
       evidence: Record<string, unknown>;
+      externalActions: RuntimeProjection["externalActions"];
     };
   };
   const decisions = Object.values(audit.projection.approvals);
-  assert.equal(decisions.length, 5);
+  assert.equal(decisions.length, 4);
   assert.ok(decisions.every(({ status, requestedBy, decidedBy, decidedAt }) => status === "approved" && requestedBy !== undefined && decidedBy === "fixture-owner" && decidedAt !== undefined));
   assert.ok(new Set(Object.values(audit.projection.contexts).map(({ actor }) => actor)).has("independent-reviewer"));
+  assert.equal(Object.values(audit.projection.externalActions).filter(({ status }) => status === "verified").length, 3);
   for (const target of ["issue", "knowledge"] as const) {
     const binding = audit.projection.evidence[`external-binding:${target}`] as Record<string, unknown>;
     const publishing = audit.projection.evidence[`external-receipt:${target}`] as Record<string, unknown>;

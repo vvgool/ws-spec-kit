@@ -10,7 +10,7 @@
 | `start` | `start` | `builtin.application-start-input.v1` | 从 Prompt 或仓库内文件创建 Work Item，并快照 Workflow、Skill、配置和来源。 |
 | `acquire` | `acquire` | `builtin.application-acquire-input.v1` | 取得下一可执行 Step 的 `AgentAction`。 |
 | `submit` | `submit` | `builtin.application-submit-input.v1` | 提交本次 Attempt 的结果、Artifact 和 Evidence 引用。 |
-| `decide` | `decide` | `builtin.application-decision-input.v1` | 对步骤审批或 Workflow 信任作出明确决定。 |
+| `decide` | `decide` | `builtin.application-decision-input.v1` | 对步骤审批、外部动作授权或 Workflow 信任作出明确决定。 |
 | `inspect` | `inspect` | `builtin.application-inspect-input.v1` | 读取已快照的 Work Item 状态，不创建新 Attempt。 |
 | `workflow` | workflow management | 无 | 支持 `list`、`show`、`validate`、`eject`、`use`。 |
 | `agent install` | Driver installation | 无 | 安装 `codex`、`claude`、`cursor` 或 `generic` Driver Skill。 |
@@ -36,9 +36,11 @@
 
 输入：`SubmitInput`，对应 `builtin.application-submit-input.v1`，包含 `root`、`workItemId`、`stepId`、`attemptId`、`leaseToken` 和 `result`。输出：`AgentAction`。`submit` 没有 `actor` 字段；CLI 的 `--actor` 仅为适配层可选上下文，不能写入协议 JSON。`attemptId` 与 `leaseToken` 必须对应仍活动的租约。Agent 的失败结果只提交 `status: "failed"`、执行摘要、Artifact 等执行事实，不能提交 `failureCode` 或 `retryable`。默认 Executor 将普通失败归类为可重试的 `WSSPEC_STEP_FAILED`；失败分类只由受信 Executor 或 Runtime 内部产生并持久化，例如 `WSSPEC_STEP_INPUT_INVALID` 或 `WSSPEC_STEP_CONFIGURATION_INVALID`，Runtime 据此决定是否消耗重试预算。
 
+`external-write` Step 成功时必须精确提交一个 `external-action` 意图，包含 Provider、动作、稳定目标、payload 和副作用说明。第一次 `submit` 只持久化 `builtin.external-action-request.v1` 的摘要身份并返回 `await_approval`，不会调用 Provider。批准后重复提交同一 Attempt 才可执行；Runtime 在 Provider 调用前持久化 `executing/not_sent`，Executor 必须在发送边界调用 `markDispatched()` 持久化 `sent_or_unknown`。发送后结果未知时进入 `reconciliation_required`，只允许只读回查，不自动重发。确认成功后 Agent 的原始意图由严格的 `builtin.external-write-receipt.v1` 替换，事件、投影和公开视图不持久化 payload 或凭据。非 `external-write` Step 禁止携带 `externalWrites`。
+
 ### `decide`
 
-输入：`DecisionInput`，对应 `builtin.application-decision-input.v1`。步骤审批需要 `workItemId`、`expectedDigest` 与 `actor`；Workflow 信任需要 Package/能力摘要与 `actor`。输出：`AgentAction`。Workflow 信任决定只接受真实交互式 TTY。
+输入：`DecisionInput`，对应 `builtin.application-decision-input.v1`。步骤审批和 `external_action` 决定需要 `workItemId`、`expectedDigest` 与 `actor`；Workflow 信任需要 Package/能力摘要与 `actor`。输出：`AgentAction`。Workflow 信任与外部动作决定只接受真实交互式 TTY。外部批准形成与当前 Request、Attempt、actor、Profile、workspace 和 config 摘要绑定的 `builtin.external-action-grant.v1`；拒绝决定持久化与 Request 摘要绑定的证据，后续 `acquire` 继续 fail closed。
 
 ```json contract=schema:builtin.application-decision-input.v1
 {
@@ -72,8 +74,11 @@
 | `builtin.application-submit-input.v1` | Attempt、租约和 `builtin.submit-result.v1`。 |
 | `builtin.artifact.v1` | 可版本化 Artifact 的身份、路径和摘要。 |
 | `builtin.evidence.v1` | Gate 的可信 Evidence 记录。 |
+| `builtin.external-action-grant.v1` | 将交互式批准绑定到外部 Request、actor、Attempt、Profile、workspace 与 config。 |
+| `builtin.external-action-request.v1` | 外部写入的 payload-free 身份、摘要、稳定目标、幂等键和有效期。 |
 | `builtin.external-binding.v1` | 将外部目标稳定身份绑定到当前发布 Step、Attempt、输入与预期内容摘要。 |
 | `builtin.external-receipt.v1` | 绑定外部目标身份、发布内容摘要与回读结果的严格回执。 |
+| `builtin.external-write-receipt.v1` | 绑定 Request、Grant、当前 Attempt、稳定目标、payload 摘要和回读摘要的写入回执。 |
 | `builtin.source-artifact.v1` | 规范化且内容寻址的不可变需求来源；正文只存在于 Source Artifact 文件。 |
 | `builtin.submit-result.v1` | Step 的状态、执行摘要、修改文件、Artifact、命令和风险。 |
 | `builtin.tdd-trusted-evidence.v1` | 引擎执行 Red 或 Green Gate 后形成的单次可信 TDD Evidence。 |
@@ -154,6 +159,7 @@ skills:
 | `artifact` | `WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
 | `submit` | `WSSPEC_ARTIFACT_REFERENCE_INVALID`、`WSSPEC_ATTEMPT_NOT_ACTIVE`、`WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`、`WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED`、`WSSPEC_MODIFIED_FILES_MISMATCH`、`WSSPEC_REQUIRED_ARTIFACT_MISSING`、`WSSPEC_STEP_CONFIGURATION_INVALID`、`WSSPEC_STEP_FAILED`、`WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID`、`WSSPEC_STEP_INPUT_INVALID`、`WSSPEC_UNDECLARED_ARTIFACT` |
 | `approval` | `WSSPEC_APPROVAL_DIGEST_INVALID`、`WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED` |
+| `externalAction` | `WSSPEC_EXTERNAL_ACTION_REJECTED`、`WSSPEC_EXTERNAL_ATTEMPT_MISMATCH`、`WSSPEC_EXTERNAL_BINDING_INVALID`、`WSSPEC_EXTERNAL_DISPATCH_EVIDENCE_MISSING`、`WSSPEC_EXTERNAL_EXECUTOR_NOT_FOUND`、`WSSPEC_EXTERNAL_GRANT_EXPIRED`、`WSSPEC_EXTERNAL_GRANT_INVALID`、`WSSPEC_EXTERNAL_GRANT_MISMATCH`、`WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT`、`WSSPEC_EXTERNAL_IDEMPOTENCY_INVALID`、`WSSPEC_EXTERNAL_INTENT_INVALID`、`WSSPEC_EXTERNAL_ORDER_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_MISMATCH`、`WSSPEC_EXTERNAL_PROJECTION_INVALID`、`WSSPEC_EXTERNAL_READBACK_MISMATCH`、`WSSPEC_EXTERNAL_RECONCILIATION_FAILED`、`WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED`、`WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED`、`WSSPEC_EXTERNAL_REJECTION_INVALID`、`WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH`、`WSSPEC_EXTERNAL_REQUEST_EXPIRED`、`WSSPEC_EXTERNAL_REQUEST_INVALID`、`WSSPEC_EXTERNAL_REQUEST_NOT_FOUND`、`WSSPEC_EXTERNAL_SECURITY_CLASS_INVALID`、`WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID`、`WSSPEC_EXTERNAL_TARGET_INVALID`、`WSSPEC_OPTIONAL_KNOWLEDGE_FAILED` |
 | `workflowEject` | `WSSPEC_WORKFLOW_EJECT_SOURCE_INVALID`、`WSSPEC_WORKFLOW_EJECT_TARGET_EXISTS` |
 | `agentInstall` | `WSSPEC_SKILL_INSTALL_CONFLICT` |
 
@@ -166,10 +172,10 @@ skills:
 | `agent` | `internal`、`dispatch` |
 | `init` | `internal`、`arguments`、`repository` |
 | `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`source`、`workItem`、`runtime`、`start` |
-| `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd` |
-| `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd` |
-| `decide` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`workflowPackage`、`workflowTrust` |
-| `inspect` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem` |
+| `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd`、`externalAction` |
+| `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction` |
+| `decide` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`workflowPackage`、`workflowTrust`、`externalAction` |
+| `inspect` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction` |
 | `workflow list` | `internal`、`arguments`、`builtin` |
 | `workflow show` | `internal`、`arguments`、`builtin`、`workflowPackage` |
 | `workflow eject` | `internal`、`arguments`、`builtin`、`workflowPackage`、`workflowEject` |

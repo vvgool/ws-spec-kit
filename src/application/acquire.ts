@@ -32,12 +32,15 @@ import { assertImplementHasTrustedRed, fixedTestGateForState, tddRedEvidenceKey 
 import type { TrustedEvidence } from "../engine/tdd/types.js";
 import type { ApplicationSnapshot, ApplicationState, SnapshotProfile, SnapshotStep } from "./state.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
+import type { ExternalActionExecutor, ExternalActionRejection } from "./external-action.js";
+import { externalActionApprovalSummary, externalActionRejectionKey } from "./external-action.js";
 
 export interface AcquireDependencies {
   now(): Date;
   executors: ExecutorRegistry;
   home: string;
   provider: import("../registry/skills/types.js").SkillProvider;
+  externalExecutor(provider: string, action: "issue.update" | "knowledge.publish" | "issue.close"): ExternalActionExecutor;
 }
 
 export interface ApplicationStepResult extends SubmitResult {
@@ -139,6 +142,111 @@ function pendingApproval(projection: RuntimeProjection, workItemId: string): Age
       digest: approval.contentHash,
     },
   };
+}
+
+function pendingExternalAction(projection: RuntimeProjection, workItemId: string, now: Date): AgentAction | undefined {
+  const candidates = Object.values(projection.externalActions)
+    .sort((left, right) => left.request.createdAt.localeCompare(right.request.createdAt));
+  for (const candidate of candidates) {
+    const rejection = projection.evidence[externalActionRejectionKey(candidate.request.requestId)] as ExternalActionRejection | undefined;
+    if (rejection !== undefined) {
+      if (rejection.requestId !== candidate.request.requestId || rejection.requestDigest !== candidate.request.requestDigest
+        || rejection.actor === "" || !Number.isFinite(Date.parse(rejection.rejectedAt))) {
+        throw new ApplicationAcquireError("WSSPEC_EXTERNAL_REJECTION_INVALID", "外部动作拒绝证据未绑定当前请求。");
+      }
+      return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_ACTION_REJECTED", message: "外部动作未获授权。", retryable: false }] };
+    }
+    const claim = projection.claims[candidate.request.stepId];
+    const context = attemptRecord(projection.contexts[candidate.request.stepId]);
+    const active = claim?.stageId === candidate.request.stepId
+      && claim.attemptId === candidate.request.attemptId
+      && new Date(claim.expiresAt) > now
+      && context?.workPackage.stepId === candidate.request.stepId
+      && context.workPackage.attemptId === candidate.request.attemptId
+      && context.workPackage.lease.token === claim.claimToken;
+    if (candidate.status === "prepared") {
+      if (!active) {
+        return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH", message: "外部动作审批绑定的 Attempt/Lease 已失效。", retryable: false }] };
+      }
+      const summary = externalActionApprovalSummary(candidate.request);
+      return {
+        action: "await_approval",
+        approval: {
+          kind: "external_action",
+          requestId: candidate.request.requestId,
+          workItemId: workItemId as `WSS-${string}`,
+          title: `${summary.provider} ${summary.action} ${summary.target.stableId}`,
+          digest: candidate.request.requestDigest,
+          provider: summary.provider,
+          action: summary.action,
+          target: summary.target,
+          sideEffects: summary.sideEffects,
+        },
+      };
+    }
+    if (candidate.status === "reconciliation_required"
+      || (candidate.status === "executing" && candidate.dispatch === "sent_or_unknown")) {
+      return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED", message: "外部动作结果未知，必须先完成只读协调回查。", retryable: false }] };
+    }
+    if (candidate.status === "failed") {
+      if (projection.evidence[`external-warning:${candidate.request.requestId}`] !== undefined) continue;
+      return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_RECONCILIATION_FAILED", message: candidate.reason, retryable: false }] };
+    }
+    if (candidate.status === "approved" || candidate.status === "executing" || candidate.status === "verified") {
+      if (!active) {
+        if (candidate.status === "verified") continue;
+        return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH", message: "外部动作 Grant 绑定的 Attempt/Lease 已失效。", retryable: false }] };
+      }
+      return { action: "execute", workPackage: context.workPackage };
+    }
+  }
+  return undefined;
+}
+
+function settleOptionalKnowledgeFailures(projection: RuntimeProjection, profile: SnapshotProfile): RuntimeProjection {
+  if (profile.publishing.knowledgeRequired) return projection;
+  let next = projection;
+  for (const candidate of Object.values(projection.externalActions)) {
+    if (candidate.status !== "failed" || candidate.request.action !== "knowledge.publish") continue;
+    const warningKey = `external-warning:${candidate.request.requestId}`;
+    if (next.evidence[warningKey] !== undefined) continue;
+    const stage = next.stages[candidate.request.stepId];
+    const claim = next.claims[candidate.request.stepId];
+    const context = attemptRecord(next.contexts[candidate.request.stepId]);
+    if (stage?.status !== "claimed" || claim?.attemptId !== candidate.request.attemptId
+      || context?.workPackage.attemptId !== candidate.request.attemptId) {
+      throw new ApplicationAcquireError("WSSPEC_EXTERNAL_ATTEMPT_MISMATCH", "可选 Knowledge 失败与活动 Attempt 投影不一致。");
+    }
+    const running = transitionStage(stage, { type: "transition", to: "running" });
+    const validating = transitionStage(running, { type: "transition", to: "validating" });
+    const claims = { ...next.claims };
+    const retries = { ...next.retries };
+    delete claims[candidate.request.stepId];
+    delete retries[candidate.request.stepId];
+    const result: ApplicationStepResult = {
+      version: 1,
+      status: "completed",
+      summary: "可选 Knowledge 发布未确认，已记录 warning。",
+      modifiedFiles: [],
+      artifacts: [],
+      commands: [],
+      evidence: [],
+      externalWrites: [],
+      remainingRisks: [{ code: "WSSPEC_OPTIONAL_KNOWLEDGE_FAILED", reason: candidate.reason }],
+    };
+    next = {
+      ...next,
+      stages: { ...next.stages, [candidate.request.stepId]: transitionStage(validating, { type: "transition", to: "succeeded_with_warnings" }) },
+      claims,
+      contexts: { ...next.contexts, [candidate.request.stepId]: { ...context, result } },
+      retries,
+      evidence: {
+        ...next.evidence,
+        [warningKey]: { code: "WSSPEC_OPTIONAL_KNOWLEDGE_FAILED", reason: candidate.reason },
+      },
+    };
+  }
+  return next;
 }
 
 function dependencyClosure(stepId: string, profile: SnapshotProfile): Set<string> {
@@ -539,9 +647,12 @@ export async function acquireNextLocked(input: {
   if (projection.workItem.status === "closed" || projection.workItem.status === "cancelled") {
     return { projection, action: completed(state.item.workItemId, projection.workItem.status, "Workflow 已结束。"), skippedStepIds: [] };
   }
+  const profile = selectedProfile(state.snapshot);
+  projection = settleOptionalKnowledgeFailures(projection, profile);
+  const externalAction = pendingExternalAction(projection, state.item.workItemId, dependencies.now());
+  if (externalAction !== undefined) return { projection, action: externalAction, skippedStepIds: [] };
   const approval = pendingApproval(projection, state.item.workItemId);
   if (approval !== undefined) return { projection, action: approval, skippedStepIds: [] };
-  const profile = selectedProfile(state.snapshot);
   const now = dependencies.now();
   for (const [stepId, claim] of Object.entries(projection.claims)) {
     if (new Date(claim.expiresAt) > now) {

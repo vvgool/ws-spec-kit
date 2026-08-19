@@ -73,20 +73,43 @@ export interface WorkflowTrustDecisionInput {
   actor: string;
 }
 
-export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput;
+export interface ExternalActionDecisionInput {
+  kind: "external_action";
+  root: string;
+  workItemId: WorkItemId;
+  requestId: string;
+  decision: "approved" | "rejected";
+  expectedDigest: string;
+  actor: string;
+}
+
+export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput | ExternalActionDecisionInput;
 
 export interface InspectInput {
   root: string;
   workItemId: WorkItemId;
 }
 
-export interface ApprovalSummary {
-  kind: "step" | "external_action" | "workflow_trust";
+interface BaseApprovalSummary {
   requestId: string;
   workItemId: WorkItemId;
   title: string;
   digest: string;
 }
+
+export interface StepApprovalSummary extends BaseApprovalSummary {
+  kind: "step" | "workflow_trust";
+}
+
+export interface ExternalActionApproval extends BaseApprovalSummary {
+  kind: "external_action";
+  provider: string;
+  action: "issue.update" | "knowledge.publish" | "issue.close";
+  target: { kind: "issue" | "knowledge"; stableId: string };
+  sideEffects: string[];
+}
+
+export type ApprovalSummary = StepApprovalSummary | ExternalActionApproval;
 
 export interface Problem {
   code: `WSSPEC_${string}`;
@@ -105,6 +128,15 @@ export interface WorkItemView {
   status: string;
   workflowRef: string;
   profile: Exclude<WorkflowProfile, "auto">;
+  externalActions?: Array<{
+    requestId: string;
+    stepId: string;
+    attemptId: string;
+    provider: string;
+    action: "issue.update" | "knowledge.publish" | "issue.close";
+    target: { kind: "issue" | "knowledge"; stableId: string };
+    status: "prepared" | "approved" | "executing" | "verified" | "reconciliation_required" | "failed";
+  }>;
 }
 
 export type AgentAction =

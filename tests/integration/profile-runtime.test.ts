@@ -182,6 +182,8 @@ test("applyProfileDecision 禁止降级并一次性失效受影响结果、Claim
     approvals: {
       "approval-verify": { requestId: "approval-verify", stageId: "verify-green", attemptId: "attempt-verify", artifactPath: "artifact", contentHash: "sha256:test", workspaceTreeDigest: "sha256:test", status: "pending", createdAt: "2026-08-18T04:00:00.000Z" },
     },
+    externalActions: {},
+    externalActionIdempotency: {},
     evidence: {
       test: { gateId: "test", stageId: "verify-green" },
       intake: { gateId: "intake", stageId: "intake" },

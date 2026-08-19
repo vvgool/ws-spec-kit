@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.external-write-receipt.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "kind",
+    "requestId",
+    "requestDigest",
+    "grantDigest",
+    "workItemId",
+    "stepId",
+    "attemptId",
+    "provider",
+    "action",
+    "target",
+    "payloadDigest",
+    "bindingDigest",
+    "inputDigest",
+    "artifactDigests",
+    "idempotencyKey",
+    "readBackContentDigest",
+    "status",
+    "verifiedAt"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "external-write-receipt"
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^external-request-[a-f0-9]{64}$"
+    },
+    "requestDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "grantDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSS-[A-Za-z0-9-]+$"
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-.+$"
+    },
+    "provider": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "action": {
+      "enum": [
+        "issue.update",
+        "knowledge.publish",
+        "issue.close"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "stableId"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "issue",
+            "knowledge"
+          ]
+        },
+        "stableId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "payloadDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "bindingDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "inputDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "artifactDigests": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^sha256:[a-f0-9]{64}$"
+      }
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^external:[a-f0-9]{64}$"
+    },
+    "readBackContentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "status": {
+      "const": "verified"
+    },
+    "verifiedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -40,6 +40,18 @@ import {
 } from "../engine/verification.js";
 import { acquireNextLocked, type AcquireDependencies, type ApplicationAttemptRecord, type ApplicationStepResult } from "./acquire.js";
 import { loadApplicationState, selectedProfile, type ApplicationState, type SnapshotStep } from "./state.js";
+import {
+  executeExternalAction,
+  ExternalActionError,
+  externalActionApprovalSummary,
+  externalActionRejectionKey,
+  prepareExternalAction,
+  type ExternalActionName,
+  type ExternalActionRejection,
+  type ExternalActionState,
+  type ExternalWriteReceipt,
+} from "./external-action.js";
+import { canonicalDigest } from "../engine/external-effects/idempotency.js";
 
 export interface SubmitDependencies extends AcquireDependencies {
   executors: ExecutorRegistry;
@@ -59,8 +71,69 @@ interface ExecutionTarget {
   internal: boolean;
 }
 
+interface ExternalWriteIntent {
+  kind: "external-action";
+  provider: string;
+  action: ExternalActionName;
+  target: { kind: "issue" | "knowledge"; stableId: string };
+  payload: unknown;
+  sideEffects: string[];
+}
+
 function ownProjection<T>(values: Record<string, T>, key: string): T | undefined {
   return Object.hasOwn(values, key) ? values[key] : undefined;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function externalWriteIntent(result: SubmitResult): ExternalWriteIntent {
+  if (result.externalWrites.length !== 1) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "external-write Step 必须精确提交一个外部动作意图。 ");
+  }
+  const value = record(result.externalWrites[0]);
+  const target = record(value?.target);
+  const allowed = ["kind", "provider", "action", "target", "payload", "sideEffects"];
+  if (value?.kind !== "external-action" || Object.keys(value).some((key) => !allowed.includes(key))
+    || typeof value.provider !== "string" || !/^[a-z][a-z0-9-]{0,62}$/u.test(value.provider)
+    || !["issue.update", "knowledge.publish", "issue.close"].includes(value.action as string)
+    || target === undefined || Object.keys(target).some((key) => !["kind", "stableId"].includes(key))
+    || (target.kind !== "issue" && target.kind !== "knowledge") || typeof target.stableId !== "string" || target.stableId === ""
+    || !Array.isArray(value.sideEffects) || value.sideEffects.length === 0
+    || value.sideEffects.some((item) => typeof item !== "string" || item === "") || value.payload === undefined) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "外部动作意图字段不完整或包含未知字段。 ");
+  }
+  return {
+    kind: "external-action",
+    provider: value.provider,
+    action: value.action as ExternalActionName,
+    target: { kind: target.kind, stableId: target.stableId },
+    payload: value.payload,
+    sideEffects: [...value.sideEffects] as string[],
+  };
+}
+
+function externalBlocked(code: `WSSPEC_${string}`, message: string, retryable = false): AgentAction {
+  return { action: "blocked", problems: [{ code, message, retryable }] };
+}
+
+function externalApprovalAction(workItemId: string, state: Extract<ExternalActionState, { status: "prepared" }>): AgentAction {
+  const summary = externalActionApprovalSummary(state.request);
+  return {
+    action: "await_approval",
+    approval: {
+      kind: "external_action",
+      requestId: state.request.requestId,
+      workItemId: workItemId as `WSS-${string}`,
+      title: `${summary.provider} ${summary.action} ${summary.target.stableId}`,
+      digest: state.request.requestDigest,
+      provider: summary.provider,
+      action: summary.action,
+      target: summary.target,
+      sideEffects: summary.sideEffects,
+    },
+  };
 }
 
 function executionTarget(profile: ReturnType<typeof selectedProfile>, projection: RuntimeProjection, stepInstanceId: string): ExecutionTarget {
@@ -371,10 +444,215 @@ function activateSelectedProfile(
   };
 }
 
+function discoveryTarget(projection: RuntimeProjection, kind: "issue" | "knowledge", workItemId: string) {
+  const bindings = record(projection.evidence.bindings);
+  const binding = record(bindings?.[kind]);
+  if (binding?.exists !== true || typeof binding.stableId !== "string" || binding.stableId === ""
+    || binding.externalWorkItemId !== workItemId) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", `外部 ${kind} 目标缺少当前 Work Item 的稳定发现绑定。 `);
+  }
+  return { exists: true as const, stableId: binding.stableId, externalWorkItemId: workItemId };
+}
+
+function previousVerifiedIssueUpdate(projection: RuntimeProjection, stableId: string): ExternalWriteReceipt | undefined {
+  return Object.values(projection.externalActions)
+    .filter((state): state is Extract<ExternalActionState, { status: "verified" }> =>
+      state.status === "verified" && state.request.action === "issue.update" && state.request.target.stableId === stableId)
+    .sort((left, right) => left.receipt.verifiedAt.localeCompare(right.receipt.verifiedAt))
+    .at(-1)?.receipt;
+}
+
+async function governExternalSubmit(
+  input: SubmitInput,
+  state: ApplicationState,
+  dependencies: SubmitDependencies,
+): Promise<{ input: SubmitInput; action?: AgentAction }> {
+  if (input.result.externalWrites.length === 0) return { input };
+  const profile = selectedProfile(state.snapshot);
+  const target = executionTarget(profile, state.projection, input.stepId);
+  if (target.step.securityClass !== "external-write") {
+    if (input.result.externalWrites.length !== 0) {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "非 external-write Step 不能携带外部写入记录。");
+    }
+    return { input };
+  }
+  if (target.internal) throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "循环内部 Step 不支持外部写入。 ");
+  if (input.result.status === "failed") {
+    if (input.result.externalWrites.length !== 0) throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "失败结果不能携带外部写入意图。 ");
+    return { input };
+  }
+  const intent = externalWriteIntent(input.result);
+  if (intent.action !== target.step.action || (intent.action === "knowledge.publish") !== (intent.target.kind === "knowledge")) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "外部动作意图与编译后的 Step 动作或目标类别不一致。 ");
+  }
+  const payloadDigest = canonicalDigest(intent.payload);
+  const prior = Object.values(state.projection.externalActions).find((candidate) =>
+    candidate.request.workItemId === input.workItemId
+    && candidate.request.stepId === input.stepId
+    && candidate.request.attemptId === input.attemptId
+    && candidate.request.provider === intent.provider
+    && candidate.request.action === intent.action
+    && candidate.request.target.kind === intent.target.kind
+    && candidate.request.target.stableId === intent.target.stableId);
+  const active = state.projection.contexts[target.stageId] as ApplicationAttemptRecord;
+  await verifyPublicationArtifacts(
+    state,
+    active.workPackage.artifacts.filter(({ artifactType }) => artifactType !== "requirement-source"),
+  );
+  const discovered = discoveryTarget(state.projection, intent.target.kind, state.item.workItemId);
+  if (discovered.stableId !== intent.target.stableId) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "外部动作意图的稳定目标与发现绑定不一致。 ");
+  }
+  let bindingDigest: `sha256:${string}`;
+  let inputDigest: `sha256:${string}`;
+  if (intent.action === "issue.close") {
+    const previous = previousVerifiedIssueUpdate(state.projection, discovered.stableId);
+    if (previous === undefined) {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_ORDER_INVALID", "Issue Close 前缺少已验证的 Issue Update Receipt。 ");
+    }
+    bindingDigest = canonicalDigest({ kind: "issue", ...discovered }, "WSSPEC_EXTERNAL_BINDING_INVALID");
+    inputDigest = previous.readBackContentDigest;
+  } else {
+    const publishTarget = intent.action === "knowledge.publish" ? "knowledge" : "issue";
+    const binding = createExternalBinding({
+      target: publishTarget,
+      workPackage: active.workPackage,
+      discoveryBinding: discovered,
+      ...(publishTarget === "knowledge" ? { expectedPublishedContentDigest: payloadDigest } : {}),
+    });
+    bindingDigest = canonicalDigest(binding, "WSSPEC_EXTERNAL_BINDING_INVALID");
+    inputDigest = binding.publishInputDigest as `sha256:${string}`;
+  }
+  const artifactDigests = active.workPackage.artifacts.map((artifact) =>
+    (artifact.contentHash ?? canonicalDigest(artifact)) as `sha256:${string}`).sort();
+  if (prior !== undefined) {
+    const rejection = state.projection.evidence[externalActionRejectionKey(prior.request.requestId)] as ExternalActionRejection | undefined;
+    if (rejection !== undefined) {
+      if (rejection.requestId !== prior.request.requestId || rejection.requestDigest !== prior.request.requestDigest
+        || rejection.actor === "" || !Number.isFinite(Date.parse(rejection.rejectedAt))) {
+        throw new ApplicationSubmitError("WSSPEC_EXTERNAL_REJECTION_INVALID", "外部动作拒绝证据未绑定当前请求。");
+      }
+      return { input, action: externalBlocked("WSSPEC_EXTERNAL_ACTION_REJECTED", "外部动作未获授权。") };
+    }
+    const sameLogicalRequest = prior.request.payloadDigest === payloadDigest
+      && prior.request.bindingDigest === bindingDigest
+      && prior.request.inputDigest === inputDigest
+      && JSON.stringify(prior.request.artifactDigests) === JSON.stringify(artifactDigests)
+      && JSON.stringify(prior.request.sideEffects) === JSON.stringify(intent.sideEffects);
+    if (!sameLogicalRequest) {
+      throw new ExternalActionError("WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT", "同一 Attempt 的外部动作已绑定不同请求内容。");
+    }
+    if (prior.status === "verified") {
+      return { input: { ...input, result: { ...input.result, externalWrites: [{ ...prior.receipt }] } } };
+    }
+  }
+  await validateResult(input, state, target, state.projection, dependencies.now());
+  const executorStep = { ...target.step, id: target.stageId };
+  trustedSubmitResult(
+    input.result,
+    await dependencies.executors.assertStep(executorStep as never).validate(executorStep as never, input.result, state.projection),
+  );
+  let governed: ExternalActionState;
+  if (prior !== undefined) {
+    governed = prior;
+  } else {
+    governed = await prepareExternalAction({
+      root: input.root,
+      workItemId: input.workItemId,
+      stepId: input.stepId,
+      attemptId: input.attemptId,
+      provider: intent.provider,
+      action: intent.action,
+      securityClass: "external-write",
+      target: intent.target,
+      payload: intent.payload,
+      bindingDigest,
+      inputDigest,
+      artifactDigests,
+      sideEffects: intent.sideEffects,
+      createdAt: dependencies.now().toISOString(),
+      expiresAt: active.workPackage.lease.expiresAt,
+      actor: state.projection.claims[target.stageId]!.actor,
+    });
+  }
+  if (governed.status === "prepared") return { input, action: externalApprovalAction(input.workItemId, governed) };
+  if (governed.status === "reconciliation_required"
+    || (governed.status === "executing" && governed.dispatch === "sent_or_unknown")) {
+    return { input, action: externalBlocked("WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED", "外部动作结果未知，禁止自动重发。") };
+  }
+  if (governed.status === "failed") {
+    return { input, action: externalBlocked("WSSPEC_EXTERNAL_RECONCILIATION_FAILED", governed.reason) };
+  }
+  if (governed.status !== "verified") {
+    governed = await executeExternalAction({
+      root: input.root,
+      workItemId: input.workItemId,
+      requestId: governed.request.requestId,
+      payload: intent.payload,
+      executor: dependencies.externalExecutor(intent.provider, intent.action),
+      now: dependencies.now().toISOString(),
+    });
+  }
+  if (governed.status === "reconciliation_required") {
+    return { input, action: externalBlocked("WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED", "外部动作结果未知，必须先完成只读协调回查。") };
+  }
+  return {
+    input: { ...input, result: { ...input.result, externalWrites: [{ ...governed.receipt }] } },
+  };
+}
+
+function governedExternalReceipt(result: SubmitResult): ExternalWriteReceipt | undefined {
+  const candidate = result.externalWrites.length === 1 ? result.externalWrites[0] : undefined;
+  try { return validate<ExternalWriteReceipt>("builtin.external-write-receipt.v1", candidate); }
+  catch { return undefined; }
+}
+
+function withLegacyExternalEvidence(projection: RuntimeProjection, receipt: ExternalWriteReceipt): RuntimeProjection {
+  if (receipt.action === "issue.close") return projection;
+  const target = receipt.target.kind;
+  const binding = {
+    version: 1 as const,
+    kind: "external-binding" as const,
+    target,
+    exists: true as const,
+    stableId: receipt.target.stableId,
+    externalWorkItemId: receipt.workItemId,
+    publishStepId: receipt.stepId,
+    publishAttemptId: receipt.attemptId,
+    publishInputDigest: receipt.inputDigest,
+    expectedPublishedContentDigest: receipt.payloadDigest,
+  };
+  const legacyReceipt = {
+    version: 1 as const,
+    kind: "external-receipt" as const,
+    target,
+    stableId: receipt.target.stableId,
+    externalWorkItemId: receipt.workItemId,
+    publishStepId: receipt.stepId,
+    publishAttemptId: receipt.attemptId,
+    publishInputDigest: receipt.inputDigest,
+    publishedContentDigest: receipt.payloadDigest,
+    readBackContentDigest: receipt.readBackContentDigest,
+    status: "confirmed" as const,
+    readBackStatus: "confirmed" as const,
+  };
+  return {
+    ...projection,
+    evidence: {
+      ...projection.evidence,
+      [`external-binding:${target}`]: binding,
+      [`external-receipt:${target}`]: legacyReceipt,
+    },
+  };
+}
+
 export async function submitApplication(input: SubmitInput, dependencies: SubmitDependencies): Promise<AgentAction> {
   validate("builtin.application-submit-input.v1", input);
   validate<SubmitResult>("builtin.submit-result.v1", input.result);
   const state = await loadApplicationState(input.root, input.workItemId);
+  const governed = await governExternalSubmit(input, state, dependencies);
+  if (governed.action !== undefined) return governed.action;
+  input = governed.input;
   const { root: _root, ...operationInput } = input;
   let profileEvent: "profile.selected" | "profile.upgraded" | undefined;
   let profileInvalidatedStepIds: string[] = [];
@@ -400,6 +678,10 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       }
       const profile = selectedProfile(runtimeState.snapshot);
       const target = executionTarget(profile, current, input.stepId);
+      if (target.step.securityClass === "external-write" && input.result.status === "completed"
+        && input.result.externalWrites.length === 0) {
+        throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "external-write Step 必须提交经过授权和回读验证的外部动作 Receipt。 ");
+      }
       let changed: string[];
       try {
         changed = await validateResult(input, runtimeState, target, current, dependencies.now());
@@ -444,7 +726,10 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       let trustedTddCycle: TddCycleEvidence | undefined;
       let executionProjection = current;
       const publishTarget = externalPublishTarget(target.step.action);
-      if (publishTarget !== undefined) {
+      const externalReceipt = governedExternalReceipt(input.result);
+      if (externalReceipt !== undefined) {
+        executionProjection = withLegacyExternalEvidence(current, externalReceipt);
+      } else if (publishTarget !== undefined) {
         const active = current.contexts[target.stageId] as ApplicationAttemptRecord;
         const publicationBodies = await verifyPublicationArtifacts(runtimeState, active.workPackage.artifacts);
         const bindings = current.evidence.bindings as Record<string, unknown> | undefined;
@@ -657,7 +942,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       const running = transitionStage(projection.stages[target.stageId]!, { type: "transition", to: "running" });
       const validating = transitionStage(running, { type: "transition", to: "validating" });
       projection.stages[target.stageId] = validating;
-      if (target.step.approval) {
+      if (target.step.approval && target.step.securityClass !== "external-write") {
         const artifacts = result.artifacts.filter((candidate) => candidate.path !== undefined);
         const request = await prepareArtifactApproval({
           cwd: input.root,

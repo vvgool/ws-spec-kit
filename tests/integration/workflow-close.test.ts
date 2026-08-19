@@ -97,6 +97,8 @@ function projection(overrides: Partial<RuntimeProjection> = {}): RuntimeProjecti
     claims: {},
     contexts: {},
     approvals: {},
+    externalActions: {},
+    externalActionIdempotency: {},
     evidence: {},
     loops: {},
     retries: {},
