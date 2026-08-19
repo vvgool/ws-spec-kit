@@ -6,8 +6,8 @@ import path from "node:path";
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
 import { loadApplicationState } from "../../../src/application/state.js";
 import { runWorkflowCommand } from "../../../src/adapters/cli/workflow.js";
-import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
-import { computeWorkspaceTreeDigest } from "../../../src/domain/digests.js";
+import { computeArtifactContentHash, readArtifact } from "../../../src/domain/artifacts.js";
+import { computeWorkspaceTreeDigest, sha256 } from "../../../src/domain/digests.js";
 import { createExternalBinding } from "../../../src/domain/external-receipt.js";
 import { checkDocumentationIntegrity } from "../../../src/engine/docs-integrity.js";
 import { parseTrustedEvidence } from "../../../src/engine/tdd/red-gate.js";
@@ -15,6 +15,7 @@ import { evidenceProjectionKey, evidenceRecordHash } from "../../../src/engine/v
 import type { AgentAction, StartResult, SubmitResult } from "../../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
 import { ExecutorRegistry, type StepExecutor } from "../../../src/registry/executors/registry.js";
+import { canonicalRequirementText } from "../../../src/registry/connectors/local-requirement.js";
 import { readControlPlane, type RuntimeProjection } from "../../../src/storage/control-plane.js";
 import { readEvents, type StoredEvent } from "../../../src/storage/events.js";
 import { initRepository } from "../../../src/storage/repository.js";
@@ -513,10 +514,14 @@ export async function executeFeatureWorkflow(
       await git(worktree, "commit", "-m", "fixture: complete local feature");
     } else if (options.externalTargets === true && ["update-issue", "update-wiki"].includes(pkg.stepId)) {
       const target = pkg.stepId === "update-wiki" ? "knowledge" : "issue";
+      const publishedArtifact = target === "knowledge" && pkg.artifacts.length === 1 && pkg.artifacts[0]!.path !== undefined
+        ? await readArtifact(path.join(worktree, pkg.artifacts[0]!.path!))
+        : undefined;
       const binding = createExternalBinding({
         target,
         workPackage: pkg,
         discoveryBinding: { exists: true, stableId: `local:${target}`, externalWorkItemId: started.workItemId },
+        ...(publishedArtifact === undefined ? {} : { expectedPublishedContentDigest: sha256(canonicalRequirementText(publishedArtifact.body)) }),
       });
       const record = {
         workItemId: started.workItemId,

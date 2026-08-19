@@ -2,7 +2,7 @@ import path from "node:path";
 
 import { computeArtifactContentHash, readArtifact, verifyArtifact } from "../domain/artifacts.js";
 import { createExternalBinding, externalPublishTarget } from "../domain/external-receipt.js";
-import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, type TreeEntry } from "../domain/digests.js";
+import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, sha256, type TreeEntry } from "../domain/digests.js";
 import { matchesRepositoryPath, resolveRepositoryRegularFile } from "../domain/repository-path.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { deriveInitialStages } from "./initial-stages.js";
@@ -21,6 +21,7 @@ import { evaluateSubmitProfileDecision } from "../engine/results.js";
 import type { AgentAction, SubmitInput, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
+import { canonicalRequirementText } from "../registry/connectors/local-requirement.js";
 import { validate } from "../schemas/index.js";
 import { recoverControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
 import { recordGreenEvidenceDetails } from "../engine/tdd/green-gate.js";
@@ -131,7 +132,8 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
   }
 }
 
-async function verifyPublicationArtifacts(state: ApplicationState, artifacts: readonly ArtifactReference[]): Promise<void> {
+async function verifyPublicationArtifacts(state: ApplicationState, artifacts: readonly ArtifactReference[]): Promise<string[]> {
+  const bodies: string[] = [];
   for (const reference of artifacts) {
     try {
       if (reference.path === undefined || reference.contentHash === undefined || reference.revision === undefined) throw new Error("incomplete reference");
@@ -145,9 +147,22 @@ async function verifyPublicationArtifacts(state: ApplicationState, artifacts: re
         || artifact.metadata.revision !== reference.revision
         || storedHash !== actualHash
         || reference.contentHash !== actualHash) throw new Error("artifact content mismatch");
+      bodies.push(artifact.body);
     } catch {
       throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `External publish Artifact ${reference.artifactType} 的实际内容与输入引用不一致。 `);
     }
+  }
+  return bodies;
+}
+
+function knowledgePublishedContentDigest(bodies: readonly string[]): string {
+  if (bodies.length !== 1) {
+    throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Knowledge publish 必须精确绑定一个已验证 Artifact 正文。 ");
+  }
+  try {
+    return sha256(canonicalRequirementText(bodies[0]!));
+  } catch {
+    throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Knowledge publish Artifact 正文无法规范化为有界 Markdown。 ");
   }
 }
 
@@ -431,12 +446,13 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       const publishTarget = externalPublishTarget(target.step.action);
       if (publishTarget !== undefined) {
         const active = current.contexts[target.stageId] as ApplicationAttemptRecord;
-        await verifyPublicationArtifacts(runtimeState, active.workPackage.artifacts);
+        const publicationBodies = await verifyPublicationArtifacts(runtimeState, active.workPackage.artifacts);
         const bindings = current.evidence.bindings as Record<string, unknown> | undefined;
         const binding = createExternalBinding({
           target: publishTarget,
           workPackage: active.workPackage,
           discoveryBinding: bindings?.[publishTarget],
+          ...(publishTarget === "knowledge" ? { expectedPublishedContentDigest: knowledgePublishedContentDigest(publicationBodies) } : {}),
         });
         const evidence = { ...current.evidence, [`external-binding:${publishTarget}`]: binding };
         delete evidence[`external-receipt:${publishTarget}`];

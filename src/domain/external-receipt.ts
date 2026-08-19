@@ -75,6 +75,7 @@ export function createExternalBinding(input: {
   target: ExternalTarget;
   workPackage: WorkPackage;
   discoveryBinding: unknown;
+  expectedPublishedContentDigest?: string;
 }): ExternalBinding {
   const discovery = record(input.discoveryBinding);
   if (discovery?.exists !== true || typeof discovery.stableId !== "string" || discovery.stableId === ""
@@ -92,6 +93,13 @@ export function createExternalBinding(input: {
     artifacts,
   });
   if (content === undefined || publishInput === undefined) throw new Error(`External ${input.target} publish input 无法规范化。`);
+  const expectedPublishedContentDigest = input.target === "knowledge"
+    ? input.expectedPublishedContentDigest
+    : sha256(content);
+  if ((input.target === "knowledge" && !/^sha256:[a-f0-9]{64}$/u.test(expectedPublishedContentDigest ?? ""))
+    || (input.target === "issue" && input.expectedPublishedContentDigest !== undefined)) {
+    throw new Error(`External ${input.target} publish content 摘要缺失或不符合生成规则。`);
+  }
   return {
     version: 1,
     kind: "external-binding",
@@ -102,7 +110,7 @@ export function createExternalBinding(input: {
     publishStepId: input.workPackage.stepId,
     publishAttemptId: input.workPackage.attemptId,
     publishInputDigest: sha256(publishInput),
-    expectedPublishedContentDigest: sha256(content),
+    expectedPublishedContentDigest: expectedPublishedContentDigest!,
   };
 }
 

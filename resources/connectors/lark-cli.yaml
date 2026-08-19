@@ -1,0 +1,28 @@
+id: lark-cli
+capabilities:
+  - feishu.document
+  - document.read
+  - knowledge.publish
+securityClass: external-write
+executable: lark-cli
+minimumVersion: 1.0.0
+argvTemplates:
+  - [docs, +fetch, --doc, "{documentToken}", --format, json, --as, "{identity}"]
+  - [docs, +fetch, --doc, "{documentToken}", --offset, "{offset}", --limit, "100", --format, json, --as, "{identity}"]
+  - [docs, +create, --title, "{title}", --folder-token, "{folderToken}", --markdown, "{markdown}", --as, "{identity}"]
+  - [docs, +create, --title, "{title}", --wiki-node, "{wikiNode}", --markdown, "{markdown}", --as, "{identity}"]
+  - [docs, +create, --title, "{title}", --wiki-space, "{wikiSpace}", --markdown, "{markdown}", --as, "{identity}"]
+  - [docs, +update, --doc, "{documentToken}", --mode, overwrite, --markdown, "{markdown}", --new-title, "{title}", --as, "{identity}"]
+doctor:
+  version:
+    kind: version
+    argv: [--version]
+    parser:
+      kind: text-semver
+  auth:
+    kind: unavailable
+    reasonCode: WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE
+envPolicy:
+  allow: [HOME, XDG_CONFIG_HOME, LARK_CONFIG_DIR]
+timeoutMs: 30000
+maxStdoutBytes: 1048576

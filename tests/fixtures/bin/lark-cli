@@ -1,0 +1,107 @@
+#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+import path from "node:path";
+import process from "node:process";
+
+const argv = process.argv.slice(2);
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+JSON.parse(input || "{}");
+
+const configRoot = process.env.LARK_CONFIG_DIR;
+const markdownIndex = argv.indexOf("--markdown");
+const loggedArgv = argv.map((part, index) => markdownIndex >= 0 && index === markdownIndex + 1 ? "<redacted>" : part);
+const markdownDigest = markdownIndex < 0
+  ? undefined
+  : `sha256:${(await import("node:crypto")).createHash("sha256").update(argv[markdownIndex + 1]).digest("hex")}`;
+if (configRoot) appendFileSync(path.join(configRoot, "calls.ndjson"), `${JSON.stringify({ argv: loggedArgv, ...(markdownDigest === undefined ? {} : { markdownDigest }) })}\n`);
+
+const flag = (name) => {
+  const index = argv.indexOf(name);
+  return index < 0 ? undefined : argv[index + 1];
+};
+const command = argv.slice(0, 2).join(" ");
+const document = flag("--doc");
+const markdown = flag("--markdown");
+
+if (argv.length === 1 && argv[0] === "--version") {
+  process.stdout.write("lark-cli version 1.0.0\n");
+} else if (document === "unauthorizedDocument123") {
+  process.stderr.write("HTTP 401: authentication required; access_token=t-secret-not-safe-abcdefghijklmnop\n");
+  process.exitCode = 1;
+} else if (document === "rateLimitedDocument123") {
+  process.stderr.write("HTTP 429: rate limit exceeded\n");
+  process.exitCode = 1;
+} else if (document === "driftDocumentToken123") {
+  process.stdout.write(JSON.stringify({ data: { title: 7, markdown: false } }));
+} else if (command === "docs +fetch" && document === "pagedDocumentToken123" && flag("--offset") === undefined) {
+  process.stdout.write(JSON.stringify({
+    doc_id: document,
+    doc_url: `https://tenant.feishu.cn/docx/${document}`,
+    title: "Paged source",
+    markdown: "First page\r\n",
+    has_more: true,
+    next_offset: 2,
+    owner: "owner-a",
+    revision: "9",
+    space: "delivery",
+    updated_at: "2026-08-19T02:03:04Z",
+    native_extra: { ignored: true },
+  }));
+} else if (command === "docs +fetch" && document === "pagedDocumentToken123" && flag("--offset") === "2" && flag("--limit") === "100") {
+  process.stdout.write(JSON.stringify({
+    doc_id: document,
+    doc_url: `https://tenant.feishu.cn/docx/${document}`,
+    title: "Paged source",
+    markdown: "Second page",
+    has_more: false,
+    owner: "owner-a",
+    revision: "9",
+    space: "delivery",
+    updated_at: "2026-08-19T02:03:04Z",
+  }));
+} else if (command === "docs +fetch" && document === "sourceDocumentToken123") {
+  process.stdout.write(JSON.stringify({
+    doc_id: document,
+    doc_url: `https://tenant.feishu.cn/docx/${document}`,
+    title: "Feishu connector source",
+    markdown: "Capture this document.\r\n",
+    has_more: false,
+    owner: "owner-a",
+    revision: "7",
+    space: "delivery",
+    updated_at: "2026-08-19T01:02:03Z",
+    permission_debug: "ignored native field",
+  }));
+} else if (command === "docs +create") {
+  const wikiCreate = argv.includes("--wiki-node") || argv.includes("--wiki-space");
+  process.stdout.write(JSON.stringify({
+    doc_id: "createdDocumentToken123",
+    doc_url: wikiCreate
+      ? "https://tenant.feishu.cn/wiki/createdWikiNodeToken123"
+      : "https://tenant.feishu.cn/docx/createdDocumentToken123",
+    message: "document created",
+    ignored: "native field",
+  }));
+} else if (command === "docs +update") {
+  process.stdout.write(JSON.stringify({ success: true, doc_id: document, mode: "overwrite", message: "document updated", ignored: true }));
+} else if (command === "docs +fetch" && document === "createdDocumentToken123") {
+  process.stdout.write(JSON.stringify({
+    doc_id: document,
+    doc_url: `https://tenant.feishu.cn/docx/${document}`,
+    title: "Published title",
+    markdown: markdown ?? "Published body\n",
+    has_more: false,
+  }));
+} else if (command === "docs +fetch" && document === "existingDocumentToken123") {
+  process.stdout.write(JSON.stringify({
+    doc_id: document,
+    doc_url: `https://tenant.feishu.cn/docx/${document}`,
+    title: "Updated title",
+    markdown: "Updated caf\u00e9\n",
+    has_more: false,
+  }));
+} else {
+  process.stderr.write("unexpected fixture argv\n");
+  process.exitCode = 9;
+}
