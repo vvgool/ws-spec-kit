@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -78,7 +78,8 @@ test("spawnJson passes only allowlisted absolute config paths and rejects creden
   const configHome = path.join(os.tmpdir(), `wspec-config-${crypto.randomUUID()}`);
   const script = "process.stdout.write(JSON.stringify({HOME:process.env.HOME,GH_CONFIG_DIR:process.env.GH_CONFIG_DIR,GH_TOKEN:process.env.GH_TOKEN}))";
   const result = await spawnJson(request(script, { environment: { HOME: configHome, GH_CONFIG_DIR: configHome } }));
-  assert.deepEqual(result.value, { HOME: configHome, GH_CONFIG_DIR: configHome });
+  assert.deepEqual(result.value, { HOME: "[REDACTED]", GH_CONFIG_DIR: "[REDACTED]" });
+  assert.equal(result.stdout.includes(configHome), false);
 
   await rejectsWithCode(
     spawnJson(request(script, { environment: { GH_TOKEN: "forbidden-secret" } })),
@@ -90,8 +91,29 @@ test("spawnJson passes only allowlisted absolute config paths and rejects creden
   );
 });
 
+test("spawnJson treats every explicit environment value as a diagnostic secret", async () => {
+  const shortHome = "/R";
+  const error = await rejectsWithCode(spawnJson(request(
+    "process.stderr.write(`HOME=${process.env.HOME} ordinary failure`);process.exitCode=2",
+    { environment: { HOME: shortHome } },
+  )), "WSSPEC_PROCESS_EXIT_NONZERO");
+
+  assert.equal(error.diagnostic, "");
+  assert.equal(JSON.stringify(error).includes(shortHome), false);
+});
+
 test("spawnJson rejects relative executables before spawning", async () => {
   await rejectsWithCode(spawnJson(request("", { executable: "node" })), "WSSPEC_PROCESS_EXECUTABLE_INVALID");
+});
+
+test("spawnJson preserves spawn failure when no process group was created", async (t) => {
+  if (process.platform === "win32") return;
+  const fixture = await executableFixture(t, "#!/definitely/missing/wsspec-interpreter\n");
+
+  await rejectsWithCode(
+    spawnJson({ ...request(""), executable: fixture.executable, argv: [] }),
+    "WSSPEC_PROCESS_SPAWN_FAILED",
+  );
 });
 
 test("spawnJson rejects writable executable paths and detects runtime identity changes", async (t) => {
@@ -111,6 +133,31 @@ test("spawnJson rejects writable executable paths and detects runtime identity c
     "",
   ].join("\n"));
   await rejectsWithCode(spawnJson({ ...request(""), executable: replaced.executable, argv: [] }), "WSSPEC_PROCESS_EXECUTABLE_CHANGED");
+});
+
+test("timeout remains the primary error when executable identity also changes", async (t) => {
+  const replaced = await executableFixture(t, [
+    `#!${process.execPath}`,
+    "const {writeFileSync}=require('node:fs')",
+    "writeFileSync(__filename, '#!/bin/sh\\nexit 0\\n', {mode:0o700})",
+    "setInterval(()=>{},1000)",
+    "",
+  ].join("\n"));
+
+  await rejectsWithCode(
+    spawnJson({ ...request("", { timeoutMs: 500 }), executable: replaced.executable, argv: [] }),
+    "WSSPEC_PROCESS_TIMEOUT",
+  );
+});
+
+test("spawnJson rejects oversized executables before spawning", async (t) => {
+  const fixture = await executableFixture(t, `#!${process.execPath}\nprocess.stdout.write('{}')\n`);
+  await truncate(fixture.executable, 128 * 1024 * 1024 + 1);
+
+  await rejectsWithCode(
+    spawnJson({ ...request(""), executable: fixture.executable, argv: [] }),
+    "WSSPEC_PROCESS_EXECUTABLE_INVALID",
+  );
 });
 
 test("spawnJson validates JSON input before starting the executable", async () => {
@@ -193,6 +240,57 @@ test("timeout returns only after the POSIX process group no longer exists", asyn
   const pid = Number(await readFile(pidFile, "utf8"));
   assert.throws(() => process.kill(-pid, 0), (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH");
   await rm(pidFile, { force: true });
+});
+
+test("nonzero, signal, and invalid JSON failures clean same-group descendants", async (t) => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
+  for (const [name, failureScript, code] of [
+    ["nonzero", "process.stdout.write('{}');process.exitCode=7", "WSSPEC_PROCESS_EXIT_NONZERO"],
+    ["signal", "process.kill(process.pid,'SIGTERM')", "WSSPEC_PROCESS_EXIT_NONZERO"],
+    ["invalid-json", "process.stdout.write('not-json')", "WSSPEC_PROCESS_INVALID_JSON"],
+  ] as const) {
+    await t.test(name, async () => {
+      const marker = path.join(os.tmpdir(), `wspec-failure-survivor-${crypto.randomUUID()}`);
+      const descendant = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'survived'),300)`;
+      const script = [
+        "const {spawn}=await import('node:child_process')",
+        `const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'})`,
+        "child.unref()",
+        failureScript,
+      ].join(";");
+
+      await rejectsWithCode(spawnJson(request(script)), code);
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      await assert.rejects(access(marker), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+      await rm(marker, { force: true });
+    });
+  }
+});
+
+test("cleanup deadline fails closed with a dedicated sanitized error", { concurrency: false }, async () => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
+  const pidFile = path.join(os.tmpdir(), `wspec-cleanup-deadline-${crypto.randomUUID()}`);
+  const descendant = "setInterval(()=>{},1000)";
+  const script = [
+    "const {spawn}=await import('node:child_process')",
+    "const {writeFileSync}=await import('node:fs')",
+    `writeFileSync(${JSON.stringify(pidFile)},String(process.pid))`,
+    `const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'})`,
+    "child.unref()",
+    "process.stdout.write('{}')",
+    "process.exitCode=7",
+  ].join(";");
+  const realKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => pid < 0 ? true : realKill(pid, signal)) as typeof process.kill;
+  try {
+    const error = await rejectsWithCode(spawnJson(request(script)), "WSSPEC_PROCESS_CLEANUP_FAILED");
+    assert.equal(error.diagnostic, "");
+  } finally {
+    process.kill = realKill;
+    const pid = Number(await readFile(pidFile, "utf8"));
+    try { realKill(-pid, "SIGKILL"); } catch { /* group already exited */ }
+    await rm(pidFile, { force: true });
+  }
 });
 
 test("output overflow never exposes a secret prefix cut at the capture boundary", async () => {

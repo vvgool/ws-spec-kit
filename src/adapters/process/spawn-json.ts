@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { access, lstat, readFile, realpath } from "node:fs/promises";
+import { constants, createReadStream } from "node:fs";
+import { access, lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { redactText, redactValue } from "./redaction.js";
@@ -10,6 +11,7 @@ const diagnosticLimit = 1_024;
 const cleanupGraceMs = 100;
 const cleanupDeadlineMs = 1_000;
 const cleanupPollMs = 10;
+const maxExecutableBytes = 128 * 1024 * 1024;
 const safeEnvironmentNames = ["LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "TERM", "TZ"] as const;
 const configurableEnvironmentNames = new Set(["HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "LARK_CONFIG_DIR"]);
 
@@ -37,11 +39,20 @@ export interface ProcessTextResult {
   stderr: string;
 }
 
+export interface ParsedProcessTextResult<T> {
+  value: T | undefined;
+  exitCode: 0;
+  stdout: string;
+  stderr: string;
+}
+
 interface RawProcessResult {
   rawStdout: string;
   stdout: string;
   stderr: string;
   diagnostic: string;
+  secrets: readonly string[];
+  cleanupFailure(): Promise<void>;
   exitCode: 0;
 }
 
@@ -82,7 +93,12 @@ function redactAndBound(value: string, limit: number, secrets: readonly string[]
   return bounded;
 }
 
-function processEnvironment(environment: SpawnJsonRequest["environment"]): NodeJS.ProcessEnv {
+interface ProcessEnvironment {
+  env: NodeJS.ProcessEnv;
+  secrets: readonly string[];
+}
+
+function processEnvironment(environment: SpawnJsonRequest["environment"]): ProcessEnvironment {
   const inherited = Object.fromEntries(safeEnvironmentNames.flatMap((name) => {
     const value = process.env[name];
     return value === undefined ? [] : [[name, value]];
@@ -93,7 +109,8 @@ function processEnvironment(environment: SpawnJsonRequest["environment"]): NodeJ
     }
     return value === undefined ? [] : [[name, value]];
   }));
-  return { ...inherited, ...configured, PATH: `${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin` };
+  const env = { ...inherited, ...configured, PATH: `${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin` };
+  return { env, secrets: Object.values(configured).filter((value) => value !== "") };
 }
 
 interface ExecutableIdentity {
@@ -110,14 +127,20 @@ interface ResolvedExecutable {
 }
 
 async function executableIdentity(executable: string): Promise<ExecutableIdentity> {
-  const stat = await lstat(executable, { bigint: true });
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular executable");
+  const before = await lstat(executable, { bigint: true });
+  if (!before.isFile() || before.isSymbolicLink() || before.size > BigInt(maxExecutableBytes)) throw new Error("not a bounded regular executable");
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(executable)) hash.update(chunk);
+  const after = await lstat(executable, { bigint: true });
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs) {
+    throw new Error("executable changed while hashing");
+  }
   return {
-    dev: stat.dev,
-    ino: stat.ino,
-    size: stat.size,
-    mtimeNs: stat.mtimeNs,
-    digest: createHash("sha256").update(await readFile(executable)).digest("hex"),
+    dev: after.dev,
+    ino: after.ino,
+    size: after.size,
+    mtimeNs: after.mtimeNs,
+    digest: hash.digest("hex"),
   };
 }
 
@@ -179,6 +202,55 @@ function boundedAppend(chunks: Buffer[], capturedBytes: number, chunk: Buffer, l
   return capturedBytes + chunk.byteLength;
 }
 
+function processGroupExists(child: ChildProcessWithoutNullStreams): boolean {
+  if (child.pid === undefined || (process.platform !== "darwin" && process.platform !== "linux")) {
+    return child.exitCode === null && child.signalCode === null;
+  }
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function signalProcessGroup(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+  if (child.pid === undefined || (process.platform !== "darwin" && process.platform !== "linux")) {
+    child.kill(signal);
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function cleanupError(): ProcessJsonError {
+  return new ProcessJsonError("WSSPEC_PROCESS_CLEANUP_FAILED", "Connector 子进程组未能在期限内清理。", "");
+}
+
+async function cleanupProcessGroup(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (!processGroupExists(child)) return;
+  const deadline = Date.now() + cleanupDeadlineMs;
+  try {
+    signalProcessGroup(child, "SIGTERM");
+    const graceDeadline = Math.min(deadline, Date.now() + cleanupGraceMs);
+    while (processGroupExists(child) && Date.now() < graceDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, cleanupPollMs));
+    }
+    if (!processGroupExists(child)) return;
+    signalProcessGroup(child, "SIGKILL");
+    while (processGroupExists(child)) {
+      if (Date.now() >= deadline) throw cleanupError();
+      await new Promise((resolve) => setTimeout(resolve, cleanupPollMs));
+    }
+  } catch (error) {
+    if (error instanceof ProcessJsonError && error.code === "WSSPEC_PROCESS_CLEANUP_FAILED") throw error;
+    throw cleanupError();
+  }
+}
+
 async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> {
   assertRequest(request);
   const environment = processEnvironment(request.environment);
@@ -191,7 +263,7 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
     throw new ProcessJsonError("WSSPEC_PROCESS_REQUEST_INVALID", "进程输入必须是可序列化 JSON。", "");
   }
   const executable = await resolvedExecutable(request.executable);
-  const secrets = request.secrets ?? [];
+  const secrets = [...(request.secrets ?? []), ...environment.secrets];
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
   let stdoutBytes = 0;
@@ -200,60 +272,33 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
 
   const child = spawn(executable.path, [...request.argv], {
     shell: false,
-    env: environment,
+    env: environment.env,
     detached: process.platform === "darwin" || process.platform === "linux",
     stdio: ["pipe", "pipe", "pipe"],
   });
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanupFailure = (): Promise<void> => {
+    cleanupPromise ??= cleanupProcessGroup(child);
+    return cleanupPromise;
+  };
   const resultPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     let closed = false;
     let cleanupComplete = true;
     let exitCode: number | null = null;
     let signal: NodeJS.Signals | null = null;
-    let cleanupTimer: NodeJS.Timeout | undefined;
-    let cleanupDeadline: number | undefined;
 
     const finish = (): void => {
       if (closed && cleanupComplete) resolve({ exitCode, signal });
-    };
-    const signalGroup = (targetSignal: NodeJS.Signals): void => {
-      if (child.pid !== undefined && (process.platform === "darwin" || process.platform === "linux")) {
-        try { process.kill(-child.pid, targetSignal); } catch { child.kill(targetSignal); }
-      } else {
-        child.kill(targetSignal);
-      }
-    };
-    const processGroupExists = (): boolean => {
-      if (child.pid === undefined || (process.platform !== "darwin" && process.platform !== "linux")) return !closed;
-      try {
-        process.kill(-child.pid, 0);
-        return true;
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code !== "ESRCH";
-      }
-    };
-    const pollCleanup = (): void => {
-      if (!processGroupExists()) {
-        cleanupComplete = true;
-        finish();
-        return;
-      }
-      if (cleanupDeadline !== undefined && Date.now() >= cleanupDeadline) {
-        reject(new ProcessJsonError("WSSPEC_PROCESS_CLEANUP_FAILED", "Connector 子进程组未能在期限内清理。", ""));
-        return;
-      }
-      cleanupTimer = setTimeout(pollCleanup, cleanupPollMs);
     };
     const terminate = (reason: typeof termination): void => {
       if (termination !== undefined) return;
       termination = reason;
       cleanupComplete = false;
-      cleanupDeadline = Date.now() + cleanupDeadlineMs;
       clearTimeout(timeoutTimer);
-      signalGroup("SIGTERM");
-      cleanupTimer = setTimeout(() => {
-        signalGroup("SIGKILL");
-        pollCleanup();
-      }, cleanupGraceMs);
+      void cleanupFailure().then(() => {
+        cleanupComplete = true;
+        finish();
+      }, reject);
     };
     const timeoutTimer = setTimeout(() => terminate("timeout"), request.timeoutMs);
     timeoutTimer.unref();
@@ -268,8 +313,10 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
     });
     child.once("error", () => {
       clearTimeout(timeoutTimer);
-      if (cleanupTimer !== undefined) clearTimeout(cleanupTimer);
-      reject(new ProcessJsonError("WSSPEC_PROCESS_SPAWN_FAILED", "无法启动 Connector 子进程。", ""));
+      void cleanupFailure().then(
+        () => reject(new ProcessJsonError("WSSPEC_PROCESS_SPAWN_FAILED", "无法启动 Connector 子进程。", "")),
+        reject,
+      );
     });
     child.once("close", (code, closeSignal) => {
       clearTimeout(timeoutTimer);
@@ -282,35 +329,56 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
   child.stdin.on("error", () => undefined);
   child.stdin.end(`${serializedInput}\n`);
   const result = await resultPromise;
-  await assertExecutableUnchanged(executable);
-
-  const rawStdout = Buffer.concat(stdoutChunks).toString("utf8");
-  const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
-  const stdout = redactAndBound(rawStdout, request.maxStdoutBytes, secrets);
-  const stderr = redactAndBound(rawStderr, request.maxStdoutBytes, secrets);
-  const safeDiagnostic = diagnostic(rawStdout, rawStderr, secrets);
-  if (termination === "timeout") {
-    throw new ProcessJsonError("WSSPEC_PROCESS_TIMEOUT", "Connector 子进程执行超时。", "");
+  try {
+    if (termination === "timeout") {
+      throw new ProcessJsonError("WSSPEC_PROCESS_TIMEOUT", "Connector 子进程执行超时。", "");
+    }
+    if (termination === "output_limit") {
+      throw new ProcessJsonError("WSSPEC_PROCESS_OUTPUT_LIMIT", "Connector 子进程输出超过限制。", "");
+    }
+    await assertExecutableUnchanged(executable);
+    const rawStdout = Buffer.concat(stdoutChunks).toString("utf8");
+    const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
+    const stdout = redactAndBound(rawStdout, request.maxStdoutBytes, secrets);
+    const stderr = redactAndBound(rawStderr, request.maxStdoutBytes, secrets);
+    const safeDiagnostic = diagnostic(rawStdout, rawStderr, secrets);
+    if (result.exitCode !== 0 || result.signal !== null) {
+      throw new ProcessJsonError("WSSPEC_PROCESS_EXIT_NONZERO", "Connector 子进程非零退出。", safeDiagnostic, result.exitCode ?? undefined);
+    }
+    return { rawStdout, stdout, stderr, diagnostic: safeDiagnostic, secrets, cleanupFailure, exitCode: 0 };
+  } catch (error) {
+    await cleanupFailure();
+    throw error;
   }
-  if (termination === "output_limit") {
-    throw new ProcessJsonError("WSSPEC_PROCESS_OUTPUT_LIMIT", "Connector 子进程输出超过限制。", "");
-  }
-  if (result.exitCode !== 0 || result.signal !== null) {
-    throw new ProcessJsonError("WSSPEC_PROCESS_EXIT_NONZERO", "Connector 子进程非零退出。", safeDiagnostic, result.exitCode ?? undefined);
-  }
-
-  return { rawStdout, stdout, stderr, diagnostic: safeDiagnostic, exitCode: 0 };
 }
 
 export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonResult> {
   const result = await runProcess(request);
   let value: unknown;
   try { value = JSON.parse(result.rawStdout); }
-  catch { throw new ProcessJsonError("WSSPEC_PROCESS_INVALID_JSON", "Connector 子进程未返回合法 JSON。", result.diagnostic); }
-  return { value: redactValue(value, request.secrets ?? []), exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+  catch {
+    await result.cleanupFailure();
+    throw new ProcessJsonError("WSSPEC_PROCESS_INVALID_JSON", "Connector 子进程未返回合法 JSON。", result.diagnostic);
+  }
+  return { value: redactValue(value, result.secrets), exitCode: 0, stdout: result.stdout, stderr: result.stderr };
 }
 
 export async function spawnText(request: SpawnJsonRequest): Promise<ProcessTextResult> {
   const result = await runProcess(request);
   return { value: result.stdout, exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+}
+
+export async function spawnParsedText<T>(
+  request: SpawnJsonRequest,
+  parse: (value: string) => T | undefined,
+): Promise<ParsedProcessTextResult<T>> {
+  const result = await runProcess(request);
+  try {
+    const value = parse(result.stdout);
+    if (value === undefined) await result.cleanupFailure();
+    return { value, exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    await result.cleanupFailure();
+    throw error;
+  }
 }

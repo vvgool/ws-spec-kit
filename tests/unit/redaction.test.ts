@@ -23,7 +23,6 @@ test("text redaction removes GH, GitLab, authorization and cookie credentials", 
 test("structured redaction sanitizes sensitive keys and explicit secrets after JSON parsing", () => {
   const secret = "opaque-structured-secret";
   const redacted = redactValue({
-    GH_TOKEN: "gh-value",
     nested: {
       Authorization: "Bearer nested-value",
       Cookie: "sid=cookie-value",
@@ -36,21 +35,33 @@ test("structured redaction sanitizes sensitive keys and explicit secrets after J
   }, [secret]);
   const serialized = JSON.stringify(redacted);
 
-  for (const value of ["gh-value", "nested-value", "cookie-value", "access-value", "refresh-value", "client-value", "api-value", secret]) {
+  for (const value of ["nested-value", "cookie-value", "access-value", "refresh-value", "client-value", "api-value", secret]) {
     assert.equal(serialized.includes(value), false);
   }
   assert.deepEqual(redacted, {
-    GH_TOKEN: "[REDACTED]",
-    nested: {
-      Authorization: "[REDACTED]",
-      Cookie: "[REDACTED]",
-      accessToken: "[REDACTED]",
-      refreshToken: "[REDACTED]",
-      clientSecret: "[REDACTED]",
-      apiKey: "[REDACTED]",
-    },
+    nested: {},
     ordinary: "prefix-[REDACTED]-suffix",
   });
+});
+
+test("structured redaction fails closed on nested secret keys without key collisions", () => {
+  const shortSecret = "R";
+  const unicodeSecret = "密钥";
+  const redacted = redactValue({
+    short: { [`left${shortSecret}`]: "one", [`right${shortSecret}`]: "two", keep: "discarded" },
+    unicode: { [`prefix-${unicodeSecret}-suffix`]: "hidden", keep: "discarded" },
+    credential: { accessToken: "credential-value", keep: "discarded" },
+    ordinary: { keep: "visible" },
+  }, [shortSecret, unicodeSecret]);
+
+  assert.deepEqual(redacted, {
+    short: {},
+    unicode: {},
+    credential: {},
+    ordinary: { keep: "visible" },
+  });
+  const serialized = JSON.stringify(redacted);
+  for (const secret of [shortSecret, unicodeSecret, "accessToken", "credential-value"]) assert.equal(serialized.includes(secret), false);
 });
 
 test("short and overlapping explicit secrets never survive through the replacement marker", () => {

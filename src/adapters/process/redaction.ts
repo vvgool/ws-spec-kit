@@ -44,9 +44,9 @@ export function redactValue(value: unknown, secrets: readonly string[] = []): un
   if (typeof value === "string") return redactText(value, secrets);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
   if (value === null || typeof value !== "object") return value;
-  const marker = markerFor(secrets);
+  if (Object.keys(value).some((key) => sensitiveKey(key) || containsSecret(key, secrets))) return {};
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
     key,
-    sensitiveKey(key) ? marker : redactValue(item, secrets),
+    redactValue(item, secrets),
   ]));
 }

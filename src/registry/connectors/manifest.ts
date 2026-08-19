@@ -4,11 +4,10 @@ import type {
   ConnectorManifest,
   DoctorAuthProbe,
   DoctorVersionProbe,
-  JsonScalar,
 } from "./types.js";
+import { parseSemVer } from "./semver.js";
 
 const idPattern = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/u;
-const semverPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const securityClasses = new Set(["external-read", "external-write", "local-write"]);
 const executables = new Set<ConnectorExecutable>(["git", "gh", "glab", "lark-cli"]);
 const environmentKeys = new Set<ConnectorEnvironmentKey>(["HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "LARK_CONFIG_DIR"]);
@@ -18,7 +17,7 @@ const auditedDoctorArgv: Record<ConnectorExecutable, { version: readonly string[
   git: { version: ["--version"] },
   gh: { version: ["--version"], auth: ["auth", "status", "--active"] },
   glab: { version: ["--version"], auth: ["auth", "status"] },
-  "lark-cli": { version: ["--version"], auth: ["auth", "status", "--json"] },
+  "lark-cli": { version: ["--version"], auth: ["auth", "status", "--verify"] },
 };
 
 export class ConnectorManifestError extends Error {
@@ -53,40 +52,30 @@ function sameArgv(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((part, index) => part === right[index]);
 }
 
-function sameScalars(left: readonly JsonScalar[], right: readonly JsonScalar[]): boolean {
+function sameNumbers(left: readonly number[], right: readonly number[]): boolean {
   return left.length === right.length && left.every((part, index) => Object.is(part, right[index]));
 }
 
-function scalar(value: unknown): value is JsonScalar {
-  return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
-}
-
-function scalarOutcomes(value: unknown): { authenticated: readonly JsonScalar[]; unauthenticated: readonly JsonScalar[] } {
+function exitCodeOutcomes(value: unknown): { authenticated: readonly number[]; unauthenticated: readonly number[] } {
   const source = record(value, ["authenticated", "unauthenticated"]);
-  if (!Array.isArray(source.authenticated) || source.authenticated.length === 0 || !source.authenticated.every(scalar)
-    || !Array.isArray(source.unauthenticated) || source.unauthenticated.length === 0 || !source.unauthenticated.every(scalar)) return invalid();
-  const authenticated = source.authenticated as JsonScalar[];
-  const unauthenticated = source.unauthenticated as JsonScalar[];
-  if (authenticated.some((item) => unauthenticated.some((other) => Object.is(item, other)))) return invalid();
+  if (!Array.isArray(source.authenticated) || source.authenticated.length === 0 || !source.authenticated.every(Number.isSafeInteger)
+    || !Array.isArray(source.unauthenticated) || source.unauthenticated.length === 0 || !source.unauthenticated.every(Number.isSafeInteger)) return invalid();
+  const authenticated = source.authenticated as number[];
+  const unauthenticated = source.unauthenticated as number[];
+  if (authenticated.some((item) => unauthenticated.includes(item))) return invalid();
   return { authenticated: [...authenticated], unauthenticated: [...unauthenticated] };
 }
 
 function freezeAuth(probe: DoctorAuthProbe): DoctorAuthProbe {
   if (probe.kind === "none") return Object.freeze({ kind: "none" });
-  if (probe.parser.kind === "exit-code") return Object.freeze({
+  return Object.freeze({
     kind: "auth",
     argv: Object.freeze([...probe.argv]),
     parser: Object.freeze({ kind: "exit-code" }),
     outcomes: Object.freeze({
-      authenticated: Object.freeze([...(probe.outcomes.authenticated as readonly number[])]),
-      unauthenticated: Object.freeze([...(probe.outcomes.unauthenticated as readonly number[])]),
+      authenticated: Object.freeze([...probe.outcomes.authenticated]),
+      unauthenticated: Object.freeze([...probe.outcomes.unauthenticated]),
     }),
-  });
-  return Object.freeze({
-    kind: "auth",
-    argv: Object.freeze([...probe.argv]),
-    parser: Object.freeze({ kind: "json-field", field: probe.parser.field }),
-    outcomes: Object.freeze({ authenticated: Object.freeze([...probe.outcomes.authenticated]), unauthenticated: Object.freeze([...probe.outcomes.unauthenticated]) }),
   });
 }
 
@@ -113,27 +102,17 @@ function authProbe(value: unknown, executable: ConnectorExecutable): DoctorAuthP
   if (audited === undefined || !sameArgv(parts, audited)) return invalid();
   const parser = source.parser as Record<string, unknown> | undefined;
   if (parser?.kind === "exit-code" && Object.keys(parser).length === 1) {
-    const outcomes = scalarOutcomes(source.outcomes);
-    if ((executable !== "gh" && executable !== "glab")
-      || !outcomes.authenticated.every(Number.isSafeInteger) || !outcomes.unauthenticated.every(Number.isSafeInteger)
-      || !sameScalars(outcomes.authenticated, [0]) || !sameScalars(outcomes.unauthenticated, [1])) return invalid();
+    const outcomes = exitCodeOutcomes(source.outcomes);
+    if ((executable !== "gh" && executable !== "glab" && executable !== "lark-cli")
+      || !sameNumbers(outcomes.authenticated, [0]) || !sameNumbers(outcomes.unauthenticated, [1])) return invalid();
     return {
       kind: "auth",
       argv: parts,
       parser: { kind: "exit-code" },
-      outcomes: { authenticated: outcomes.authenticated as number[], unauthenticated: outcomes.unauthenticated as number[] },
+      outcomes,
     };
   }
-  const parsed = record(source.parser, ["field", "kind"]);
-  const outcomes = scalarOutcomes(source.outcomes);
-  if (executable !== "lark-cli" || parsed.kind !== "json-field" || parsed.field !== "authenticated"
-    || !sameScalars(outcomes.authenticated, [true]) || !sameScalars(outcomes.unauthenticated, [false])) return invalid();
-  return {
-    kind: "auth",
-    argv: parts,
-    parser: { kind: "json-field", field: stringValue(parsed.field, idPattern) },
-    outcomes,
-  };
+  return invalid();
 }
 
 export function defineConnectorManifest(value: unknown): ConnectorManifest {
@@ -143,7 +122,8 @@ export function defineConnectorManifest(value: unknown): ConnectorManifest {
   const capabilities = source.capabilities.map((capability) => stringValue(capability, idPattern));
   if (!securityClasses.has(source.securityClass as string) || !executables.has(source.executable as ConnectorExecutable)) return invalid();
   const executable = source.executable as ConnectorExecutable;
-  const minimumVersion = stringValue(source.minimumVersion, semverPattern);
+  const minimumVersion = stringValue(source.minimumVersion);
+  if (parseSemVer(minimumVersion) === undefined) return invalid();
   if (!Number.isSafeInteger(source.timeoutMs) || (source.timeoutMs as number) < 1
     || !Number.isSafeInteger(source.maxStdoutBytes) || (source.maxStdoutBytes as number) < 1
     || !Array.isArray(source.argvTemplates) || source.argvTemplates.length === 0) return invalid();
