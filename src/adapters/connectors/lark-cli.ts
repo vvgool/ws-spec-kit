@@ -12,7 +12,7 @@ import {
   type ValidatedFeishuDocumentTarget,
 } from "../../registry/connectors/feishu-document.js";
 import { canonicalRequirementText, MAX_REQUIREMENT_BYTES } from "../../registry/connectors/local-requirement.js";
-import { credentialLikeValue } from "../../registry/connectors/secret-detector.js";
+import { credentialLikeValue, inspectDecodedCredentialSurface, inspectDecodedCredentialText } from "../../registry/connectors/secret-detector.js";
 import type { NormalizedRequirementSource } from "../../registry/connectors/requirement-source.js";
 import {
   KnowledgePublishError,
@@ -55,7 +55,8 @@ interface FetchPage {
   hasMore: boolean;
   nextOffset?: string;
   updatedAt?: string;
-  metadata: Record<string, string>;
+  metadata: Record<string, string | string[]>;
+  identity: string;
 }
 
 function invalidResponse(): never {
@@ -77,9 +78,43 @@ function text(value: unknown, maximumBytes: number, allowEmpty = false): string 
 }
 
 function normalizedTitle(value: unknown): string {
-  const result = text(value, 2_048).trim();
-  if (result === "" || [...result].length > 512 || /[\u0000-\u001f\u007f-\u009f]/u.test(result) || credentialLikeValue(result)) return invalidResponse();
+  if (typeof value !== "string") return invalidResponse();
+  if (!inspectDecodedCredentialText(value, { maximumBytes: 2_048, maximumDecodeRounds: 4 }).ok) return invalidResponse();
+  const source = text(value, 2_048);
+  const result = source.trim();
+  if (result === "" || [...result].length > 512 || /[\u0000-\u001f\u007f-\u009f]/u.test(result)
+    || !inspectDecodedCredentialText(result, { maximumBytes: 2_048, maximumDecodeRounds: 4 }).ok) return invalidResponse();
   return result;
+}
+
+function confidentialMarkdown(value: unknown): string {
+  if (typeof value !== "string") return invalidResponse();
+  if (!inspectDecodedCredentialText(value, { maximumBytes: MAX_REQUIREMENT_BYTES, maximumDecodeRounds: 4 }).ok) return invalidResponse();
+  const result = text(value, MAX_REQUIREMENT_BYTES, true);
+  if (!inspectDecodedCredentialText(result, { maximumBytes: MAX_REQUIREMENT_BYTES, maximumDecodeRounds: 4 }).ok) return invalidResponse();
+  return result;
+}
+
+function metadataValue(value: unknown): string {
+  if (typeof value !== "string") return invalidResponse();
+  if (!inspectDecodedCredentialSurface(value, { maximumBytes: 1_024, maximumDecodeRounds: 4 }).ok) return invalidResponse();
+  const result = text(value, 256);
+  if (!inspectDecodedCredentialSurface(result, { maximumBytes: 1_024, maximumDecodeRounds: 4 }).ok) return invalidResponse();
+  return result;
+}
+
+function canonicalPageIdentity(input: Omit<FetchPage, "hasMore" | "identity" | "markdown" | "nextOffset">): string {
+  const metadata = Object.entries(input.metadata).sort(([left], [right]) => left.localeCompare(right)).map(([key, value]) => [
+    key,
+    Array.isArray(value) ? [...value].sort((left, right) => left.localeCompare(right)) : value,
+  ]);
+  return JSON.stringify({
+    documentToken: input.documentToken,
+    canonicalUrl: input.canonicalUrl,
+    title: input.title,
+    updatedAt: input.updatedAt ?? null,
+    metadata,
+  });
 }
 
 function timestamp(value: unknown): string {
@@ -106,30 +141,29 @@ function offset(value: unknown): string {
 }
 
 function fetchPage(value: unknown, input: ValidatedFeishuDocumentTarget): FetchPage {
-  const source = record(value, ["doc_id", "doc_url", "has_more", "markdown", "title"]);
+  const source = record(value, ["doc_id", "doc_url", "has_more", "markdown", "revision", "title"]);
   const documentToken = text(source.doc_id, 128);
   if (!/^[A-Za-z0-9_-]{8,128}$/u.test(documentToken)
     || credentialLikeValue(documentToken)
     || (input.kind !== "wiki" && documentToken !== input.documentToken)
     || typeof source.has_more !== "boolean") return invalidResponse();
-  const metadata: Record<string, string> = {};
+  const metadata: Record<string, string | string[]> = {};
   for (const key of ["owner", "revision", "space"] as const) {
     if (source[key] !== undefined) {
-      const value = text(source[key], 256);
-      if (credentialLikeValue(value)) return invalidResponse();
-      metadata[key] = value;
+      metadata[key] = metadataValue(source[key]);
     }
   }
-  return {
+  const page = {
     documentToken,
     canonicalUrl: canonicalResponseUrl(source.doc_url, documentToken, input),
     title: normalizedTitle(source.title),
-    markdown: text(source.markdown, MAX_REQUIREMENT_BYTES, true),
+    markdown: confidentialMarkdown(source.markdown),
     hasMore: source.has_more,
     ...(source.has_more ? { nextOffset: offset(source.next_offset) } : {}),
     ...(source.updated_at === undefined ? {} : { updatedAt: timestamp(source.updated_at) }),
     metadata,
   };
+  return { ...page, identity: canonicalPageIdentity(page) };
 }
 
 async function execute(input: {
@@ -178,7 +212,7 @@ async function fetchDocument(input: FeishuDocumentReadInput, requiredToken?: str
     }), target);
     if (requiredToken !== undefined && page.documentToken !== requiredToken) return invalidResponse();
     const first = pages[0];
-    if (first !== undefined && (page.documentToken !== first.documentToken || page.canonicalUrl !== first.canonicalUrl || page.title !== first.title)) {
+    if (first !== undefined && page.identity !== first.identity) {
       return invalidResponse();
     }
     totalBytes += Buffer.byteLength(page.markdown, "utf8");

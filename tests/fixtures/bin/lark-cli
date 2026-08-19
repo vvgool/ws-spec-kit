@@ -34,6 +34,23 @@ if (argv.length === 1 && argv[0] === "--version") {
   process.exitCode = 1;
 } else if (document === "driftDocumentToken123") {
   process.stdout.write(JSON.stringify({ data: { title: 7, markdown: false } }));
+} else if (["secretTitleDocument123", "secretMarkdownDocument123", "secretMetadataDocument123", "invalidPercentDocument123", "deepEncodedDocument123"].includes(document)) {
+  const malicious = {
+    secretTitleDocument123: { title: "glpat%25252Dabcdefghijklmnop", markdown: "Safe body", owner: "owner-a" },
+    secretMarkdownDocument123: { title: "Safe title", markdown: "Authorization%253A%2520Bearer%2520github_pat_abcdefghijklmnopqrstuvwxyz123456", owner: "owner-a" },
+    secretMetadataDocument123: { title: "Safe title", markdown: "Safe body", owner: "t%25252DA1b2C3d4E5f6G7h8I9j0K1l2" },
+    invalidPercentDocument123: { title: "Safe title", markdown: "invalid %GG surface", owner: "owner-a" },
+    deepEncodedDocument123: { title: "Safe title", markdown: "ordinary%2525252520value", owner: "owner-a" },
+  }[document];
+  process.stdout.write(JSON.stringify({
+    doc_id: document,
+    doc_url: `https://tenant.feishu.cn/docx/${document}`,
+    ...malicious,
+    has_more: false,
+    revision: "1",
+    space: "delivery",
+    updated_at: "2026-08-19T01:02:03Z",
+  }));
 } else if (command === "docs +fetch" && document === "pagedDocumentToken123" && flag("--offset") === undefined) {
   process.stdout.write(JSON.stringify({
     doc_id: document,
@@ -92,6 +109,7 @@ if (argv.length === 1 && argv[0] === "--version") {
     title: "Published title",
     markdown: markdown ?? "Published body\n",
     has_more: false,
+    revision: "1",
   }));
 } else if (command === "docs +fetch" && document === "existingDocumentToken123") {
   process.stdout.write(JSON.stringify({
@@ -100,6 +118,7 @@ if (argv.length === 1 && argv[0] === "--version") {
     title: "Updated title",
     markdown: "Updated caf\u00e9\n",
     has_more: false,
+    revision: "1",
   }));
 } else {
   process.stderr.write("unexpected fixture argv\n");

@@ -1,7 +1,7 @@
 import { canonicalRequirementText, MAX_REQUIREMENT_BYTES, MAX_REQUIREMENT_CHARACTERS } from "./local-requirement.js";
 import { parseExternalBinding, type ExternalBinding } from "../../domain/external-receipt.js";
 import { sha256 } from "../../domain/digests.js";
-import { credentialLikeValue, inspectDecodedCredentialSurface } from "./secret-detector.js";
+import { inspectDecodedCredentialSurface, inspectDecodedCredentialText } from "./secret-detector.js";
 import { validateFeishuDocumentTarget } from "./feishu-document.js";
 
 const tokenPattern = /^[A-Za-z0-9_-]{8,128}$/u;
@@ -51,7 +51,8 @@ function title(value: unknown): string {
   }
   const normalized = value.normalize("NFC").trim();
   if (normalized === "" || [...normalized].length > 800 || /[\u0000-\u001f\u007f-\u009f]/u.test(normalized)
-    || credentialLikeValue(normalized)) {
+    || !inspectDecodedCredentialText(value, { maximumBytes: 3_200, maximumDecodeRounds: 4 }).ok
+    || !inspectDecodedCredentialText(normalized, { maximumBytes: 3_200, maximumDecodeRounds: 4 }).ok) {
     return fail("WSSPEC_KNOWLEDGE_CONTENT_INVALID", "知识发布标题必须是有界单行文本。");
   }
   return normalized;
@@ -61,7 +62,16 @@ function markdown(value: unknown): string {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_REQUIREMENT_BYTES || [...value].length > MAX_REQUIREMENT_CHARACTERS) {
     return fail("WSSPEC_KNOWLEDGE_CONTENT_INVALID", "知识发布 Markdown 超过上限。");
   }
-  try { return canonicalRequirementText(value); }
+  try {
+    if (!inspectDecodedCredentialText(value, { maximumBytes: MAX_REQUIREMENT_BYTES, maximumDecodeRounds: 4 }).ok) {
+      return fail("WSSPEC_KNOWLEDGE_CONTENT_INVALID", "知识发布 Markdown 包含不允许的凭据或编码表面。");
+    }
+    const canonical = canonicalRequirementText(value);
+    if (!inspectDecodedCredentialText(canonical, { maximumBytes: MAX_REQUIREMENT_BYTES, maximumDecodeRounds: 4 }).ok) {
+      return fail("WSSPEC_KNOWLEDGE_CONTENT_INVALID", "知识发布 Markdown 包含不允许的凭据或编码表面。");
+    }
+    return canonical;
+  }
   catch { return fail("WSSPEC_KNOWLEDGE_CONTENT_INVALID", "知识发布 Markdown 无效。"); }
 }
 

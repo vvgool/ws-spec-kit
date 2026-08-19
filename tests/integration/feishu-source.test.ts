@@ -56,3 +56,28 @@ test("fixture pagination remains one normalized Source Artifact", async (t) => {
   const artifact = await captureRequirement({ repositoryRoot, artifactRoot: repositoryRoot, workItemId: "WSS-FEISHU-PAGED", source });
   assert.equal(artifact.body, "First page\nSecond page");
 });
+
+test("credential-bearing Feishu response fields never reach a Source Artifact or fixture log", async (t) => {
+  const cases = [
+    { document: "secretTitleDocument123", secret: "glpat%25252Dabcdefghijklmnop" },
+    { document: "secretMarkdownDocument123", secret: "Authorization%253A%2520Bearer%2520github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+    { document: "secretMetadataDocument123", secret: "t%25252DA1b2C3d4E5f6G7h8I9j0K1l2" },
+    { document: "invalidPercentDocument123", secret: "invalid %GG surface" },
+    { document: "deepEncodedDocument123", secret: "ordinary%2525252520value" },
+  ];
+  for (const current of cases) await t.test(current.document, async (st) => {
+    const cli = await privateLarkCli(st);
+    const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "wspec-feishu-confidential-"));
+    await chmod(repositoryRoot, 0o700);
+    st.after(async () => rm(repositoryRoot, { recursive: true, force: true }));
+    await assert.rejects((async () => {
+      const source = await readFeishuDocument({ executable: cli.executable, document: current.document, environment: { LARK_CONFIG_DIR: cli.config } });
+      await captureRequirement({ repositoryRoot, artifactRoot: repositoryRoot, workItemId: "WSS-FEISHU-SECRET", source });
+    })(), (error: unknown) => (error as { code?: string; message?: string }).code === "WSSPEC_FEISHU_RESPONSE_INVALID"
+      && !(error as { message: string }).message.includes(current.secret));
+    await assert.rejects(access(path.join(repositoryRoot, ".wsspec")), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+    const log = await readFile(path.join(cli.config, "calls.ndjson"), "utf8");
+    assert.equal(log.includes(current.secret), false);
+    assert.deepEqual(JSON.parse(log).argv, ["docs", "+fetch", "--doc", current.document, "--format", "json", "--as", "user"]);
+  });
+});

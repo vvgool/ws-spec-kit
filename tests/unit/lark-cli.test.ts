@@ -119,6 +119,34 @@ test("Feishu fetch follows bounded offset pagination and combines canonical Mark
   ]);
 });
 
+test("Feishu pagination rejects every canonical source identity drift", async (t) => {
+  const without = (key: keyof typeof document): Record<string, unknown> => {
+    const result = { ...document } as Record<string, unknown>;
+    delete result[key];
+    return result;
+  };
+  const cases: Array<{ label: string; first?: Record<string, unknown>; second: Record<string, unknown> }> = [
+    { label: "revision changed", second: { ...document, revision: "8" } },
+    { label: "revision missing", second: without("revision") },
+    { label: "updatedAt changed", second: { ...document, updated_at: "2026-08-19T01:02:04Z" } },
+    { label: "updatedAt missing", second: without("updated_at") },
+    { label: "updatedAt appeared", first: without("updated_at"), second: { ...document } },
+    { label: "owner changed", second: { ...document, owner: "owner-b" } },
+    { label: "owner missing", second: without("owner") },
+    { label: "owner appeared", first: without("owner"), second: { ...document } },
+    { label: "space changed", second: { ...document, space: "other-space" } },
+    { label: "space missing", second: without("space") },
+    { label: "space appeared", first: without("space"), second: { ...document } },
+  ];
+  for (const current of cases) await t.test(current.label, async (st) => {
+    const first = { ...(current.first ?? document), markdown: "First", has_more: true, next_offset: 2 };
+    const second = { ...current.second, markdown: "Second", has_more: false };
+    const cli = await scriptedCli(st, [first, second]);
+    await assert.rejects(readFeishuDocument({ executable: cli.executable, document: "sourceDocumentToken123" }), (error: unknown) =>
+      error instanceof FeishuDocumentError && error.code === "WSSPEC_FEISHU_RESPONSE_INVALID");
+  });
+});
+
 test("Feishu pagination rejects cursor loops and aggregate overflow", async (t) => {
   const loop = await scriptedCli(t, [
     { ...document, has_more: true, next_offset: 2 },
@@ -135,8 +163,11 @@ test("Feishu pagination rejects cursor loops and aggregate overflow", async (t) 
 test("Feishu response required fields fail closed while native extra fields remain allowed", async (t) => {
   const missing = { ...document } as Record<string, unknown>;
   delete missing.markdown;
+  const missingRevision = { ...document } as Record<string, unknown>;
+  delete missingRevision.revision;
   for (const response of [
     missing,
+    missingRevision,
     { ...document, title: 7 },
     { ...document, has_more: "false" },
     { ...document, doc_id: "otherDocumentToken123" },

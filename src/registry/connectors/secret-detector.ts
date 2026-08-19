@@ -72,3 +72,20 @@ export function inspectDecodedCredentialSurface(
   }
   return { ok: false, reason: "decode-limit" };
 }
+
+export function inspectDecodedCredentialText(
+  text: string,
+  options: Readonly<{ maximumBytes: number; maximumDecodeRounds?: number }>,
+): DecodedCredentialSurfaceResult {
+  const inspect = (surface: string): DecodedCredentialSurfaceResult => inspectDecodedCredentialSurface(surface, {
+    maximumBytes: options.maximumBytes,
+    ...(options.maximumDecodeRounds === undefined ? {} : { maximumDecodeRounds: options.maximumDecodeRounds }),
+  });
+  const complete = inspect(text);
+  if (!complete.ok) return complete;
+  for (const line of text.split(/\r\n?|\n/gu)) {
+    const inspected = inspect(line);
+    if (!inspected.ok) return inspected;
+  }
+  return { ok: true, value: text };
+}

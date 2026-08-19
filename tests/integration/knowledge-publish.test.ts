@@ -8,7 +8,7 @@ import { publishKnowledge } from "../../src/adapters/connectors/lark-cli.js";
 import { sha256 } from "../../src/domain/digests.js";
 import type { ExternalBinding } from "../../src/domain/external-receipt.js";
 import { externalReceiptMatches } from "../../src/domain/external-receipt.js";
-import { KnowledgePublishError } from "../../src/registry/connectors/knowledge-publish.js";
+import { KnowledgePublishError, validateKnowledgePublishTarget } from "../../src/registry/connectors/knowledge-publish.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 
@@ -41,6 +41,12 @@ function binding(stableId: string, markdown = "Published body\n"): ExternalBindi
 function safeArgv(argv: readonly string[]): readonly string[] {
   const index = argv.indexOf("--markdown");
   return index < 0 ? argv : argv.map((part, current) => current === index + 1 ? "<redacted>" : part);
+}
+
+function encodeLayers(value: string, layers: number): string {
+  let result = value;
+  for (let index = 0; index < layers; index += 1) result = encodeURIComponent(result);
+  return result;
 }
 
 test("knowledge create supports each exact target, uses default JSON output, then fetches the created token", async (t) => {
@@ -113,6 +119,44 @@ test("knowledge publish rejects missing or ambiguous create targets and update t
   }), (error: unknown) => error instanceof KnowledgePublishError && error.code === "WSSPEC_KNOWLEDGE_CONTENT_INVALID");
 });
 
+test("knowledge publish rejects recursively encoded credentials and invalid encoding before spawn", async (t) => {
+  const cases = [
+    { label: "encoded GitLab title", title: "glpat%2525252Dabcdefghijklmnop", markdown: "Safe body" },
+    { label: "Authorization header", title: "Safe title", markdown: "Authorization: Bearer github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+    { label: "encoded Cookie header", title: "Safe title", markdown: encodeLayers("Cookie: session=private-value", 2) },
+    { label: "GitHub token", title: "Safe title", markdown: "ghp_abcdefghijklmnopqrstuvwxyz123456" },
+    { label: "GitLab token", title: "Safe title", markdown: "glpat-abcdefghijklmnop" },
+    { label: "Lark t token", title: "Safe title", markdown: "t-A1b2C3d4E5f6G7h8I9j0K1l2" },
+    { label: "Lark u token", title: "Safe title", markdown: "u-Z9y8X7w6V5u4T3s2R1q0P9o8" },
+    { label: "Lark a token", title: "Safe title", markdown: "a-M1n2B3v4C5x6Z7l8K9j0H1g2" },
+    { label: "invalid percent", title: "Safe title", markdown: "invalid %GG surface" },
+    { label: "fifth encoded layer", title: "Safe title", markdown: encodeLayers("ordinary value", 5) },
+  ];
+  for (const current of cases) await t.test(current.label, async (st) => {
+    const cli = await privateLarkCli(st);
+    await assert.rejects(publishKnowledge({
+      executable: cli.executable,
+      target: { folderToken: "folderToken123456", title: current.title, markdown: current.markdown },
+      binding: binding("feishu-target:folderToken123456", current.markdown),
+      environment: { LARK_CONFIG_DIR: cli.config },
+    }), (error: unknown) => error instanceof KnowledgePublishError
+      && error.code === "WSSPEC_KNOWLEDGE_CONTENT_INVALID"
+      && !error.message.includes(current.title)
+      && !error.message.includes(current.markdown));
+    await assert.rejects(access(cli.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  });
+});
+
+test("knowledge content scanning does not reject ordinary Feishu document tokens", () => {
+  const target = validateKnowledgePublishTarget({
+    folderToken: "folderToken123456",
+    title: "Reference doccnAbCdEfGhIjKlMnOpQrS",
+    markdown: "Read doccnAbCdEfGhIjKlMnOpQrS before publishing.",
+  });
+  assert.equal(target.title, "Reference doccnAbCdEfGhIjKlMnOpQrS");
+  assert.equal(target.markdown, "Read doccnAbCdEfGhIjKlMnOpQrS before publishing.");
+});
+
 test("knowledge publish binds the current ExternalBinding and rejects stale or malformed bindings before write", async (t) => {
   const cli = await privateLarkCli(t);
   for (const invalid of [
@@ -147,6 +191,7 @@ test("knowledge publish never confirms create when readback fails or token, titl
     title: "Published title",
     markdown: "Published body\n",
     has_more: false,
+    revision: "1",
   };
   for (const response of [
     { exitCode: 1, stderr: "HTTP 404 not found after create" },
