@@ -1,13 +1,17 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, realpath } from "node:fs/promises";
+import { access, lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import { redactText, redactValue } from "./redaction.js";
 
 const diagnosticLimit = 1_024;
 const cleanupGraceMs = 100;
+const cleanupDeadlineMs = 1_000;
+const cleanupPollMs = 10;
 const safeEnvironmentNames = ["LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "TERM", "TZ"] as const;
+const configurableEnvironmentNames = new Set(["HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "LARK_CONFIG_DIR"]);
 
 export interface SpawnJsonRequest {
   executable: string;
@@ -16,6 +20,7 @@ export interface SpawnJsonRequest {
   timeoutMs: number;
   maxStdoutBytes: number;
   secrets?: readonly string[];
+  environment?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface ProcessJsonResult {
@@ -25,12 +30,29 @@ export interface ProcessJsonResult {
   stderr: string;
 }
 
+export interface ProcessTextResult {
+  value: string;
+  exitCode: 0;
+  stdout: string;
+  stderr: string;
+}
+
+interface RawProcessResult {
+  rawStdout: string;
+  stdout: string;
+  stderr: string;
+  diagnostic: string;
+  exitCode: 0;
+}
+
 export type ProcessJsonErrorCode =
   | "WSSPEC_PROCESS_EXECUTABLE_INVALID"
   | "WSSPEC_PROCESS_REQUEST_INVALID"
   | "WSSPEC_PROCESS_SPAWN_FAILED"
+  | "WSSPEC_PROCESS_EXECUTABLE_CHANGED"
   | "WSSPEC_PROCESS_TIMEOUT"
   | "WSSPEC_PROCESS_OUTPUT_LIMIT"
+  | "WSSPEC_PROCESS_CLEANUP_FAILED"
   | "WSSPEC_PROCESS_EXIT_NONZERO"
   | "WSSPEC_PROCESS_INVALID_JSON";
 
@@ -46,10 +68,11 @@ export class ProcessJsonError extends Error {
   }
 }
 
-function diagnostic(stdout: string, stderr: string, secrets: readonly string[]): string {
-  const combined = [`stdout: ${stdout}`, `stderr: ${stderr}`].join("\n");
-  const bounded = Buffer.from(combined).subarray(0, diagnosticLimit).toString("utf8");
-  return redactAndBound(bounded, diagnosticLimit, secrets);
+function diagnostic(rawStdout: string, rawStderr: string, secrets: readonly string[]): string {
+  if (secrets.some((secret) => secret.length < 4)) return "";
+  const combined = redactText([`stdout: ${rawStdout}`, `stderr: ${rawStderr}`].join("\n"), secrets);
+  if (secrets.some((secret) => secret !== "" && combined.includes(secret))) return "";
+  return redactAndBound(combined, diagnosticLimit, []);
 }
 
 function redactAndBound(value: string, limit: number, secrets: readonly string[]): string {
@@ -59,25 +82,86 @@ function redactAndBound(value: string, limit: number, secrets: readonly string[]
   return bounded;
 }
 
-function processEnvironment(): NodeJS.ProcessEnv {
-  return Object.fromEntries(safeEnvironmentNames.flatMap((name) => {
+function processEnvironment(environment: SpawnJsonRequest["environment"]): NodeJS.ProcessEnv {
+  const inherited = Object.fromEntries(safeEnvironmentNames.flatMap((name) => {
     const value = process.env[name];
     return value === undefined ? [] : [[name, value]];
   }));
+  const configured = Object.fromEntries(Object.entries(environment ?? {}).flatMap(([name, value]) => {
+    if (!configurableEnvironmentNames.has(name) || (value !== undefined && (typeof value !== "string" || !path.isAbsolute(value) || value.includes("\0")))) {
+      throw new ProcessJsonError("WSSPEC_PROCESS_REQUEST_INVALID", "进程环境参数无效。", "");
+    }
+    return value === undefined ? [] : [[name, value]];
+  }));
+  return { ...inherited, ...configured, PATH: `${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin` };
 }
 
-async function resolvedExecutable(executable: string): Promise<string> {
+interface ExecutableIdentity {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  digest: string;
+}
+
+interface ResolvedExecutable {
+  path: string;
+  identity: ExecutableIdentity;
+}
+
+async function executableIdentity(executable: string): Promise<ExecutableIdentity> {
+  const stat = await lstat(executable, { bigint: true });
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular executable");
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    digest: createHash("sha256").update(await readFile(executable)).digest("hex"),
+  };
+}
+
+function sameIdentity(left: ExecutableIdentity, right: ExecutableIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.digest === right.digest;
+}
+
+async function assertTrustedPath(canonical: string): Promise<void> {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const root = path.parse(canonical).root;
+  const relativeParts = canonical.slice(root.length).split(path.sep).filter(Boolean);
+  let current = root;
+  for (const part of relativeParts) {
+    current = path.join(current, part);
+    const stat = await lstat(current);
+    if (stat.isSymbolicLink() || (current !== canonical && !stat.isDirectory())
+      || (stat.mode & 0o022) !== 0
+      || (currentUid !== undefined && stat.uid !== 0 && stat.uid !== currentUid)) {
+      throw new Error("untrusted executable path");
+    }
+  }
+}
+
+async function resolvedExecutable(executable: string): Promise<ResolvedExecutable> {
   if (!path.isAbsolute(executable) || executable.includes("\0")) {
     throw new ProcessJsonError("WSSPEC_PROCESS_EXECUTABLE_INVALID", "可执行文件必须是绝对路径。", "");
   }
   try {
     const canonical = await realpath(executable);
-    const stat = await lstat(canonical);
+    await assertTrustedPath(canonical);
     await access(canonical, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular executable");
-    return canonical;
+    return { path: canonical, identity: await executableIdentity(canonical) };
   } catch {
     throw new ProcessJsonError("WSSPEC_PROCESS_EXECUTABLE_INVALID", "可执行文件不存在或不可执行。", "");
+  }
+}
+
+async function assertExecutableUnchanged(executable: ResolvedExecutable): Promise<void> {
+  try {
+    const canonical = await realpath(executable.path);
+    if (canonical !== executable.path || !sameIdentity(executable.identity, await executableIdentity(canonical))) throw new Error("changed");
+  } catch {
+    throw new ProcessJsonError("WSSPEC_PROCESS_EXECUTABLE_CHANGED", "Connector 可执行文件在执行期间发生变化。", "");
   }
 }
 
@@ -95,8 +179,9 @@ function boundedAppend(chunks: Buffer[], capturedBytes: number, chunk: Buffer, l
   return capturedBytes + chunk.byteLength;
 }
 
-export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonResult> {
+async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> {
   assertRequest(request);
+  const environment = processEnvironment(request.environment);
   let serializedInput: string;
   try {
     const value = JSON.stringify(request.input);
@@ -113,9 +198,9 @@ export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonR
   let stderrBytes = 0;
   let termination: "timeout" | "output_limit" | undefined;
 
-  const child = spawn(executable, [...request.argv], {
+  const child = spawn(executable.path, [...request.argv], {
     shell: false,
-    env: processEnvironment(),
+    env: environment,
     detached: process.platform === "darwin" || process.platform === "linux",
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -125,6 +210,7 @@ export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonR
     let exitCode: number | null = null;
     let signal: NodeJS.Signals | null = null;
     let cleanupTimer: NodeJS.Timeout | undefined;
+    let cleanupDeadline: number | undefined;
 
     const finish = (): void => {
       if (closed && cleanupComplete) resolve({ exitCode, signal });
@@ -136,18 +222,37 @@ export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonR
         child.kill(targetSignal);
       }
     };
+    const processGroupExists = (): boolean => {
+      if (child.pid === undefined || (process.platform !== "darwin" && process.platform !== "linux")) return !closed;
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    };
+    const pollCleanup = (): void => {
+      if (!processGroupExists()) {
+        cleanupComplete = true;
+        finish();
+        return;
+      }
+      if (cleanupDeadline !== undefined && Date.now() >= cleanupDeadline) {
+        reject(new ProcessJsonError("WSSPEC_PROCESS_CLEANUP_FAILED", "Connector 子进程组未能在期限内清理。", ""));
+        return;
+      }
+      cleanupTimer = setTimeout(pollCleanup, cleanupPollMs);
+    };
     const terminate = (reason: typeof termination): void => {
       if (termination !== undefined) return;
       termination = reason;
       cleanupComplete = false;
+      cleanupDeadline = Date.now() + cleanupDeadlineMs;
       clearTimeout(timeoutTimer);
       signalGroup("SIGTERM");
       cleanupTimer = setTimeout(() => {
         signalGroup("SIGKILL");
-        cleanupTimer = setTimeout(() => {
-          cleanupComplete = true;
-          finish();
-        }, cleanupGraceMs);
+        pollCleanup();
       }, cleanupGraceMs);
     };
     const timeoutTimer = setTimeout(() => terminate("timeout"), request.timeoutMs);
@@ -177,23 +282,35 @@ export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonR
   child.stdin.on("error", () => undefined);
   child.stdin.end(`${serializedInput}\n`);
   const result = await resultPromise;
+  await assertExecutableUnchanged(executable);
 
   const rawStdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const rawStderr = Buffer.concat(stderrChunks).toString("utf8");
   const stdout = redactAndBound(rawStdout, request.maxStdoutBytes, secrets);
-  const stderr = redactAndBound(Buffer.concat(stderrChunks).toString("utf8"), request.maxStdoutBytes, secrets);
-  const safeDiagnostic = diagnostic(stdout, stderr, secrets);
+  const stderr = redactAndBound(rawStderr, request.maxStdoutBytes, secrets);
+  const safeDiagnostic = diagnostic(rawStdout, rawStderr, secrets);
   if (termination === "timeout") {
-    throw new ProcessJsonError("WSSPEC_PROCESS_TIMEOUT", "Connector 子进程执行超时。", safeDiagnostic);
+    throw new ProcessJsonError("WSSPEC_PROCESS_TIMEOUT", "Connector 子进程执行超时。", "");
   }
   if (termination === "output_limit") {
-    throw new ProcessJsonError("WSSPEC_PROCESS_OUTPUT_LIMIT", "Connector 子进程输出超过限制。", safeDiagnostic);
+    throw new ProcessJsonError("WSSPEC_PROCESS_OUTPUT_LIMIT", "Connector 子进程输出超过限制。", "");
   }
   if (result.exitCode !== 0 || result.signal !== null) {
     throw new ProcessJsonError("WSSPEC_PROCESS_EXIT_NONZERO", "Connector 子进程非零退出。", safeDiagnostic, result.exitCode ?? undefined);
   }
 
+  return { rawStdout, stdout, stderr, diagnostic: safeDiagnostic, exitCode: 0 };
+}
+
+export async function spawnJson(request: SpawnJsonRequest): Promise<ProcessJsonResult> {
+  const result = await runProcess(request);
   let value: unknown;
-  try { value = JSON.parse(rawStdout); }
-  catch { throw new ProcessJsonError("WSSPEC_PROCESS_INVALID_JSON", "Connector 子进程未返回合法 JSON。", safeDiagnostic); }
-  return { value: redactValue(value, secrets), exitCode: 0, stdout, stderr };
+  try { value = JSON.parse(result.rawStdout); }
+  catch { throw new ProcessJsonError("WSSPEC_PROCESS_INVALID_JSON", "Connector 子进程未返回合法 JSON。", result.diagnostic); }
+  return { value: redactValue(value, request.secrets ?? []), exitCode: 0, stdout: result.stdout, stderr: result.stderr };
+}
+
+export async function spawnText(request: SpawnJsonRequest): Promise<ProcessTextResult> {
+  const result = await runProcess(request);
+  return { value: result.stdout, exitCode: 0, stdout: result.stdout, stderr: result.stderr };
 }

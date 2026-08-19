@@ -1,57 +1,81 @@
 import assert from "node:assert/strict";
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { doctorConnectors } from "../../src/application/doctor-connectors.js";
-import type { ConnectorManifest, ConnectorExecutable } from "../../src/registry/connectors/types.js";
+import type { ConnectorExecutable, ConnectorManifest } from "../../src/registry/connectors/types.js";
 
-const probeScript = [
-  "const operation=process.argv[1]",
-  "const value=process.argv[2]",
-  "if(operation==='version')process.stdout.write(JSON.stringify({version:value}))",
-  "else if(operation==='auth')process.stdout.write(JSON.stringify({authenticated:value==='yes'}))",
-  "else { process.stdout.write(JSON.stringify({unexpected:operation})); process.exitCode=9 }",
-].join(";");
-
-function manifest(input: {
-  id: string;
-  executable: ConnectorExecutable;
+async function providerFixture(t: test.TestContext, input: {
   version: string;
   authenticated: boolean;
-  extra?: readonly (readonly string[])[];
-}): ConnectorManifest {
+  authMarker?: string;
+  environmentMarker?: string;
+}): Promise<string> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wspec-provider-"));
+  await chmod(root, 0o700);
+  const executable = path.join(root, "provider");
+  const source = [
+    `#!${process.execPath}`,
+    "const { writeFileSync } = require('node:fs')",
+    "const argv = process.argv.slice(2)",
+    `if (argv.length === 1 && argv[0] === '--version') process.stdout.write(${JSON.stringify(input.version)})`,
+    "else if (argv[0] === 'auth' && argv[1] === 'status') {",
+    ...(input.authMarker === undefined ? [] : [`  writeFileSync(${JSON.stringify(input.authMarker)}, 'auth-ran')`]),
+    ...(input.environmentMarker === undefined ? [] : [
+      `  writeFileSync(${JSON.stringify(input.environmentMarker)}, JSON.stringify({HOME:process.env.HOME,GH_CONFIG_DIR:process.env.GH_CONFIG_DIR,GLAB_CONFIG_DIR:process.env.GLAB_CONFIG_DIR}))`,
+    ]),
+    "  if (argv.includes('--json')) process.stdout.write(JSON.stringify({ authenticated: " + String(input.authenticated) + " }))",
+    `  else process.exitCode = ${input.authenticated ? 0 : 1}`,
+    "} else { process.stderr.write('unexpected argv'); process.exitCode = 9 }",
+    "",
+  ].join("\n");
+  await writeFile(executable, source, { encoding: "utf8", mode: 0o700 });
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  return executable;
+}
+
+function manifest(input: { id: string; executable: ConnectorExecutable; minimumVersion?: string }): ConnectorManifest {
+  const auth = input.executable === "git"
+    ? { kind: "none" as const }
+    : input.executable === "gh"
+      ? { kind: "auth" as const, argv: ["auth", "status", "--active"], parser: { kind: "exit-code" as const }, outcomes: { authenticated: [0], unauthenticated: [1] } }
+      : input.executable === "glab"
+        ? { kind: "auth" as const, argv: ["auth", "status"], parser: { kind: "exit-code" as const }, outcomes: { authenticated: [0], unauthenticated: [1] } }
+        : { kind: "auth" as const, argv: ["auth", "status", "--json"], parser: { kind: "json-field" as const, field: "authenticated" }, outcomes: { authenticated: [true], unauthenticated: [false] } };
   return {
     id: input.id,
     capabilities: ["doctor"],
     securityClass: "external-read",
     executable: input.executable,
-    minimumVersion: "2.0.0",
-    argvTemplates: [
-      ["--input-type=module", "-e", probeScript, "version", input.version],
-      ["--input-type=module", "-e", probeScript, "auth", input.authenticated ? "yes" : "no"],
-      ...(input.extra ?? []),
-    ],
-    timeoutMs: 1_000,
+    minimumVersion: input.minimumVersion ?? "2.0.0",
+    argvTemplates: [["write", "forbidden"]],
+    doctor: {
+      version: { kind: "version", argv: ["--version"], parser: { kind: "text-semver" } },
+      auth,
+    },
+    envPolicy: { allow: [] },
+    timeoutMs: 3_000,
     maxStdoutBytes: 4_096,
-  };
+  } as ConnectorManifest;
 }
 
-test("Doctor reports exactly four health states using only version and read-only auth probes", async () => {
-  const manifests = [
-    manifest({ id: "missing", executable: "git", version: "3.0.0", authenticated: true }),
-    manifest({ id: "old", executable: "gh", version: "1.5.0", authenticated: true, extra: [["write", "forbidden"]] }),
-    manifest({ id: "signed-out", executable: "glab", version: "2.1.0", authenticated: false, extra: [["write", "forbidden"]] }),
-    manifest({ id: "ready", executable: "lark-cli", version: "2.2.0", authenticated: true, extra: [["write", "forbidden"]] }),
-  ];
-  const located: ConnectorExecutable[] = [];
+test("Doctor reports four states from audited probes and never runs business argv", async (t) => {
+  const old = await providerFixture(t, { version: "gh version 1.5.0", authenticated: true });
+  const signedOut = await providerFixture(t, { version: "glab 2.1.0", authenticated: false });
+  const ready = await providerFixture(t, { version: "lark-cli version 2.2.0", authenticated: true });
+  const binaries = new Map<ConnectorExecutable, string>([["gh", old], ["glab", signedOut], ["lark-cli", ready]]);
   const health = await doctorConnectors({
-    manifests,
-    locateExecutable: async (executable) => {
-      located.push(executable);
-      return executable === "git" ? undefined : process.execPath;
-    },
+    manifests: [
+      manifest({ id: "missing", executable: "git" }),
+      manifest({ id: "old", executable: "gh" }),
+      manifest({ id: "signed-out", executable: "glab" }),
+      manifest({ id: "ready", executable: "lark-cli" }),
+    ],
+    locateExecutable: async (executable) => binaries.get(executable),
   });
 
-  assert.deepEqual(located, ["git", "gh", "glab", "lark-cli"]);
   assert.deepEqual(health.map(({ provider, status }) => ({ provider, status })), [
     { provider: "missing", status: "missing_binary" },
     { provider: "old", status: "unsupported_version" },
@@ -60,7 +84,68 @@ test("Doctor reports exactly four health states using only version and read-only
   ]);
   assert.equal(health[1]?.version, "1.5.0");
   assert.equal(health[3]?.version, "2.2.0");
-  assert.deepEqual(health.map((entry) => entry.status).every((status) => [
-    "available", "unauthenticated", "unsupported_version", "missing_binary",
-  ].includes(status)), true);
+});
+
+test("Doctor parses native text and applies SemVer prerelease and huge-number precedence", async (t) => {
+  const authMarker = path.join(os.tmpdir(), `wspec-auth-marker-${crypto.randomUUID()}`);
+  const prerelease = await providerFixture(t, { version: "gh version 2.0.0-alpha.1+build.7", authenticated: true, authMarker });
+  const hyphenated = await providerFixture(t, { version: "glab version 2.0.0-alpha-y", authenticated: true });
+  const huge = await providerFixture(t, { version: "git version 999999999999999999999.1.0+host", authenticated: true });
+  const health = await doctorConnectors({
+    manifests: [
+      manifest({ id: "prerelease", executable: "gh", minimumVersion: "2.0.0" }),
+      manifest({ id: "hyphenated", executable: "glab", minimumVersion: "2.0.0-alpha-z" }),
+      manifest({ id: "huge", executable: "git", minimumVersion: "999999999999999999999.1.0" }),
+    ],
+    locateExecutable: async (executable) => executable === "gh" ? prerelease : executable === "glab" ? hyphenated : huge,
+  });
+
+  assert.deepEqual(health.map(({ provider, status, version }) => ({ provider, status, version })), [
+    { provider: "prerelease", status: "unsupported_version", version: "2.0.0-alpha.1+build.7" },
+    { provider: "hyphenated", status: "unsupported_version", version: "2.0.0-alpha-y" },
+    { provider: "huge", status: "available", version: "999999999999999999999.1.0+host" },
+  ]);
+  await assert.rejects(access(authMarker), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("Doctor passes only manifest-allowlisted absolute configuration paths", async (t) => {
+  const environmentMarker = path.join(os.tmpdir(), `wspec-environment-${crypto.randomUUID()}`);
+  const executable = await providerFixture(t, { version: "gh version 2.1.0", authenticated: true, environmentMarker });
+  const provider = {
+    ...manifest({ id: "environment", executable: "gh" }),
+    envPolicy: { allow: ["HOME", "GH_CONFIG_DIR"] },
+  } as ConnectorManifest;
+  const configHome = path.join(os.tmpdir(), `wspec-config-${crypto.randomUUID()}`);
+  const health = await doctorConnectors({
+    manifests: [provider],
+    environment: {
+      HOME: configHome,
+      GH_CONFIG_DIR: configHome,
+      GLAB_CONFIG_DIR: path.join(os.tmpdir(), `wspec-unrelated-${crypto.randomUUID()}`),
+    },
+    locateExecutable: async () => executable,
+  });
+
+  assert.equal(health[0]?.status, "available");
+  assert.deepEqual(JSON.parse(await readFile(environmentMarker, "utf8")), { HOME: configHome, GH_CONFIG_DIR: configHome });
+  await rm(environmentMarker, { force: true });
+});
+
+test("Doctor maps locator exceptions per provider and continues", async (t) => {
+  const executable = await providerFixture(t, { version: "lark-cli version 2.1.0", authenticated: true });
+  const health = await doctorConnectors({
+    manifests: [
+      manifest({ id: "locator-failed", executable: "git" }),
+      manifest({ id: "ready-after-failure", executable: "lark-cli" }),
+    ],
+    locateExecutable: async (candidate) => {
+      if (candidate === "git") throw new Error("sensitive locator detail");
+      return executable;
+    },
+  });
+
+  assert.deepEqual(health, [
+    { provider: "locator-failed", status: "missing_binary", diagnostic: "Executable locator failed." },
+    { provider: "ready-after-failure", status: "available", version: "2.1.0" },
+  ]);
 });

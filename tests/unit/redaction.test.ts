@@ -24,17 +24,39 @@ test("structured redaction sanitizes sensitive keys and explicit secrets after J
   const secret = "opaque-structured-secret";
   const redacted = redactValue({
     GH_TOKEN: "gh-value",
-    nested: { Authorization: "Bearer nested-value", Cookie: "sid=cookie-value" },
+    nested: {
+      Authorization: "Bearer nested-value",
+      Cookie: "sid=cookie-value",
+      accessToken: "access-value",
+      refreshToken: "refresh-value",
+      clientSecret: "client-value",
+      apiKey: "api-value",
+    },
     ordinary: `prefix-${secret}-suffix`,
   }, [secret]);
   const serialized = JSON.stringify(redacted);
 
-  for (const value of ["gh-value", "nested-value", "cookie-value", secret]) assert.equal(serialized.includes(value), false);
+  for (const value of ["gh-value", "nested-value", "cookie-value", "access-value", "refresh-value", "client-value", "api-value", secret]) {
+    assert.equal(serialized.includes(value), false);
+  }
   assert.deepEqual(redacted, {
     GH_TOKEN: "[REDACTED]",
-    nested: { Authorization: "[REDACTED]", Cookie: "[REDACTED]" },
+    nested: {
+      Authorization: "[REDACTED]",
+      Cookie: "[REDACTED]",
+      accessToken: "[REDACTED]",
+      refreshToken: "[REDACTED]",
+      clientSecret: "[REDACTED]",
+      apiKey: "[REDACTED]",
+    },
     ordinary: "prefix-[REDACTED]-suffix",
   });
+});
+
+test("short and overlapping explicit secrets never survive through the replacement marker", () => {
+  const redacted = redactText("value=R abcXdef", ["R", "X", "abcdef"]);
+
+  for (const secret of ["R", "X", "abcdef"]) assert.equal(redacted.includes(secret), false);
 });
 
 test("explicit secrets cannot hide credential labels or partially mask longer secrets", () => {
@@ -45,4 +67,27 @@ test("explicit secrets cannot hide credential labels or partially mask longer se
 
   assert.equal(redacted.includes("actual-token"), false);
   assert.equal(redacted.includes("def"), false);
+});
+
+test("label redaction preserves unrelated fields on the same line", () => {
+  const redacted = redactText("token=token-value status=failed request=42 retry=no");
+
+  assert.equal(redacted.includes("token-value"), false);
+  assert.match(redacted, /status=failed/u);
+  assert.match(redacted, /request=42/u);
+  assert.match(redacted, /retry=no/u);
+});
+
+test("Authorization Basic and complete Cookie header values are removed", () => {
+  const redacted = redactText([
+    "Authorization: Basic dXNlcjpwYXNz",
+    'Authorization: Digest username="user", realm="private", response="digest-secret"',
+    "Authorization: Custom custom-secret-value",
+    "Cookie: sid=first-secret; refresh=second-secret",
+    "Set-Cookie: sid=first-secret; HttpOnly; refresh=second-secret",
+  ].join("\n"));
+
+  for (const secret of ["dXNlcjpwYXNz", "digest-secret", "custom-secret-value", "first-secret", "second-secret"]) {
+    assert.equal(redacted.includes(secret), false);
+  }
 });
