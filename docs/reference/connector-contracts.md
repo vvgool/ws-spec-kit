@@ -54,3 +54,11 @@ readBack:
 ```
 
 Fixture、已登录 CLI 和真实平台验收必须分层报告。Fixture 只证明本地契约，不能代替真实 GitHub、GitLab 或飞书的授权、回读和失败恢复证据。
+
+## 4. Doctor 的不可探测认证边界
+
+Doctor 必须先调用 executable locator，以区分 `missing_binary`。当二进制存在但 Manifest 将认证声明为 `auth.kind: unavailable` 时，Doctor 必须立即返回 `unauthenticated` 和 `DoctorAuthUnavailableReasonCode` 定义的唯一固定 reason code；不得启动该 Provider 的任何 CLI，包括 version 命令，也不得读取认证文件、访问网络、传递 `HOME` 或创建文件。
+
+这类结果不包含 `version`，也不能返回 `available`。省略 `version` 表示当前没有可安全执行的探针，不表示 locator 未找到二进制。`auth.kind: none` 只允许本地 git；git 仍执行受审计的 version 探针，并在版本满足要求时返回 `available`。外部 Provider 不能用 `none` 绕过认证合同。
+
+Doctor 的 `unauthenticated` 结果只描述 Task 1 的无副作用诊断边界。后续 Task 4 必须通过正式工作流中的实际只读 fetch，另外验证当前请求、Provider、外部对象和认证状态；该证据不能由 Doctor 的 locator、版本输出或本地 fixture 替代。

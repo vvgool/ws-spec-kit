@@ -232,14 +232,27 @@ test("signal exits are typed and Unicode limits count bytes", async () => {
   assert.equal(overflow.diagnostic, "");
 });
 
-test("timeout returns only after the POSIX process group no longer exists", async () => {
+test("timeout returns only after the POSIX process group no longer exists", async (t) => {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
   const pidFile = path.join(os.tmpdir(), `wspec-process-group-${crypto.randomUUID()}`);
+  t.after(async () => rm(pidFile, { force: true }));
   const script = `const {writeFileSync}=await import('node:fs');writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`;
-  await rejectsWithCode(spawnJson(request(script, { timeoutMs: 80 })), "WSSPEC_PROCESS_TIMEOUT");
-  const pid = Number(await readFile(pidFile, "utf8"));
+  const result = spawnJson(request(script, { timeoutMs: 3_000 }));
+  void result.catch(() => undefined);
+  let pid: number | undefined;
+  for (let attempt = 0; attempt < 200 && pid === undefined; attempt += 1) {
+    try {
+      const candidate = Number(await readFile(pidFile, "utf8"));
+      if (Number.isSafeInteger(candidate) && candidate > 0) pid = candidate;
+    }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (pid === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(pid !== undefined, "fixture must signal PID readiness before the production timeout");
+  await rejectsWithCode(result, "WSSPEC_PROCESS_TIMEOUT");
   assert.throws(() => process.kill(-pid, 0), (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH");
-  await rm(pidFile, { force: true });
 });
 
 test("nonzero, signal, and invalid JSON failures clean same-group descendants", async (t) => {

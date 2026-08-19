@@ -12,13 +12,17 @@ import type {
 
 export type ConnectorHealthStatus = "available" | "unauthenticated" | "unsupported_version" | "missing_binary";
 
-export interface ConnectorHealth {
+interface ConnectorHealthBase {
   provider: string;
-  status: ConnectorHealthStatus;
-  version?: string;
-  reasonCode?: DoctorAuthUnavailableReasonCode;
   diagnostic?: string;
 }
+
+export type ConnectorHealth =
+  | ConnectorHealthBase & { status: "available"; version: string; reasonCode?: never }
+  | ConnectorHealthBase & { status: "unauthenticated"; version: string; reasonCode?: never }
+  | ConnectorHealthBase & { status: "unauthenticated"; version?: never; reasonCode: DoctorAuthUnavailableReasonCode }
+  | ConnectorHealthBase & { status: "unsupported_version"; version?: string; reasonCode?: never }
+  | ConnectorHealthBase & { status: "missing_binary"; version?: never; reasonCode?: never };
 
 export interface DoctorConnectorsInput {
   manifests: readonly ConnectorManifest[];
@@ -85,6 +89,15 @@ export async function doctorConnectors(input: DoctorConnectorsInput): Promise<Co
       health.push({ provider: manifest.id, status: "missing_binary" });
       continue;
     }
+    if (manifest.doctor.auth.kind === "unavailable") {
+      health.push({
+        provider: manifest.id,
+        status: "unauthenticated",
+        reasonCode: manifest.doctor.auth.reasonCode,
+        diagnostic: "Authentication probe unavailable in side-effect-free Doctor.",
+      });
+      continue;
+    }
     const environment = providerEnvironment(manifest, input.environment);
     let versionResult: VersionProbeResult;
     try { versionResult = await probeVersion(executable, manifest.doctor.version, manifest, environment); }
@@ -99,16 +112,6 @@ export async function doctorConnectors(input: DoctorConnectorsInput): Promise<Co
     const supportedVersion = versionResult.version!;
     if (manifest.doctor.auth.kind === "none") {
       health.push({ provider: manifest.id, status: "available", version: supportedVersion });
-      continue;
-    }
-    if (manifest.doctor.auth.kind === "unavailable") {
-      health.push({
-        provider: manifest.id,
-        status: "unauthenticated",
-        version: supportedVersion,
-        reasonCode: manifest.doctor.auth.reasonCode,
-        diagnostic: "Authentication probe unavailable in side-effect-free Doctor.",
-      });
       continue;
     }
     try {

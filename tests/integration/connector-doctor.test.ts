@@ -16,6 +16,7 @@ async function providerFixture(t: test.TestContext, input: {
   authMarker?: string;
   environmentMarker?: string;
   invocationLog?: string;
+  versionSideEffectMarker?: string;
   versionDescendantMarker?: string;
 }): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-provider-"));
@@ -33,6 +34,9 @@ async function providerFixture(t: test.TestContext, input: {
       `require('node:fs').appendFileSync(${JSON.stringify(input.invocationLog)}, JSON.stringify(argv)+'\\n')`,
     ]),
     "if (argv.length === 1 && argv[0] === '--version') {",
+    ...(input.versionSideEffectMarker === undefined ? [] : [
+      `  writeFileSync(${JSON.stringify(input.versionSideEffectMarker)}, 'version-ran')`,
+    ]),
     `  process.stdout.write(${JSON.stringify(input.version)})`,
     ...(input.versionDescendantMarker === undefined ? [] : [
       `  require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(input.versionDescendantMarker)},'survived'),300)`) }],{stdio:'ignore'}).unref()`,
@@ -116,12 +120,13 @@ test("Doctor reports four states from audited probes and never runs business arg
     { provider: "ready", status: "unauthenticated" },
   ]);
   assert.equal(health[1]?.version, "1.5.0");
-  assert.equal(health[3]?.version, "2.2.0");
+  assert.equal(health[3]?.version, undefined);
 });
 
-test("Doctor never runs lark auth and leaves its temporary HOME unchanged", async (t) => {
+test("Doctor locates an unavailable provider without spawning any CLI probe", async (t) => {
   const invocationLog = path.join(os.tmpdir(), `wspec-lark-invocations-${crypto.randomUUID()}`);
   const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "wspec-lark-home-"));
+  const versionSideEffectMarker = path.join(temporaryHome, "version-side-effect");
   await chmod(temporaryHome, 0o700);
   t.after(async () => {
     await rm(invocationLog, { force: true });
@@ -132,24 +137,65 @@ test("Doctor never runs lark auth and leaves its temporary HOME unchanged", asyn
     version: "lark-cli version 2.2.0",
     authenticated: true,
     invocationLog,
+    versionSideEffectMarker,
   });
   const provider = { ...manifest({ id: "lark-offline", executable: "lark-cli" }), envPolicy: { allow: ["HOME"] } } as ConnectorManifest;
+  const homeBefore = await readdir(temporaryHome);
+  let locatorCalls = 0;
 
   const health = await doctorConnectors({
     manifests: [provider],
     environment: { HOME: temporaryHome },
-    locateExecutable: async () => executable,
+    locateExecutable: async () => {
+      locatorCalls += 1;
+      return executable;
+    },
   });
 
+  assert.equal(locatorCalls, 1);
+  await assert.rejects(access(invocationLog), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  await assert.rejects(access(versionSideEffectMarker), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  assert.deepEqual(await readdir(temporaryHome), homeBefore);
   assert.deepEqual(health, [{
     provider: "lark-offline",
     status: "unauthenticated",
-    version: "2.2.0",
     reasonCode: "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE",
     diagnostic: "Authentication probe unavailable in side-effect-free Doctor.",
   }]);
+});
+
+test("Doctor still locates an unavailable provider to distinguish a missing binary", async () => {
+  let locatorCalls = 0;
+
+  const health = await doctorConnectors({
+    manifests: [manifest({ id: "lark-missing", executable: "lark-cli" })],
+    locateExecutable: async () => {
+      locatorCalls += 1;
+      return undefined;
+    },
+  });
+
+  assert.equal(locatorCalls, 1);
+  assert.deepEqual(health, [{ provider: "lark-missing", status: "missing_binary" }]);
+});
+
+test("Doctor runs the audited version probe for local git with no auth probe", async (t) => {
+  const invocationLog = path.join(os.tmpdir(), `wspec-git-invocations-${crypto.randomUUID()}`);
+  t.after(async () => rm(invocationLog, { force: true }));
+  const executable = await providerFixture(t, {
+    executable: "git",
+    version: "git version 2.2.0",
+    authenticated: true,
+    invocationLog,
+  });
+
+  const health = await doctorConnectors({
+    manifests: [manifest({ id: "local-git", executable: "git" })],
+    locateExecutable: async () => executable,
+  });
+
+  assert.deepEqual(health, [{ provider: "local-git", status: "available", version: "2.2.0" }]);
   assert.deepEqual((await readFile(invocationLog, "utf8")).trim().split("\n").map((line) => JSON.parse(line)), [["--version"]]);
-  assert.deepEqual(await readdir(temporaryHome), []);
 });
 
 test("Doctor parses native text and applies SemVer prerelease and huge-number precedence", async (t) => {
@@ -285,7 +331,6 @@ test("Doctor maps locator exceptions per provider and continues", async (t) => {
     {
       provider: "ready-after-failure",
       status: "unauthenticated",
-      version: "2.1.0",
       reasonCode: "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE",
       diagnostic: "Authentication probe unavailable in side-effect-free Doctor.",
     },
