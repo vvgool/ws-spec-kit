@@ -59,6 +59,32 @@ test("single-Artifact approval digest binds stage, attempt and the complete refe
   for (const variant of variants) assert.notEqual(approvalBindingDigest(variant), original);
 });
 
+test("multi-Artifact approval digest totally orders complete tied-path references", () => {
+  const first = {
+    artifactType: "specification",
+    artifactId: "artifact-甲",
+    schemaVersion: 1,
+    path: "artifacts/同名.md",
+    revision: 1,
+    contentHash: "sha256:first",
+    mediaType: "text/markdown",
+  };
+  const second = {
+    ...first,
+    artifactId: "artifact-乙",
+    revision: 2,
+    contentHash: "sha256:second",
+  };
+  const forward = approvalBindingDigest({ stageId: "define", attemptId: "attempt-a", artifacts: [first, second] });
+  const reversed = approvalBindingDigest({ stageId: "define", attemptId: "attempt-a", artifacts: [second, first] });
+
+  assert.equal(reversed, forward);
+  assert.notEqual(
+    approvalBindingDigest({ stageId: "define", attemptId: "attempt-a", artifacts: [first, { ...second, contentHash: "sha256:changed" }] }),
+    forward,
+  );
+});
+
 test("non-TTY input cannot approve an Artifact", async () => {
   const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: false } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_INTERACTIVE_TTY_REQUIRED");

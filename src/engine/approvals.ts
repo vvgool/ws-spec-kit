@@ -11,6 +11,28 @@ import { mutateControlPlane } from "./scheduler.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
+type ApprovalArtifactReference = Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">;
+
+function normalizedApprovalArtifact(artifact: ApprovalArtifactReference): Record<string, unknown> {
+  return {
+    artifactType: artifact.artifactType,
+    artifactId: artifact.artifactId ?? null,
+    schemaVersion: artifact.schemaVersion,
+    path: artifact.path,
+    revision: artifact.revision,
+    contentHash: artifact.contentHash,
+    mediaType: artifact.mediaType ?? null,
+  };
+}
+
+export function sortApprovalArtifacts<T extends ApprovalArtifactReference>(artifacts: readonly T[]): T[] {
+  return artifacts.map((artifact) => {
+    const key = canonicalize(normalizedApprovalArtifact(artifact));
+    if (key === undefined) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_INVALID", "审批 Artifact 引用无法规范化。");
+    return { artifact, key: Buffer.from(key, "utf8") };
+  }).sort((left, right) => Buffer.compare(left.key, right.key)).map(({ artifact }) => artifact);
+}
+
 export class ApprovalError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "ApprovalError"; }
 }
@@ -24,15 +46,7 @@ export function approvalBindingDigest(input: {
     version: 1,
     stageId: input.stageId,
     attemptId: input.attemptId,
-    artifacts: input.artifacts.map((artifact) => ({
-      artifactType: artifact.artifactType,
-      artifactId: artifact.artifactId ?? null,
-      schemaVersion: artifact.schemaVersion,
-      path: artifact.path,
-      revision: artifact.revision,
-      contentHash: artifact.contentHash,
-      mediaType: artifact.mediaType ?? null,
-    })).sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`)),
+    artifacts: sortApprovalArtifacts(input.artifacts).map(normalizedApprovalArtifact),
   });
   if (binding === undefined) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_INVALID", "审批 Artifact 引用无法规范化。");
   return sha256(binding);
@@ -63,13 +77,13 @@ export async function prepareArtifactApproval(input: {
     }
     return verified;
   }));
-  artifacts.sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`));
-  const artifactContents = await Promise.all(artifacts.map(async (artifact) => ({
+  const sortedArtifacts = sortApprovalArtifacts(artifacts);
+  const artifactContents = await Promise.all(sortedArtifacts.map(async (artifact) => ({
     artifact,
     content: await readFile(path.join(worktree, artifact.path), "utf8"),
   })));
-  const contentHash = approvalBindingDigest({ stageId: input.stageId, attemptId: input.attemptId, artifacts });
-  const artifactPath = artifacts[0]?.path;
+  const contentHash = approvalBindingDigest({ stageId: input.stageId, attemptId: input.attemptId, artifacts: sortedArtifacts });
+  const artifactPath = sortedArtifacts[0]?.path;
   const artifactDiff = artifactContents
     .map(({ artifact, content }) => `--- /dev/null\n+++ ${artifact.path}\n${content.split("\n").map((line) => `+${line}`).join("\n")}`)
     .join("\n")
@@ -80,7 +94,7 @@ export async function prepareArtifactApproval(input: {
     attemptId: input.attemptId,
     ...(artifactPath === undefined ? {} : { artifactPath }),
     contentHash,
-    artifacts,
+    artifacts: sortedArtifacts,
     ...(artifactDiff === "" ? {} : { artifactDiff }),
     workspaceTreeDigest: await computeWorkspaceTreeDigest(worktree),
     requestedBy: input.actor ?? "engine",
@@ -161,10 +175,10 @@ async function verifyApprovalArtifacts(worktree: string, workItemId: string, req
     stageId: request.stageId,
     attemptId: request.attemptId,
   })));
-  verifiedReferences.sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`));
+  const sortedVerifiedReferences = sortApprovalArtifacts(verifiedReferences);
   if (request.artifacts !== undefined) {
-    const boundReferences = [...request.artifacts].sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`));
-    if (verifiedReferences.some((verified, index) => {
+    const boundReferences = sortApprovalArtifacts(request.artifacts);
+    if (sortedVerifiedReferences.some((verified, index) => {
       const bound = boundReferences[index];
       return bound === undefined
         || verified.artifactType !== bound.artifactType
@@ -175,7 +189,7 @@ async function verifyApprovalArtifacts(worktree: string, workItemId: string, req
       throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_MISMATCH", "审批绑定的 Artifact 引用已经变化。");
     }
   }
-  const verifiedDigest = approvalBindingDigest({ stageId: request.stageId, attemptId: request.attemptId, artifacts: verifiedReferences });
+  const verifiedDigest = approvalBindingDigest({ stageId: request.stageId, attemptId: request.attemptId, artifacts: sortedVerifiedReferences });
   if (verifiedDigest !== request.contentHash) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_MISMATCH", "审批绑定的 Artifact 集合摘要已经变化。");
 }
 

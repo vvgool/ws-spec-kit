@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { parse, stringify } from "yaml";
@@ -294,5 +294,46 @@ test("recovery authenticates the Work Item manifest before following its Source 
   await assert.rejects(
     recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
     (error: unknown) => hasCode(error, "WSSPEC_WORK_ITEM_MANIFEST_CHANGED"),
+  );
+});
+
+test("recovery authenticates Application before touching a missing Source Artifact", async () => {
+  const fixture = await prepare();
+  const itemRoot = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId);
+  const manifest = parse(await readFile(path.join(itemRoot, "work-item.yaml"), "utf8")) as {
+    source: { snapshot: string };
+  };
+  const applicationPath = path.join(itemRoot, "snapshot", "application.json");
+  await writeFile(applicationPath, `${await readFile(applicationPath, "utf8")} `, "utf8");
+  await unlink(path.join(itemRoot, manifest.source.snapshot));
+
+  await assert.rejects(
+    recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
+    (error: unknown) => hasCode(error, "WSSPEC_APPLICATION_SNAPSHOT_CHANGED"),
+  );
+});
+
+test("recovery authenticates Application before interpreting an anchored malicious Source path", async () => {
+  const fixture = await prepare();
+  const itemRoot = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId);
+  const manifestPath = path.join(itemRoot, "work-item.yaml");
+  const applicationPath = path.join(itemRoot, "snapshot", "application.json");
+  const manifest = parse(await readFile(manifestPath, "utf8")) as Record<string, unknown> & {
+    source: Record<string, unknown>;
+  };
+  manifest.source.snapshot = `source/${"f".repeat(64)}.json`;
+  const manifestText = stringify(manifest, { lineWidth: 0 });
+  await writeFile(manifestPath, manifestText, "utf8");
+  await writeFile(applicationPath, `${await readFile(applicationPath, "utf8")} `, "utf8");
+
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  const anchorPath = path.join(projection.controlPlane, "application-anchor.json");
+  const anchor = JSON.parse(await readFile(anchorPath, "utf8")) as Record<string, unknown>;
+  anchor.manifestDigest = sha256(manifestText);
+  await writeFile(anchorPath, `${JSON.stringify(anchor, null, 2)}\n`, "utf8");
+
+  await assert.rejects(
+    recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
+    (error: unknown) => hasCode(error, "WSSPEC_APPLICATION_SNAPSHOT_CHANGED"),
   );
 });

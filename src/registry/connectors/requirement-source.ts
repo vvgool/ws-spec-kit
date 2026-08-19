@@ -102,15 +102,28 @@ function normalizedUrl(value: unknown): string {
   } catch {
     return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 必须是合法 URL。");
   }
-  if (!["https:", "http:"].includes(parsed.protocol) || parsed.username !== "" || parsed.password !== "") {
-    return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 只允许无凭据的 HTTP(S) URL。");
-  }
-  let fragment: string;
-  try { fragment = decodeURIComponent(parsed.hash); }
-  catch { return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl fragment 编码不合法。"); }
-  if ([...parsed.searchParams.entries()].some(([key, value]) => credentialLikeField(key) || credentialLikeField(value))
-    || credentialLikeField(fragment)) {
-    return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含 credential-like 参数或片段。");
+  if (!["https:", "http:"].includes(parsed.protocol)) return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 只允许 HTTP(S) URL。");
+  const decode = (surface: string): string => {
+    try { return decodeURIComponent(surface.replace(/\+/gu, "%20")); }
+    catch { return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。"); }
+  };
+  const querySurfaces = parsed.search.slice(1).split("&").flatMap((entry) => {
+    if (entry === "") return [];
+    const separator = entry.indexOf("=");
+    return separator < 0
+      ? [decode(entry)]
+      : [decode(entry.slice(0, separator)), decode(entry.slice(separator + 1))];
+  });
+  const surfaces = [
+    decode(parsed.username),
+    decode(parsed.password),
+    decode(parsed.hostname),
+    ...parsed.pathname.split("/").map(decode),
+    ...querySurfaces,
+    decode(parsed.hash.slice(1)),
+  ];
+  if (parsed.username !== "" || parsed.password !== "" || surfaces.some(credentialLikeField)) {
+    return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含凭据样式内容。");
   }
   return parsed.toString();
 }

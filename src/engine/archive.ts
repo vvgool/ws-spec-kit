@@ -1,7 +1,7 @@
 import * as canonicalizeModule from "canonicalize";
 import path from "node:path";
 
-import { approvalBindingDigest } from "./approvals.js";
+import { approvalBindingDigest, sortApprovalArtifacts } from "./approvals.js";
 import { completedReviewActors, implementationActors } from "./actor-roles.js";
 import { parseLoopStepInstanceId } from "./control/loop.js";
 import {
@@ -19,7 +19,7 @@ import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
 import { externalReceiptMatches } from "../domain/external-receipt.js";
 import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
 import type { ProjectGatePolicy } from "./compiler.js";
-import { readCapturedSourceReferenceFromControlPlane, type RuntimeApproval, type RuntimeProjection } from "../storage/control-plane.js";
+import { authenticateApplicationSourceAuthority, type RuntimeApproval, type RuntimeProjection } from "../storage/control-plane.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
@@ -174,7 +174,7 @@ function sameArtifacts(left: readonly ApprovalArtifact[], right: readonly Approv
 }
 
 function sortArtifacts(artifacts: readonly ApprovalArtifact[]): ApprovalArtifact[] {
-  return [...artifacts].sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`));
+  return sortApprovalArtifacts(artifacts);
 }
 
 function approvalMatches(approval: RuntimeApproval, instance: EffectiveStepInstance): boolean {
@@ -355,12 +355,16 @@ function sameArtifactReference(actual: ArtifactReference, expected: ApprovalArti
 
 async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInput): Promise<RuntimeProjection> {
   const contexts = { ...input.projection.contexts };
-  let capturedSource: SourceArtifactReference | undefined;
-  try {
-    capturedSource = await readCapturedSourceReferenceFromControlPlane(input.projection.controlPlane, input.projection.workItemId);
-  } catch {
-    capturedSource = undefined;
-  }
+  let sourceAuthority: Promise<SourceArtifactReference | undefined> | undefined;
+  const capturedSource = (): Promise<SourceArtifactReference | undefined> => {
+    sourceAuthority ??= authenticateApplicationSourceAuthority({
+      controlPlane: input.projection.controlPlane,
+      worktree: input.worktree,
+      workItemId: input.projection.workItemId,
+      repositoryId: input.projection.repositoryId,
+    }).then(({ sourceReference }) => sourceReference, () => undefined);
+    return sourceAuthority;
+  };
   for (const instance of effectiveStepInstances(input.profile, input.projection)) {
     const attempt = instance.context;
     if (attempt?.result?.status !== "completed" || typeof attempt.workPackage?.attemptId !== "string") continue;
@@ -383,8 +387,9 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
       if (reference.artifactType === "requirement-source") {
         const source = requirementSourceReference(reference);
         try {
-          if (source === undefined || capturedSource === undefined
-            || !sameValues(source, input.source) || !sameValues(source, capturedSource)) {
+          const authoritySource = await capturedSource();
+          if (source === undefined || authoritySource === undefined
+            || !sameValues(source, input.source) || !sameValues(source, authoritySource)) {
             throw new Error("Source Artifact reference mismatch");
           }
           await verifySourceArtifact(input.worktree, input.projection.workItemId, source);

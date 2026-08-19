@@ -13,7 +13,7 @@ import { closeChecklist, closeChecklistForWorktree } from "../../src/engine/arch
 import { approvalBindingDigest } from "../../src/engine/approvals.js";
 import { deriveTestAssetRoots, testAssetScopeManifest, testFileManifest } from "../../src/engine/tdd/red-gate.js";
 import type { TrustedEvidence } from "../../src/engine/tdd/types.js";
-import { captureRequirement, sourceArtifactReference } from "../../src/registry/connectors/requirement-source.js";
+import { captureRequirement, sourceArtifactReference, type SourceArtifactReference } from "../../src/registry/connectors/requirement-source.js";
 import {
   evidenceProjectionKey,
   evidenceRecordHash,
@@ -656,6 +656,32 @@ test("Close 对 Approval 已规范化的多 Artifact 顺序不产生伪差异", 
   assert.deepEqual(decision.missing.filter(({ category }) => category === "approval"), []);
 });
 
+test("Close 对 type/path 相同的完整 Artifact 引用使用全序比较", () => {
+  const first = { ...proposalArtifact, artifactId: "artifact-a", revision: 1, contentHash: "sha256:first" };
+  const second = { ...proposalArtifact, artifactId: "artifact-b", revision: 2, contentHash: "sha256:second" };
+  const current = approvalReadyProjection({
+    artifacts: [first, second],
+    contentHash: approvalBindingDigest({
+      stageId: "author-proposal",
+      attemptId: "attempt-author",
+      artifacts: [first, second],
+    }),
+  });
+  const attempt = current.contexts["author-proposal"] as { result: { artifacts: unknown[] } };
+  attempt.result.artifacts = [second, first];
+
+  const decision = closeChecklist({
+    profile: profile("quick", []),
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing.filter(({ category }) => category === "approval"), []);
+});
+
 test("Close 重新读盘验证 required 和 approved Artifact", async () => {
   const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-artifact-"));
   const selected = profile("quick", []);
@@ -727,35 +753,11 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
 });
 
 test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", async () => {
-  const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-source-"));
-  const controlPlane = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-control-plane-"));
-  const artifact = await captureRequirement({
-    repositoryRoot: worktree,
-    artifactRoot: worktree,
-    workItemId: "WSS-CLOSE",
-    source: { type: "user.prompt", text: "Immutable source" },
-  });
-  const source = sourceArtifactReference("WSS-CLOSE", artifact);
-  await appendEvent(controlPlane, {
-    eventId: "event-source-captured",
-    eventType: "source.captured",
-    occurredAt: "2026-08-18T00:00:00.000Z",
-    actor: "application",
-    repositoryId: "repo-test",
-    workItemId: "WSS-CLOSE",
-    stageId: null,
-    attemptId: null,
-    from: "active",
-    to: "active",
-    idempotencyKey: `source:captured:${source.artifactId}`,
-    workflowDigest: "sha256:workflow",
-    configDigest: "sha256:config",
-    baselineTreeDigest: "sha256:baseline",
-    inputWorkspaceTreeDigest: "sha256:workspace",
-    outputWorkspaceTreeDigest: null,
-    inputDigest: "sha256:input",
-    result: { value: { artifactId: source.artifactId, path: source.path, digest: source.contentHash } },
-  });
+  const fixture = await controlRuntimeFixture();
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "Immutable source" }, profile: "quick" });
+  const state = await loadApplicationState(fixture.root, started.workItemId);
+  const { worktree } = state;
+  const source = state.snapshot.source as SourceArtifactReference;
   const selected = profile("quick", []);
   selected.order = ["intake", "close"];
   selected.steps = [
@@ -770,7 +772,9 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
     },
   ];
   const current = projection({
-    controlPlane,
+    repositoryId: state.projection.repositoryId,
+    workItemId: started.workItemId,
+    controlPlane: state.projection.controlPlane,
     stages: { intake: { status: "succeeded" }, close: { status: "ready" } },
     contexts: {
       intake: { workPackage: { attemptId: "attempt-intake" }, result: { status: "completed", artifacts: [source] } },
@@ -792,10 +796,10 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
   const replacementArtifact = await captureRequirement({
     repositoryRoot: worktree,
     artifactRoot: worktree,
-    workItemId: "WSS-CLOSE",
+    workItemId: started.workItemId,
     source: { type: "user.prompt", text: "Replacement source" },
   });
-  const replacement = sourceArtifactReference("WSS-CLOSE", replacementArtifact);
+  const replacement = sourceArtifactReference(started.workItemId, replacementArtifact);
   (current.contexts.intake as { result: { artifacts: unknown[] } }).result.artifacts = [replacement];
   input.source = replacement;
   assert.deepEqual((await closeChecklistForWorktree(input)).missing, [

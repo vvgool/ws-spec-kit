@@ -242,6 +242,33 @@ test("Provider metadata rejects unknown, prototype and credential-like keys or v
   }
 });
 
+test("Provider metadata rejects high-entropy Lark access-token families without broad prefix false positives", async () => {
+  const current = await fixture();
+  const source = (owner: string): NormalizedRequirementSource => ({
+    type: "feishu.document",
+    stableId: "doccnAbCdEfGhIjKlMnOpQrS",
+    canonicalUrl: "https://example.feishu.cn/docx/doccnAbCdEfGhIjKlMnOpQrS",
+    title: "Document",
+    body: "Body",
+    metadata: { owner },
+  });
+  for (const token of [
+    "t-A1b2C3d4E5f6G7h8I9j0K1l2",
+    "u-Z9y8X7w6V5u4T3s2R1q0P9o8",
+    "a-M1n2B3v4C5x6Z7l8K9j0H1g2",
+  ]) {
+    await assert.rejects(
+      captureRequirement({ ...current, workItemId, source: source(token) }),
+      (error: unknown) => hasCode(error, "WSSPEC_SOURCE_METADATA_INVALID"),
+    );
+  }
+
+  for (const value of ["t-short", "u-aaaaaaaaaaaaaaaaaaaaaaaa", "contact-team", "doccnAbCdEfGhIjKlMnOpQrS"]) {
+    const artifact = await captureRequirement({ ...current, workItemId, source: source(value) });
+    assert.equal(artifact.metadata.owner, value);
+  }
+});
+
 test("Provider metadata rejection never echoes attacker-controlled keys or values", async () => {
   const current = await fixture();
   const attackerKey = "attackerSecretKey";
@@ -293,6 +320,76 @@ test("Provider canonical URLs reject embedded credentials and credential-like qu
       (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
     );
   }
+});
+
+test("Provider canonical URLs scan every decoded URL surface for Lark tokens", async () => {
+  const current = await fixture();
+  const base = {
+    type: "feishu.document" as const,
+    stableId: "doccnAbCdEfGhIjKlMnOpQrS",
+    title: "Document",
+    body: "Body",
+    metadata: {},
+  };
+  const token = "t-a1b2c3d4e5f6g7h8i9j0k1l2";
+  const encoded = encodeURIComponent(token);
+  for (const canonicalUrl of [
+    `https://${encoded}:safe@example.com/docx/legal-token`,
+    `https://example.com/${encoded}/docx/legal-token`,
+    `https://example.com/docx/legal-token?redirect=${encoded}`,
+    `https://example.com/docx/legal-token#${encoded}`,
+    `https://${encoded}.example.com/docx/legal-token`,
+    "https://%74%2d%61%31%62%32%63%33%64%34%65%35%66%36%67%37%68%38%69%39%6a%30%6b%31%6c%32.example.com/docx/legal-token",
+    `https://${token}-例.example.com/docx/legal-token`,
+  ]) {
+    await assert.rejects(
+      captureRequirement({ ...current, workItemId, source: { ...base, canonicalUrl } }),
+      (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
+    );
+  }
+});
+
+test("Provider canonical URL decoding fails closed without echoing attacker input", async () => {
+  const current = await fixture();
+  const attackerSurface = "%ZZ-attacker-path";
+  let rejected: unknown;
+  try {
+    await captureRequirement({
+      ...current,
+      workItemId,
+      source: {
+        type: "feishu.document",
+        stableId: "doccnAbCdEfGhIjKlMnOpQrS",
+        canonicalUrl: `https://example.feishu.cn/docx/${attackerSurface}`,
+        title: "Document",
+        body: "Body",
+        metadata: {},
+      },
+    });
+  } catch (error) {
+    rejected = error;
+  }
+  assert.ok(rejected instanceof SourceArtifactError);
+  assert.equal(rejected.code, "WSSPEC_SOURCE_INVALID");
+  assert.equal(rejected.message.includes(attackerSurface), false);
+});
+
+test("Provider canonical URLs preserve legitimate Feishu document tokens", async () => {
+  const current = await fixture();
+  const documentToken = "doccnAbCdEfGhIjKlMnOpQrS";
+  const artifact = await captureRequirement({
+    ...current,
+    workItemId,
+    source: {
+      type: "feishu.document",
+      stableId: documentToken,
+      canonicalUrl: `https://example.feishu.cn/docx/${documentToken}`,
+      title: "Document",
+      body: "Body",
+      metadata: { owner: "alice" },
+    },
+  });
+  assert.equal(artifact.canonicalUrl, `https://example.feishu.cn/docx/${documentToken}`);
 });
 
 test("Provider metadata rejects aggregate overflow when every key, array and item is individually valid", async () => {

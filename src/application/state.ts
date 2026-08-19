@@ -1,12 +1,10 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { parse } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
-import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
-import { readApplicationAnchor, readCapturedSourceReference, readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
+import { authenticateApplicationSourceAuthority, readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
 import type { WorkItem } from "../storage/work-items.js";
-import { parseApplicationSnapshot, type ApplicationSnapshot, type SnapshotProfile } from "./snapshot.js";
+import type { ApplicationSnapshot, SnapshotProfile } from "./snapshot.js";
 
 export type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "./snapshot.js";
 
@@ -85,45 +83,20 @@ export async function loadApplicationState(root: string, workItemId: string): Pr
     throw new ApplicationStateError("WSSPEC_REPOSITORY_ID_MISMATCH", "Application locator 与仓库身份不一致。 ");
   }
   const worktree = path.join(cache.repositoryRoot, locator.worktree);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", workItemId);
-  const manifestText = await readFile(path.join(itemRoot, "work-item.yaml"), "utf8");
-  const anchor = await readApplicationAnchor(root, workItemId);
-  if (anchor?.workItemId !== workItemId || sha256(manifestText) !== anchor.manifestDigest) {
-    throw new ApplicationStateError("WSSPEC_WORK_ITEM_MANIFEST_CHANGED", "Work Item manifest 与可信 Application 锚点不一致。 ");
-  }
-  const item = parse(manifestText) as WorkItem;
-  if (item.workItemId !== workItemId || item.repositoryId !== projection.repositoryId) {
-    throw new ApplicationStateError("WSSPEC_REPOSITORY_ID_MISMATCH", "Work Item 快照与控制面身份不一致。 ");
-  }
-  const applicationText = await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8");
-  if (sha256(applicationText) !== item.execution.workflowDigest) {
-    throw new ApplicationStateError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "Application 快照摘要与 Work Item 锚点不一致。 ");
-  }
-  let snapshot: ApplicationSnapshot;
-  try {
-    snapshot = parseApplicationSnapshot(JSON.parse(applicationText));
-  } catch (error) {
-    if (error instanceof SyntaxError) throw new ApplicationStateError("WSSPEC_APPLICATION_SNAPSHOT_INVALID", "Application 快照不是合法 JSON。 ");
-    throw error;
-  }
+  const authority = await authenticateApplicationSourceAuthority({
+    controlPlane: projection.controlPlane,
+    worktree,
+    workItemId,
+    repositoryId: projection.repositoryId,
+  });
+  const { itemRoot, manifest: item } = authority;
+  let snapshot: ApplicationSnapshot = authority.application;
   await verifySnapshots(itemRoot, item, snapshot);
   snapshot = {
     ...snapshot,
     selectedProfile: projection.profile.selected,
     changePolicy: snapshot.profiles[projection.profile.selected].changePolicy,
   };
-  const sourceReference = snapshot.source as SourceArtifactReference;
-  const capturedSourceReference = await readCapturedSourceReference(root, workItemId);
-  if (JSON.stringify(sourceReference) !== JSON.stringify(capturedSourceReference)
-    || sourceReference.artifactId !== item.source.artifactId
-    || sourceReference.path !== `.wsspec/work-items/${workItemId}/${item.source.snapshot}`
-    || sourceReference.contentHash !== item.source.artifactDigest) {
-    throw new ApplicationStateError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "不可变需求来源快照已变化。 ");
-  }
-  const source = await verifySourceArtifact(worktree, workItemId, sourceReference);
-  if (source.contentDigest !== item.source.contentDigest || source.type !== item.source.type) {
-    throw new ApplicationStateError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "不可变需求来源快照与 Work Item manifest 不一致。 ");
-  }
   return { projection, worktree, itemRoot, item, snapshot };
 }
 
