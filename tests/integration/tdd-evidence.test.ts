@@ -658,8 +658,9 @@ test("stack ownership normalization is engine-defined across known and custom la
     [["spec/models/**/*_spec.rb"], ["spec"]],
     [["Tests/Unit/**/*Tests.cs"], ["Tests"]],
     [["packages/Foo.Tests/Unit/**/*Tests.cs"], ["packages/Foo.Tests"]],
-    [["packages/a/__tests__"], ["packages/a/__tests__"]],
-    [["packages/a/__tests__/**/*.test.ts", "packages/a/__snapshots__/**"], ["packages/a/__snapshots__", "packages/a/__tests__"]],
+    [["packages/a/__tests__"], ["packages/a"]],
+    [["packages/a/__tests__/**/*.test.ts", "packages/a/__snapshots__/**"], ["packages/a"]],
+    [["packages/a/__tests__/**", "packages/b/__tests__/**"], ["packages/a", "packages/b"]],
     [["qa/unit/*.case.mjs"], ["qa"]],
     [["qa/unit/case.mjs"], ["qa"]],
     [["**/*.test.*"], ["."]],
@@ -724,31 +725,97 @@ test("cross-stack nested selectors bind sibling fixtures and support under norma
   ]);
 });
 
-test("nested marker selectors jointly bind package tests and snapshots", async () => {
+test("a nested __tests__ selector binds sibling package test markers without absorbing product files or other packages", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-marker-scope-"));
   for (const filename of [
-    "packages/a/__tests__/feature.test.ts",
+    "packages/a/__tests__/unit/feature.test.ts",
     "packages/a/__tests__/fixtures/value.json",
     "packages/a/__snapshots__/feature.snap",
+    "packages/a/test/fixtures/value.json",
+    "packages/a/tests/fixtures/value.json",
+    "packages/a/spec/fixtures/value.json",
+    "packages/a/src/test/fixtures/value.json",
+    "packages/a/dotnet/Tests/Fixtures/value.json",
+    "packages/a/Feature.Tests/Fixtures/value.json",
+    "packages/a/src/feature.ts",
+    "packages/a/package.json",
+    "packages/b/__tests__/feature.test.ts",
   ]) {
     await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
     await writeFile(path.join(root, filename), `${filename}\n`, "utf8");
   }
-  const patterns = ["packages/a/__tests__/**/*.test.ts", "packages/a/__snapshots__/**"];
+  const patterns = ["packages/a/__tests__/unit/*.test.ts"];
   const scope = {
     testAssetPaths: patterns,
     testAssetRoots: deriveTestAssetRoots(patterns),
-    productPaths: ["packages/a/src/**"],
+    productPaths: ["packages/a/src/**", "packages/a/__snapshots__/**"],
+  };
+
+  const before = await testAssetScopeManifest(root, scope);
+
+  assert.deepEqual(scope.testAssetRoots, ["packages/a"]);
+  assert.deepEqual(before.files.map(({ path: filename }) => filename), [
+    "packages/a/Feature.Tests/Fixtures/value.json",
+    "packages/a/__snapshots__/feature.snap",
+    "packages/a/__tests__/fixtures/value.json",
+    "packages/a/__tests__/unit/feature.test.ts",
+    "packages/a/dotnet/Tests/Fixtures/value.json",
+    "packages/a/package.json",
+    "packages/a/spec/fixtures/value.json",
+    "packages/a/src/feature.ts",
+    "packages/a/src/test/fixtures/value.json",
+    "packages/a/test/fixtures/value.json",
+    "packages/a/tests/fixtures/value.json",
+  ]);
+  for (const filename of [
+    "packages/a/__snapshots__/feature.snap",
+    "packages/a/__tests__/fixtures/value.json",
+    "packages/a/test/fixtures/value.json",
+    "packages/a/tests/fixtures/value.json",
+    "packages/a/spec/fixtures/value.json",
+    "packages/a/src/test/fixtures/value.json",
+    "packages/a/dotnet/Tests/Fixtures/value.json",
+    "packages/a/Feature.Tests/Fixtures/value.json",
+    "packages/a/package.json",
+  ]) assert.equal(isTrustedTestAssetPath(filename, scope), true, filename);
+  assert.equal(isTrustedTestAssetPath("packages/a/src/feature.ts", scope), false);
+  assert.equal(isTrustedTestAssetPath("packages/b/__tests__/feature.test.ts", scope), false);
+
+  await writeFile(path.join(root, "packages/a/src/feature.ts"), "product changed\n", "utf8");
+  const afterProduct = await testAssetScopeManifest(root, scope);
+  assert.notDeepEqual(afterProduct.files, before.files);
+  assert.equal(afterProduct.digest, before.digest);
+
+  await writeFile(path.join(root, "packages/a/__snapshots__/feature.snap"), "snapshot changed\n", "utf8");
+  const afterSnapshot = await testAssetScopeManifest(root, scope);
+  assert.notEqual(afterSnapshot.digest, afterProduct.digest);
+});
+
+test("a nested __snapshots__ selector automatically binds sibling __tests__", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-snapshot-marker-scope-"));
+  for (const filename of [
+    "packages/a/__snapshots__/feature.snap",
+    "packages/a/__tests__/unit/feature.test.ts",
+    "packages/b/__tests__/unit/feature.test.ts",
+  ]) {
+    await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
+    await writeFile(path.join(root, filename), `${filename}\n`, "utf8");
+  }
+  const patterns = ["packages/a/__snapshots__/**"];
+  const scope = {
+    testAssetPaths: patterns,
+    testAssetRoots: deriveTestAssetRoots(patterns),
+    productPaths: ["packages/a/__tests__/**"],
   };
 
   const manifest = await testAssetScopeManifest(root, scope);
 
-  assert.deepEqual(scope.testAssetRoots, ["packages/a/__snapshots__", "packages/a/__tests__"]);
+  assert.deepEqual(scope.testAssetRoots, ["packages/a"]);
   assert.deepEqual(manifest.files.map(({ path: filename }) => filename), [
     "packages/a/__snapshots__/feature.snap",
-    "packages/a/__tests__/feature.test.ts",
-    "packages/a/__tests__/fixtures/value.json",
+    "packages/a/__tests__/unit/feature.test.ts",
   ]);
+  assert.equal(isTrustedTestAssetPath("packages/a/__tests__/unit/feature.test.ts", scope), true);
 });
 
 test("unknown custom layouts conservatively bind their top-level static directory", async () => {
@@ -1083,6 +1150,63 @@ test("Application submit replaces Agent-reported Red with engine-executed truste
   assert.deepEqual((projection.contexts["verify-red"] as { result: { commands: unknown[]; evidence: unknown[] } }).result.evidence, []);
 
   await writeFile(path.join(await worktreeFor(current.root, started.workItemId), "tests", "late-added-fixture.json"), "{}\n", "utf8");
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  await assert.rejects(
+    recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+  );
+});
+
+test("recovery rejects drift in a sibling snapshot bound by a nested __tests__ selector", async () => {
+  const current = await controlRuntimeFixture();
+  for (const [filename, content] of [
+    ["packages/a/__tests__/unit/feature.test.mjs", [
+      "import assert from 'node:assert/strict';",
+      "import { readFileSync } from 'node:fs';",
+      "import test from 'node:test';",
+      "test('nested package remains red', () => assert.match(readFileSync('packages/a/src/feature.mjs', 'utf8'), /value = 1/));",
+      "",
+    ].join("\n")],
+    ["packages/a/__snapshots__/feature.snap", "snapshot 0\n"],
+    ["packages/a/src/feature.mjs", "export const value = 0;\n"],
+  ] as const) {
+    await mkdir(path.dirname(path.join(current.root, filename)), { recursive: true });
+    await writeFile(path.join(current.root, filename), content, "utf8");
+  }
+  const testAssetPaths = ["packages/a/__tests__/unit/*.test.mjs"];
+  const gate: FixedTestGate = {
+    ...featureGate(),
+    argv: [process.execPath, "--test", "packages/a/__tests__/unit/feature.test.mjs"],
+    testAssetPaths,
+    testAssetRoots: deriveTestAssetRoots(testAssetPaths),
+    productPaths: ["packages/a/src/**"],
+  };
+  await configureGate(current.root, gate);
+  await git(current.root, "add", ".wsspec/config.yaml", "packages/a");
+  await git(current.root, "commit", "-m", "test: configure nested marker recovery gate");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "Nested marker recovery" }, profile: "standard" });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const red = await recordRedEvidence(await redInput(worktree, gate, {
+    taskId: started.workItemId,
+    modifiedFiles: ["packages/a/__tests__/unit/feature.test.mjs"],
+    testPaths: ["packages/a/__tests__/unit/feature.test.mjs"],
+  }));
+  await mutateControlPlane({
+    cwd: current.root,
+    workItemId: started.workItemId,
+    eventType: "evidence.recorded",
+    idempotencyKey: "test:tdd:nested-marker-recovery-red",
+    operationInput: red,
+    mutate: (projection) => ({
+      projection: { ...projection, evidence: { ...projection.evidence, [tddRedEvidenceKey(started.workItemId)]: red } },
+      value: null,
+    }),
+  });
+
+  assert.deepEqual(red.testAssetRoots, ["packages/a"]);
+  assert.ok(red.testAssets.some(({ path: filename }) => filename === "packages/a/__snapshots__/feature.snap"));
+  await writeFile(path.join(worktree, "packages/a/__snapshots__/feature.snap"), "snapshot 1\n", "utf8");
+  const projection = await readControlPlane(current.root, started.workItemId);
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
   await assert.rejects(
     recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),

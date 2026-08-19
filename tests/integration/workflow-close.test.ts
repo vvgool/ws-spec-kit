@@ -11,7 +11,7 @@ import { sha256 } from "../../src/domain/digests.js";
 import { createExternalBinding } from "../../src/domain/external-receipt.js";
 import { closeChecklist, closeChecklistForWorktree } from "../../src/engine/archive.js";
 import { approvalBindingDigest } from "../../src/engine/approvals.js";
-import { testAssetScopeManifest, testFileManifest } from "../../src/engine/tdd/red-gate.js";
+import { deriveTestAssetRoots, testAssetScopeManifest, testFileManifest } from "../../src/engine/tdd/red-gate.js";
 import type { TrustedEvidence } from "../../src/engine/tdd/types.js";
 import {
   evidenceProjectionKey,
@@ -396,20 +396,28 @@ test("Close requires a schema-valid linked Red and Green TDD evidence chain", ()
   ]);
 });
 
-test("Close rejects a TDD cycle when the configured test asset scope changes after Green", async () => {
+test("Close rejects drift in a sibling snapshot automatically bound by a nested __tests__ selector", async () => {
   const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-tdd-scope-"));
-  await mkdir(path.join(worktree, "tests"), { recursive: true });
-  await mkdir(path.join(worktree, "src"), { recursive: true });
-  await writeFile(path.join(worktree, "tests", "feature.test.mjs"), "test source\n", "utf8");
-  await writeFile(path.join(worktree, "src", "feature.mjs"), "product source\n", "utf8");
-  const tests = await testFileManifest(worktree, ["tests/feature.test.mjs"], ["node"]);
-  const assets = await testAssetScopeManifest(worktree, { testAssetPaths: ["tests/**"], testAssetRoots: ["tests"], productPaths: ["src/**"] });
+  await mkdir(path.join(worktree, "packages/a/__tests__/unit"), { recursive: true });
+  await mkdir(path.join(worktree, "packages/a/__snapshots__"), { recursive: true });
+  await mkdir(path.join(worktree, "packages/a/src"), { recursive: true });
+  await writeFile(path.join(worktree, "packages/a/__tests__/unit/feature.test.mjs"), "test source\n", "utf8");
+  await writeFile(path.join(worktree, "packages/a/__snapshots__/feature.snap"), "snapshot 0\n", "utf8");
+  await writeFile(path.join(worktree, "packages/a/src/feature.mjs"), "product source\n", "utf8");
+  const testAssetPaths = ["packages/a/__tests__/unit/*.test.mjs"];
+  const testAssetRoots = deriveTestAssetRoots(testAssetPaths);
+  const productPaths = ["packages/a/src/**"];
+  const tests = await testFileManifest(worktree, ["packages/a/__tests__/unit/feature.test.mjs"], ["node"]);
+  const assets = await testAssetScopeManifest(worktree, { testAssetPaths, testAssetRoots, productPaths });
   const red = trustedTddEvidence("red", {
     testPaths: tests.files.map(({ path: filename }) => filename),
     testFiles: tests.files,
     testPathsDigest: tests.digest,
     testAssets: assets.files,
     testAssetsDigest: assets.digest,
+    testAssetPaths,
+    testAssetRoots,
+    productPaths,
   });
   const green = trustedTddEvidence("green", {
     testPaths: red.testPaths,
@@ -417,6 +425,9 @@ test("Close rejects a TDD cycle when the configured test asset scope changes aft
     testPathsDigest: red.testPathsDigest,
     testAssets: red.testAssets,
     testAssetsDigest: red.testAssetsDigest,
+    testAssetPaths: red.testAssetPaths,
+    testAssetRoots: red.testAssetRoots,
+    productPaths: red.productPaths,
   });
   const cycle = {
     taskId: "WSS-CLOSE",
@@ -476,7 +487,7 @@ test("Close rejects a TDD cycle when the configured test asset scope changes aft
   };
 
   assert.equal((await closeChecklistForWorktree(input)).allowed, true);
-  await writeFile(path.join(worktree, "tests", "late-ignored-fixture.json"), "{}\n", "utf8");
+  await writeFile(path.join(worktree, "packages/a/__snapshots__/feature.snap"), "snapshot 1\n", "utf8");
   assert.deepEqual((await closeChecklistForWorktree(input)).missing.filter(({ category }) => category === "artifact"), [
     { category: "artifact", id: "red-evidence" },
     { category: "artifact", id: "tdd-evidence" },

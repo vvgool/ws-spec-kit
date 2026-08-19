@@ -158,6 +158,9 @@ function scopeRoot(pattern: string): string {
   const firstPattern = segments.findIndex((segment) => /[*?]/u.test(segment));
   const ownershipMarker = segments.findIndex(isTestOwnershipMarker);
   if (ownershipMarker >= 0 && (firstPattern < 0 || ownershipMarker < firstPattern)) {
+    if (["__tests__", "__snapshots__"].includes(segments[ownershipMarker]!)) {
+      return segments.slice(0, ownershipMarker).join("/") || ".";
+    }
     return segments.slice(0, ownershipMarker + 1).join("/");
   }
   const staticPrefix = firstPattern < 0 ? segments.slice(0, -1) : segments.slice(0, firstPattern);
@@ -177,8 +180,8 @@ function withinRoot(filename: string, root: string): boolean {
 
 export function isTrustedTestAssetPath(filename: string, scope: TestingScope): boolean {
   if (!scope.testAssetRoots.some((root) => withinRoot(filename, root))) return false;
-  if (scope.testAssetRoots.some((root) => root !== "." && withinRoot(filename, root))) return true;
   if (scope.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, filename))) return true;
+  if (filename.split("/").some(isTestOwnershipMarker)) return true;
   return !scope.productPaths.some((pattern) => matchesRepositoryPath(pattern, filename));
 }
 
@@ -249,7 +252,7 @@ export async function testAssetScopeManifest(worktree: string, scope: TestingSco
   }
   const trustedFiles = trustedTestAssetFiles(files, scope);
   if (trustedFiles.length === 0) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", "Test Gate 配置的 trusted test asset roots 为空。 ");
-  return { files, digest: sha256(`${JSON.stringify({ version: 2, testAssetRoots: derivedRoots, files: trustedFiles })}\n`) };
+  return { files, digest: sha256(`${JSON.stringify({ version: 3, testAssetRoots: derivedRoots, files: trustedFiles })}\n`) };
 }
 
 function effectiveEnvironment(gate: FixedTestGate): Record<string, string> {
