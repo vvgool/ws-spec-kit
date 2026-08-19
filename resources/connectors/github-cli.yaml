@@ -1,0 +1,23 @@
+id: github-cli
+capabilities: [github.issue, issue.read, issue.write, issue.close]
+securityClass: external-write
+executable: gh
+minimumVersion: 2.0.0
+argvTemplates:
+  - [api, --method, GET, "repos/{owner}/{repo}/issues/{number}", --hostname, "{host}"]
+  - [api, --method, POST, "repos/{owner}/{repo}/issues/{number}/comments", --hostname, "{host}", --input, "-"]
+  - [api, --method, PATCH, "repos/{owner}/{repo}/issues/{number}", --hostname, "{host}", --input, "-"]
+doctor:
+  version:
+    kind: version
+    argv: [--version]
+    parser: { kind: text-semver }
+  auth:
+    kind: auth
+    argv: [auth, status, --active]
+    parser: { kind: exit-code }
+    outcomes: { authenticated: [0], unauthenticated: [1] }
+envPolicy:
+  allow: [HOME, XDG_CONFIG_HOME, GH_CONFIG_DIR]
+timeoutMs: 30000
+maxStdoutBytes: 1048576
