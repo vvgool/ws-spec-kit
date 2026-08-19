@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createApplication } from "../../src/application/application.js";
 import { sha256 } from "../../src/domain/digests.js";
+import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
 import { readEvents } from "../../src/storage/events.js";
 import { initRepository } from "../../src/storage/repository.js";
@@ -49,7 +50,7 @@ test("条件为 false 时原子写入 step.skipped 并可从事件回放", async
   assert.equal(recovered.stages.intake?.status, "skipped");
 });
 
-test("零事件恢复保留条件根 Step 的 pending 状态并在 acquire 时跳过", async () => {
+test("Source 捕获与投影失效事件恢复后条件根 Step 仍在 acquire 时跳过", async () => {
   const root = await createGitRepository();
   await initRepository(root);
   await git(root, "add", ".wsspec", ".gitignore");
@@ -72,13 +73,27 @@ test("零事件恢复保留条件根 Step 的 pending 状态并在 acquire 时�
   const anchor = JSON.parse(await readFile(anchorPath, "utf8")) as Record<string, unknown>;
   anchor.manifestDigest = sha256(updatedManifest);
   await writeFile(anchorPath, `${JSON.stringify(anchor, null, 2)}\n`, "utf8");
+  await mutateControlPlane({
+    cwd: root,
+    workItemId: started.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: "test:conditional-snapshot-invalidated",
+    operationInput: { stageId: "intake" },
+    mutate: (current) => ({
+      projection: { ...current, stages: { ...current.stages, intake: { status: "pending" } } },
+      value: { stageId: "intake" },
+    }),
+  });
   await writeFile(path.join(initial.controlPlane, "runtime.json"), "not-json\n", "utf8");
 
   const recovered = await recoverControlPlane({ cwd: root, workItemId: started.workItemId });
   const action = await app.acquire({ root, workItemId: started.workItemId, actor: "codex" });
 
   assert.equal(recovered.stages.intake?.status, "pending");
+  assert.equal(recovered.lastSequence, 2);
   assert.equal(action.action, "execute");
   assert.equal(action.action === "execute" ? action.workPackage.stepId : undefined, "explore");
-  assert.equal((await readEvents(initial.controlPlane)).at(-1)?.eventType, "step.skipped");
+  const events = await readEvents(initial.controlPlane);
+  assert.equal(events[0]?.eventType, "source.captured");
+  assert.equal(events.at(-1)?.eventType, "step.skipped");
 });

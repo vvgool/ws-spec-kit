@@ -1,8 +1,9 @@
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
+import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
 import { readApplicationAnchor, readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
 import type { WorkItem } from "../storage/work-items.js";
 import { parseApplicationSnapshot, type ApplicationSnapshot, type SnapshotProfile } from "./snapshot.js";
@@ -111,15 +112,15 @@ export async function loadApplicationState(root: string, workItemId: string): Pr
     selectedProfile: projection.profile.selected,
     changePolicy: snapshot.profiles[projection.profile.selected].changePolicy,
   };
-  const sourcePath = path.join(itemRoot, item.source.snapshot);
-  const [realItemRoot, realSource] = await Promise.all([realpath(itemRoot), realpath(sourcePath)]);
-  const sourceRelative = path.relative(realItemRoot, realSource);
-  if (sourceRelative.startsWith("..") || path.isAbsolute(sourceRelative)) {
-    throw new ApplicationStateError("WSSPEC_SOURCE_PATH_INVALID", "需求来源快照越出 Work Item。 ");
-  }
-  const source = JSON.parse(await readFile(realSource, "utf8")) as { content?: { text?: unknown }; contentDigest?: unknown };
-  if (typeof source.content?.text !== "string" || source.contentDigest !== item.source.contentDigest || sha256(source.content.text) !== item.source.contentDigest) {
+  const sourceReference = snapshot.source as SourceArtifactReference;
+  if (sourceReference.artifactId !== item.source.artifactId
+    || sourceReference.path !== `.wsspec/work-items/${workItemId}/${item.source.snapshot}`
+    || sourceReference.contentHash !== item.source.artifactDigest) {
     throw new ApplicationStateError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "不可变需求来源快照已变化。 ");
+  }
+  const source = await verifySourceArtifact(worktree, workItemId, sourceReference);
+  if (source.contentDigest !== item.source.contentDigest || source.type !== item.source.type) {
+    throw new ApplicationStateError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "不可变需求来源快照与 Work Item manifest 不一致。 ");
   }
   return { projection, worktree, itemRoot, item, snapshot };
 }

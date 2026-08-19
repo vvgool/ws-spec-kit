@@ -5,6 +5,13 @@ import { parse, stringify } from "yaml";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import type { RepositoryId, WorkItemId } from "../domain/ids.js";
+import {
+  captureRequirement,
+  requirementTitle,
+  sourceArtifactReference,
+  type CaptureRequirementSource,
+  type NormalizedRequirementSource,
+} from "../registry/connectors/requirement-source.js";
 import { validate } from "../schemas/index.js";
 import { writeFileAtomic } from "./files.js";
 import { runGit } from "./git.js";
@@ -58,9 +65,11 @@ export interface WorkItem {
     schemaDigest: string;
   };
   source: {
-    type: "prompt" | "file";
+    type: NormalizedRequirementSource["type"];
+    artifactId: string;
     snapshot: string;
     contentDigest: string;
+    artifactDigest: string;
   };
   bindings: { issue: null; knowledge: null };
 }
@@ -70,15 +79,6 @@ export class WorkItemError extends Error {
     super(message);
     this.name = "WorkItemError";
   }
-}
-
-interface SnapshotSource {
-  version: 1;
-  type: "prompt" | "file";
-  capturedAt: string;
-  origin: string;
-  content: { text: string };
-  contentDigest: string;
 }
 
 interface ParsedConfig {
@@ -130,46 +130,23 @@ async function assertRealPathContained(root: string, target: string): Promise<vo
   }
 }
 
-async function snapshotSource(root: string, source: PromptSource | FileSource, capturedAt: string): Promise<SnapshotSource> {
-  let origin: string;
-  let text: string;
-  if (source.type === "prompt") {
-    origin = "prompt";
-    text = source.content;
-  } else {
-    const absolute = path.resolve(root, source.path);
-    const relative = path.relative(root, absolute);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      throw new WorkItemError("WSSPEC_SOURCE_PATH_INVALID", "需求来源必须位于当前仓库内。");
-    }
-    const [realRoot, realSource] = await Promise.all([realpath(root), realpath(absolute)]);
-    const realRelative = path.relative(realRoot, realSource);
-    if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
-      throw new WorkItemError("WSSPEC_SOURCE_PATH_INVALID", "需求来源的真实路径越出当前仓库。");
-    }
-    if (![".md", ".txt"].includes(path.extname(relative).toLowerCase())) {
-      throw new WorkItemError("WSSPEC_SOURCE_TYPE_UNSUPPORTED", "M1 只支持 Markdown 和 TXT 文件来源。");
-    }
-    origin = relative.split(path.sep).join("/");
-    text = await readFile(absolute, "utf8");
+function requirementCaptureSource(input: CreateWorkItemInput): CaptureRequirementSource {
+  const source = input.source;
+  if (input.capturedSource === undefined) {
+    return source.type === "prompt"
+      ? { type: "user.prompt", text: source.content }
+      : { type: "local.file", path: source.path };
   }
-  if (text.trim() === "") {
-    throw new WorkItemError("WSSPEC_SOURCE_EMPTY", "需求来源不能为空。");
-  }
-  return { version: 1, type: source.type, capturedAt, origin, content: { text }, contentDigest: sha256(text) };
-}
-
-function snapshotCapturedSource(input: NonNullable<CreateWorkItemInput["capturedSource"]>, source: PromptSource | FileSource, capturedAt: string): SnapshotSource {
-  if (input.type !== source.type || input.origin === "" || input.text.trim() === "" || sha256(input.text) !== input.contentDigest) {
+  const captured = input.capturedSource;
+  if (captured.type !== source.type || captured.origin === "" || captured.text.trim() === "" || sha256(captured.text) !== captured.contentDigest) {
     throw new WorkItemError("WSSPEC_SOURCE_SNAPSHOT_INVALID", "预捕获需求来源与 Work Item 输入不一致。");
   }
   return {
-    version: 1,
-    type: input.type,
-    capturedAt,
-    origin: input.origin,
-    content: { text: input.text },
-    contentDigest: input.contentDigest,
+    type: captured.type === "prompt" ? "user.prompt" : "local.file",
+    stableId: captured.type === "prompt" ? captured.contentDigest : captured.origin,
+    title: requirementTitle(captured.text),
+    body: captured.text,
+    metadata: {},
   };
 }
 
@@ -279,9 +256,6 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
   await assertRealPathContained(root, worktreeRoot.absolute);
 
   const createdAt = input.createdAt ?? new Date().toISOString();
-  const source = input.capturedSource === undefined
-    ? await snapshotSource(root, input.source, createdAt)
-    : snapshotCapturedSource(input.capturedSource, input.source, createdAt);
   const baselineRevision = await runGit(root, ["rev-parse", "HEAD"]);
   const ownerToken = crypto.randomUUID();
 
@@ -293,7 +267,14 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     await writeFileAtomic(path.join(snapshotRoot, "workflow.yaml"), workflowText);
     await writeFileAtomic(path.join(snapshotRoot, "config.yaml"), portableConfigText);
     const schemaDigest = await snapshotSchemas(path.join(snapshotRoot, "schemas"));
-    await writeFileAtomic(path.join(itemRoot, "source", "source.json"), `${JSON.stringify(source, null, 2)}\n`);
+    const source = await captureRequirement({
+      repositoryRoot: root,
+      artifactRoot: worktree,
+      workItemId: input.workItemId,
+      source: requirementCaptureSource(input),
+    });
+    const sourceReference = sourceArtifactReference(input.workItemId, source);
+    const itemRelativeSource = path.posix.relative(`.wsspec/work-items/${input.workItemId}`, sourceReference.path);
 
     const workItem: WorkItem = {
       version: 1,
@@ -313,8 +294,10 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
       },
       source: {
         type: source.type,
-        snapshot: "source/source.json",
+        artifactId: source.artifactId,
+        snapshot: itemRelativeSource,
         contentDigest: source.contentDigest,
+        artifactDigest: sourceReference.contentHash,
       },
       bindings: { issue: null, knowledge: null },
     };

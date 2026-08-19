@@ -13,6 +13,7 @@ import { closeChecklist, closeChecklistForWorktree } from "../../src/engine/arch
 import { approvalBindingDigest } from "../../src/engine/approvals.js";
 import { deriveTestAssetRoots, testAssetScopeManifest, testFileManifest } from "../../src/engine/tdd/red-gate.js";
 import type { TrustedEvidence } from "../../src/engine/tdd/types.js";
+import { captureRequirement, sourceArtifactReference } from "../../src/registry/connectors/requirement-source.js";
 import {
   evidenceProjectionKey,
   evidenceRecordHash,
@@ -604,6 +605,26 @@ test("Close 比较 Approval 与 Attempt 的完整 Artifact 数组而不是单 Ar
   ]);
 });
 
+test("Close 比较 Approval 与 Attempt 的 Artifact 身份", () => {
+  const attempted = { ...proposalArtifact, artifactId: "artifact-attempted" };
+  const current = approvalReadyProjection({ artifacts: [{ ...attempted, artifactId: "artifact-approved" }] });
+  const context = current.contexts["author-proposal"] as { result: { artifacts: unknown[] } };
+  context.result.artifacts = [attempted];
+
+  const decision = closeChecklist({
+    profile: profile("quick", []),
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing.filter(({ category }) => category === "approval"), [
+    { category: "approval", id: "author-proposal" },
+  ]);
+});
+
 test("Close 对 Approval 已规范化的多 Artifact 顺序不产生伪差异", () => {
   const supportingArtifact = {
     artifactType: "supporting",
@@ -699,6 +720,53 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
   await unlink(filename);
   await symlink("replacement.md", filename);
   assert.equal((await closeChecklistForWorktree(input)).allowed, false);
+});
+
+test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", async () => {
+  const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-source-"));
+  const artifact = await captureRequirement({
+    repositoryRoot: worktree,
+    artifactRoot: worktree,
+    workItemId: "WSS-CLOSE",
+    source: { type: "user.prompt", text: "Immutable source" },
+  });
+  const source = sourceArtifactReference("WSS-CLOSE", artifact);
+  const selected = profile("quick", []);
+  selected.order = ["intake", "close"];
+  selected.steps = [
+    {
+      id: "intake", uses: "connector.execute", securityClass: "external-read", needs: [], enabled: true,
+      skills: [], inputs: [], outputs: [{ artifact: "requirement-source", required: true }], gates: [], approval: false,
+      authorizationRequired: false, action: "requirement.capture", steps: [],
+    },
+    {
+      id: "close", uses: "control.close", securityClass: "control", needs: ["intake"], enabled: true,
+      skills: [], inputs: [], outputs: [], gates: [], approval: false, authorizationRequired: false, steps: [],
+    },
+  ];
+  const current = projection({
+    stages: { intake: { status: "succeeded" }, close: { status: "ready" } },
+    contexts: {
+      intake: { workPackage: { attemptId: "attempt-intake" }, result: { status: "completed", artifacts: [source] } },
+    },
+  });
+  const input = {
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+    worktree,
+    source,
+  };
+
+  assert.equal((await closeChecklistForWorktree(input)).allowed, true);
+
+  await writeFile(path.join(worktree, source.path), "{}\n", "utf8");
+  assert.deepEqual((await closeChecklistForWorktree(input)).missing, [
+    { category: "artifact", id: "requirement-source" },
+  ]);
 });
 
 test("Close 不要求已跳过条件 Step 的 Artifact 或 Approval", () => {

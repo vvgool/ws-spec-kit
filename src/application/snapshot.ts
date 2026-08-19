@@ -122,10 +122,11 @@ function optionalExpression(source: Record<string, unknown>, key: string, label:
 }
 
 function parseArtifactReference(value: unknown, label: string): ArtifactReference {
-  const source = record(value, label, ["artifactType", "schemaVersion", "path", "revision", "contentHash", "mediaType", "contentLevel"]);
+  const source = record(value, label, ["artifactType", "schemaVersion", "artifactId", "path", "revision", "contentHash", "mediaType", "contentLevel"]);
   return {
     artifactType: text(source.artifactType, `${label}.artifactType`),
     schemaVersion: integer(source.schemaVersion, `${label}.schemaVersion`, 1),
+    ...(source.artifactId === undefined ? {} : { artifactId: text(source.artifactId, `${label}.artifactId`) }),
     ...(source.path === undefined ? {} : { path: text(source.path, `${label}.path`) }),
     ...(source.revision === undefined ? {} : { revision: integer(source.revision, `${label}.revision`, 1) }),
     ...(source.contentHash === undefined ? {} : { contentHash: digest(source.contentHash, `${label}.contentHash`) }),

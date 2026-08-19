@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 
 import { initializeControlPlane, readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
+import { sha256 } from "../../src/domain/digests.js";
 import { ControlPlaneError, transitionRuntime } from "../../src/engine/scheduler.js";
 import { initRepository } from "../../src/storage/repository.js";
 import { createWorkItem } from "../../src/storage/work-items.js";
@@ -209,4 +211,40 @@ test("recovery rebuilds a damaged projection from immutable metadata and the com
   const recovered = await recoverControlPlane({ cwd: fixture.worktree, workItemId: fixture.workItemId });
   assert.equal(recovered.workItem.status, "active");
   assert.equal(recovered.lastSequence, 1);
+});
+
+test("recovery rejects a changed or schema-invalid requirement SourceArtifact", async () => {
+  const fixture = await prepare();
+  const manifest = parse(await readFile(path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, "work-item.yaml"), "utf8")) as {
+    source: { snapshot: string };
+  };
+  const sourcePath = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, manifest.source.snapshot);
+  await writeFile(sourcePath, "{}\n", "utf8");
+
+  await assert.rejects(
+    recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_SNAPSHOT_CHANGED"),
+  );
+});
+
+test("recovery authenticates the Work Item manifest before following its Source Artifact reference", async () => {
+  const fixture = await prepare();
+  const manifestPath = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, "work-item.yaml");
+  const manifest = await readFile(manifestPath, "utf8");
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  await writeFile(
+    path.join(projection.controlPlane, "application-anchor.json"),
+    `${JSON.stringify({ version: 1, workItemId: fixture.workItemId, manifestDigest: sha256(manifest), ownerToken: "trusted-owner" }, null, 2)}\n`,
+    "utf8",
+  );
+  await writeFile(
+    manifestPath,
+    manifest.replace(/snapshot: source\/[a-f0-9]{64}\.json/u, `snapshot: source/${"f".repeat(64)}.json`),
+    "utf8",
+  );
+
+  await assert.rejects(
+    recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId }),
+    (error: unknown) => hasCode(error, "WSSPEC_WORK_ITEM_MANIFEST_CHANGED"),
+  );
 });

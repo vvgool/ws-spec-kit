@@ -17,6 +17,7 @@ import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
 import { externalReceiptMatches } from "../domain/external-receipt.js";
+import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
 import type { ProjectGatePolicy } from "./compiler.js";
 import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
 
@@ -53,6 +54,7 @@ interface AttemptRecord {
     status?: string;
     artifacts?: Array<{
       artifactType?: string;
+      artifactId?: string;
       schemaVersion?: number;
       path?: string;
       revision?: number;
@@ -121,10 +123,11 @@ function completedArtifacts(instance: EffectiveStepInstance): NonNullable<NonNul
   return instance.context?.result?.status === "completed" ? instance.context.result.artifacts ?? [] : [];
 }
 
-type ApprovalArtifact = NonNullable<RuntimeApproval["artifacts"]>[number];
+type ApprovalArtifact = NonNullable<RuntimeApproval["artifacts"]>[number] & { artifactId?: string };
 
 function approvalArtifact(value: NonNullable<NonNullable<AttemptRecord["result"]>["artifacts"]>[number]): ApprovalArtifact | undefined {
   if (typeof value.artifactType !== "string"
+    || (value.artifactId !== undefined && typeof value.artifactId !== "string")
     || typeof value.schemaVersion !== "number"
     || typeof value.path !== "string"
     || typeof value.revision !== "number"
@@ -132,6 +135,7 @@ function approvalArtifact(value: NonNullable<NonNullable<AttemptRecord["result"]
     || (value.mediaType !== undefined && typeof value.mediaType !== "string")) return undefined;
   return {
     artifactType: value.artifactType,
+    ...(value.artifactId === undefined ? {} : { artifactId: value.artifactId }),
     schemaVersion: value.schemaVersion,
     path: value.path,
     revision: value.revision,
@@ -140,11 +144,27 @@ function approvalArtifact(value: NonNullable<NonNullable<AttemptRecord["result"]
   };
 }
 
+function requirementSourceReference(value: ApprovalArtifact): SourceArtifactReference | undefined {
+  if (value.artifactType !== "requirement-source" || value.schemaVersion !== 1
+    || typeof value.artifactId !== "string" || value.revision !== 1
+    || value.mediaType !== "application/json") return undefined;
+  return {
+    artifactType: "requirement-source",
+    schemaVersion: 1,
+    artifactId: value.artifactId,
+    path: value.path,
+    revision: 1,
+    contentHash: value.contentHash,
+    mediaType: "application/json",
+  };
+}
+
 function sameArtifacts(left: readonly ApprovalArtifact[], right: readonly ApprovalArtifact[]): boolean {
   return left.length === right.length && left.every((artifact, index) => {
     const candidate = right[index];
     return candidate !== undefined
       && artifact.artifactType === candidate.artifactType
+      && artifact.artifactId === candidate.artifactId
       && artifact.schemaVersion === candidate.schemaVersion
       && artifact.path === candidate.path
       && artifact.revision === candidate.revision
@@ -355,8 +375,14 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
         continue;
       }
       if (reference.artifactType === "requirement-source") {
-        if (sameValues(reference, input.source)) verified.push(reference);
-        else invalidRequiredTypes.add(reference.artifactType);
+        const source = requirementSourceReference(reference);
+        try {
+          if (source === undefined || !sameValues(source, input.source)) throw new Error("Source Artifact reference mismatch");
+          await verifySourceArtifact(input.worktree, input.projection.workItemId, source);
+          verified.push(reference);
+        } catch {
+          if (requiredTypes.has(reference.artifactType)) invalidRequiredTypes.add(reference.artifactType);
+        }
         continue;
       }
       try {

@@ -15,7 +15,7 @@ export class ApprovalError extends Error {
 export function approvalBindingDigest(input: {
   stageId: string;
   attemptId: string;
-  artifacts: readonly Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">[];
+  artifacts: readonly Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">[];
 }): string {
   if (input.artifacts.length === 1) return input.artifacts[0]!.contentHash;
   return sha256(JSON.stringify(input.artifacts.length === 0

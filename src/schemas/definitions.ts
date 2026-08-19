@@ -2,6 +2,7 @@ export const schemaIds = [
   "builtin.workflow-selection.v1",
   "builtin.application-project-config.v1",
   "builtin.application-project-config-snapshot.v1",
+  "builtin.source-artifact.v1",
   "builtin.work-item.v1",
   "builtin.application-start-input.v1",
   "builtin.application-acquire-input.v1",
@@ -105,6 +106,7 @@ const artifactReferenceSchema: JsonSchema = {
   required: ["artifactType", "schemaVersion"],
   properties: {
     artifactType: { type: "string", pattern: idPattern },
+    artifactId: { type: "string", minLength: 1, maxLength: 128 },
     schemaVersion: { type: "integer", minimum: 1 },
     path: { type: "string" },
     revision: { type: "integer", minimum: 1 },
@@ -112,6 +114,43 @@ const artifactReferenceSchema: JsonSchema = {
     mediaType: { type: "string" },
     contentLevel: { type: "string", minLength: 1 },
   },
+};
+
+const sourceMetadataSchema = (keys: string[]): JsonSchema => ({
+  type: "object",
+  additionalProperties: false,
+  maxProperties: 16,
+  properties: Object.fromEntries(keys.map((key) => [key, {
+    oneOf: [
+      { type: "string", minLength: 1, maxLength: 256 },
+      { type: "array", maxItems: 32, items: { type: "string", minLength: 1, maxLength: 256 } },
+    ],
+  }])),
+});
+
+const sourceArtifactSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "artifactType", "schemaVersion", "artifactId", "type", "stableId", "title", "body", "metadata", "contentDigest"],
+  properties: {
+    version: { const: 1 },
+    artifactType: { const: "requirement-source" },
+    schemaVersion: { const: 1 },
+    artifactId: { type: "string", pattern: "^source-[a-f0-9]{64}$" },
+    type: { enum: ["user.prompt", "local.file", "github.issue", "gitlab.issue", "feishu.document"] },
+    stableId: { type: "string", minLength: 1, maxLength: 512 },
+    canonicalUrl: { type: "string", format: "uri", maxLength: 2048 },
+    title: { type: "string", minLength: 1, maxLength: 512 },
+    body: { type: "string", minLength: 1, maxLength: 524288 },
+    updatedAt: { type: "string", format: "date-time" },
+    metadata: { type: "object" },
+    contentDigest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" },
+  },
+  allOf: [
+    { if: { properties: { type: { enum: ["user.prompt", "local.file"] } }, required: ["type"] }, then: { properties: { metadata: sourceMetadataSchema([]) } } },
+    { if: { properties: { type: { enum: ["github.issue", "gitlab.issue"] } }, required: ["type"] }, then: { properties: { metadata: sourceMetadataSchema(["assignees", "author", "labels", "repository", "state"]) } } },
+    { if: { properties: { type: { const: "feishu.document" } }, required: ["type"] }, then: { properties: { metadata: sourceMetadataSchema(["owner", "revision", "space"]) } } },
+  ],
 };
 
 const requirementSourceSchema: JsonSchema = {
@@ -339,6 +378,11 @@ export const schemas = {
   },
   "builtin.application-project-config.v1": applicationProjectConfigSchema("builtin.application-project-config.v1", false),
   "builtin.application-project-config-snapshot.v1": applicationProjectConfigSchema("builtin.application-project-config-snapshot.v1", true),
+  "builtin.source-artifact.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $id: "builtin.source-artifact.v1",
+    ...sourceArtifactSchema,
+  },
   "builtin.work-item.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "builtin.work-item.v1",
@@ -369,11 +413,13 @@ export const schemas = {
       source: {
         type: "object",
         additionalProperties: false,
-        required: ["type", "snapshot", "contentDigest"],
+        required: ["type", "artifactId", "snapshot", "contentDigest", "artifactDigest"],
         properties: {
-          type: { enum: ["prompt", "file", "issue"] },
+          type: { enum: ["user.prompt", "local.file", "github.issue", "gitlab.issue", "feishu.document"] },
+          artifactId: { type: "string", pattern: "^source-[a-f0-9]{64}$" },
           snapshot: { type: "string", minLength: 1 },
           contentDigest: { type: "string", pattern: digestPattern },
+          artifactDigest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$" },
         },
       },
       bindings: {

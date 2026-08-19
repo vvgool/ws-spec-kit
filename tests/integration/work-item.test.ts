@@ -56,15 +56,15 @@ test("creates an isolated Work Item with immutable prompt source and snapshots",
   const worktree = path.join(root, ".worktrees", workItem.workItemId);
   const itemRoot = path.join(worktree, ".wsspec", "work-items", workItem.workItemId);
   const manifest = parse(await readFile(path.join(itemRoot, "work-item.yaml"), "utf8")) as unknown;
-  const source = JSON.parse(await readFile(path.join(itemRoot, "source", "source.json"), "utf8")) as {
+  const source = JSON.parse(await readFile(path.join(itemRoot, workItem.source.snapshot), "utf8")) as {
     type: string;
-    content: { text: string };
+    body: string;
     contentDigest: string;
   };
 
   assert.deepEqual(validate("builtin.work-item.v1", manifest), manifest);
-  assert.equal(source.type, "prompt");
-  assert.equal(source.content.text, "实现支付重试");
+  assert.equal(source.type, "user.prompt");
+  assert.equal(source.body, "实现支付重试");
   assert.match(source.contentDigest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(await git(root, "worktree", "list", "--porcelain").then((value) => value.includes(worktree)), true);
   assert.equal(await git(root, "show-ref", "--verify", "refs/heads/wspec/WSS-20260816-001").then(() => true), true);
@@ -92,20 +92,11 @@ test("captures Markdown file content instead of retaining a mutable source path"
     source: { type: "file", path: "requirement.md" },
     createdAt: "2026-08-16T10:01:00+08:00",
   });
-  const snapshotPath = path.join(
-    root,
-    ".worktrees",
-    workItem.workItemId,
-    ".wsspec",
-    "work-items",
-    workItem.workItemId,
-    "source",
-    "source.json",
-  );
-  const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as { origin: string; content: { text: string } };
+  const snapshotPath = path.join(root, ".worktrees", workItem.workItemId, ".wsspec", "work-items", workItem.workItemId, workItem.source.snapshot);
+  const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as { stableId: string; body: string };
 
-  assert.equal(snapshot.origin, "requirement.md");
-  assert.match(snapshot.content.text, /Retry payment/);
+  assert.equal(snapshot.stableId, "requirement.md");
+  assert.match(snapshot.body, /Retry payment/);
 });
 
 test("baseline digest is measured from the created worktree when the caller is dirty", async (t) => {
@@ -195,7 +186,7 @@ test("file sources cannot escape the repository through a symlink", async () => 
       source: { type: "file", path: "linked.md" },
       createdAt: "2026-08-16T10:04:00+08:00",
     }),
-    (error: unknown) => error instanceof WorkItemError && error.code === "WSSPEC_SOURCE_PATH_INVALID",
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SOURCE_PATH_INVALID",
   );
 });
 

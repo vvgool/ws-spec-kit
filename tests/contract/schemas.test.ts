@@ -25,6 +25,18 @@ const validValues: Record<string, Record<string, unknown>> = {
     version: 1,
     skills: { additionalGlobalRoots: [{ id: "team-skills" }] },
   },
+  "builtin.source-artifact.v1": {
+    version: 1,
+    artifactType: "requirement-source",
+    schemaVersion: 1,
+    artifactId: `source-${"a".repeat(64)}`,
+    type: "local.file",
+    stableId: "requirements/source.md",
+    title: "Source",
+    body: "Requirement body",
+    metadata: {},
+    contentDigest: `sha256:${"b".repeat(64)}`,
+  },
   "builtin.work-item.v1": {
     version: 1,
     workItemId: "WSS-20260816-001",
@@ -41,7 +53,13 @@ const validValues: Record<string, Record<string, unknown>> = {
       configDigest: "sha256:config",
       schemaDigest: "sha256:schema",
     },
-    source: { type: "file", snapshot: "source/source.json", contentDigest: "sha256:source" },
+    source: {
+      type: "local.file",
+      artifactId: `source-${"a".repeat(64)}`,
+      snapshot: `source/${"a".repeat(64)}.json`,
+      contentDigest: "sha256:source",
+      artifactDigest: `sha256:${"a".repeat(64)}`,
+    },
     bindings: { issue: null, knowledge: null },
   },
   "builtin.application-start-input.v1": {

@@ -23,6 +23,7 @@ export interface DomainEvent {
     | "approval.decided"
     | "approval.expired"
     | "evidence.recorded"
+    | "source.captured"
     | "profile.selected"
     | "profile.upgraded"
     | "projection.invalidated"

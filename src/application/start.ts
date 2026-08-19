@@ -253,9 +253,10 @@ export async function startApplication(input: StartInput, dependencies: StartDep
     const sourceReference = {
       artifactType: "requirement-source",
       schemaVersion: 1,
-      path: `.wsspec/work-items/${workItemId}/source/source.json`,
+      artifactId: item.source.artifactId,
+      path: `.wsspec/work-items/${workItemId}/${item.source.snapshot}`,
       revision: 1,
-      contentHash: item.source.contentDigest,
+      contentHash: item.source.artifactDigest,
       mediaType: "application/json",
     } as const;
     const snapshot: ApplicationSnapshot = {
@@ -310,6 +311,19 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       initialWorkItem: { status: "active" },
       initialStages,
       initialProfile,
+    });
+    const sourceEventReference = {
+      artifactId: sourceReference.artifactId,
+      path: sourceReference.path,
+      digest: sourceReference.contentHash,
+    };
+    await mutateControlPlane({
+      cwd: identity.repositoryRoot,
+      workItemId,
+      eventType: "source.captured",
+      idempotencyKey: `source:captured:${item.source.artifactId}`,
+      operationInput: sourceEventReference,
+      mutate: (projection) => ({ projection, value: sourceEventReference }),
     });
     if (requestedProfile === "auto") {
       await mutateControlPlane({

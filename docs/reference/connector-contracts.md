@@ -4,7 +4,7 @@
 
 ## 1. 来源与 Provider 边界
 
-来源类型分为 `user.prompt`、`local.file`、`github.issue`、`gitlab.issue`、`feishu.document`。每个来源必须先规范化为不可变 Source Artifact，保留稳定身份、捕获时间、内容摘要和允许的元数据；Work Package 只引用 Artifact，不复制来源正文。
+来源类型分为 `user.prompt`、`local.file`、`github.issue`、`gitlab.issue`、`feishu.document`。每个来源必须先规范化为不可变 Source Artifact，保留稳定身份、可选来源更新时间、内容摘要和允许的元数据；Work Package 只引用 Artifact，不复制来源正文。
 
 ```json contract=normalized-requirement-source
 {
@@ -12,11 +12,11 @@
   "stableId": "prompt:local-01",
   "title": "补充登录说明",
   "body": "说明失败重试的行为。",
-  "metadata": { "channel": "local" }
+  "metadata": {}
 }
 ```
 
-Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日志、Artifact、Evidence 或错误中泄露 Cookie、Token、Keychain 内容或认证文件。当前不支持的来源类型返回 `WSSPEC_SOURCE_TYPE_UNSUPPORTED`；空来源或越界文件分别返回 `WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_PATH_INVALID`。
+Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日志、Artifact、Evidence 或错误中泄露 Cookie、Token、Keychain 内容或认证文件。Provider metadata 只能使用来源类型允许的字段，并拒绝 credential-like key/value；canonical URL 不能携带 userinfo、凭据 query 或凭据 fragment。当前不支持的来源类型返回 `WSSPEC_SOURCE_TYPE_UNSUPPORTED`；空来源、越界文件或超限来源分别返回 `WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`。
 
 ## 2. 审批与外部写入
 

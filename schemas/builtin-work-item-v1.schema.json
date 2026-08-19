@@ -97,16 +97,24 @@
       "additionalProperties": false,
       "required": [
         "type",
+        "artifactId",
         "snapshot",
-        "contentDigest"
+        "contentDigest",
+        "artifactDigest"
       ],
       "properties": {
         "type": {
           "enum": [
-            "prompt",
-            "file",
-            "issue"
+            "user.prompt",
+            "local.file",
+            "github.issue",
+            "gitlab.issue",
+            "feishu.document"
           ]
+        },
+        "artifactId": {
+          "type": "string",
+          "pattern": "^source-[a-f0-9]{64}$"
         },
         "snapshot": {
           "type": "string",
@@ -115,6 +123,10 @@
         "contentDigest": {
           "type": "string",
           "pattern": "^sha256:.+$"
+        },
+        "artifactDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
         }
       }
     },

@@ -3,6 +3,7 @@ import type { WorkItemId } from "../domain/ids.js";
 export interface ArtifactReference {
   artifactType: string;
   schemaVersion: number;
+  artifactId?: string;
   path?: string;
   revision?: number;
   contentHash?: string;

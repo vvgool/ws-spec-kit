@@ -247,16 +247,17 @@ test("start resolves explicit or active Workflow and persists a complete immutab
     skillLock: { skills: unknown[] };
     gatePolicy: { requiredGateIds: string[]; configuredGateIds: string[] };
     changePolicy: { kind: string; allowedPaths: string[] };
+    source: ArtifactReference;
   };
-  const source = JSON.parse(await readFile(path.join(itemRoot, "source", "source.json"), "utf8")) as { content: { text: string }; contentDigest: string };
+  const source = JSON.parse(await readFile(path.join(worktree, application.source.path!), "utf8")) as { body: string; contentDigest: string };
   assert.equal(application.workflowRef, "builtin://workflows/documentation-delivery");
   assert.deepEqual(Object.keys(application.profiles).sort(), ["governed", "quick", "standard"]);
   assert.match(application.workflowPackageLock.contentDigest, /^sha256:/);
   assert.ok(application.skillLock.skills.length > 0);
   assert.deepEqual(application.gatePolicy, { requiredGateIds: ["docs.integrity"], configuredGateIds: ["docs.integrity"] });
   assert.equal(application.changePolicy.kind, "documentation-only");
-  assert.equal(source.content.text, "只更新文档\n");
-  assert.equal(source.contentDigest, sha256(source.content.text));
+  assert.equal(source.body, "只更新文档\n");
+  assert.equal(source.contentDigest, sha256(source.body));
   await readFile(path.join(itemRoot, "snapshot", "config.yaml"), "utf8");
   await readFile(path.join(itemRoot, "snapshot", "schemas", "builtin-work-package-v1.schema.json"), "utf8");
   await readFile(path.join(itemRoot, "snapshot", "workflow", "manifest.yaml"), "utf8");
@@ -652,8 +653,9 @@ test("Work Item creation persists the exact pre-captured local source bytes", as
   const source = JSON.parse(await readFile(
     path.join(current.root, item.execution.worktree, ".wsspec", "work-items", item.workItemId, item.source.snapshot),
     "utf8",
-  )) as { content: { text: string }; contentDigest: string };
-  assert.equal(source.content.text, "original requirement\n");
+  )) as { title: string; body: string; contentDigest: string };
+  assert.equal(source.title, "original requirement");
+  assert.equal(source.body, "original requirement\n");
   assert.equal(source.contentDigest, captured.contentDigest);
 });
 
@@ -1479,4 +1481,52 @@ test("explicit recovery rebuilds a terminal control.close archive before read-on
   assert.equal(inspected.status, "closed");
   const worktree = await worktreeFor(current.root, started.workItemId);
   await access(path.join(worktree, ".wsspec", "archive", started.workItemId, "audit.json"));
+});
+
+test("start persists a content-addressed source reference and records no source payload in events", async () => {
+  const current = await fixture();
+  const body = "EVENT_MUST_NOT_CONTAIN_THIS_REQUIREMENT_BODY";
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: body }, profile: "standard" });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const application = JSON.parse(await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8")) as {
+    source: ArtifactReference & { artifactId: string };
+  };
+
+  assert.match(application.source.artifactId, /^source-[a-f0-9]{64}$/u);
+  assert.match(application.source.path ?? "", new RegExp(`^\\.wsspec/work-items/${started.workItemId}/source/[a-f0-9]{64}\\.json$`, "u"));
+  const source = JSON.parse(await readFile(path.join(worktree, application.source.path!), "utf8")) as { artifactId: string; body: string };
+  assert.equal(source.artifactId, application.source.artifactId);
+  assert.equal(source.body, body);
+
+  const projection = await readControlPlane(current.root, started.workItemId);
+  const eventText = await readFile(path.join(projection.controlPlane, "events.jsonl"), "utf8");
+  const events = eventText.trimEnd().split("\n").map((line) => JSON.parse(line) as {
+    eventType: string;
+    result: { value?: Record<string, unknown> };
+  });
+  assert.equal(events[0]?.eventType, "source.captured");
+  assert.deepEqual(Object.keys(events[0]?.result.value ?? {}).sort(), ["artifactId", "digest", "path"]);
+  assert.doesNotMatch(eventText, new RegExp(body, "u"));
+  assert.doesNotMatch(eventText, /"body"|"metadata"/u);
+
+  const workPackage = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  assert.deepEqual(workPackage.artifacts, [application.source]);
+  assert.equal("body" in workPackage.artifacts[0]!, false);
+});
+
+test("WorkPackage omits the source reference when the Step does not declare requirement-source input", async () => {
+  const current = await fixture();
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "Private source" }, profile: "standard" });
+  await rewriteApplicationSnapshot(current, started.workItemId, (snapshot) => {
+    const selectedProfile = snapshot.selectedProfile as string;
+    const profiles = snapshot.profiles as Record<string, { steps: Array<{ id: string; inputs: unknown[] }> }>;
+    const intake = profiles[selectedProfile]!.steps.find(({ id }) => id === "intake")!;
+    intake.inputs = [];
+  });
+
+  const workPackage = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+
+  assert.deepEqual(workPackage.artifacts, []);
+  assert.equal(JSON.stringify(workPackage).includes("Private source"), false);
 });

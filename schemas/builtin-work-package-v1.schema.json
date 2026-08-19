@@ -104,6 +104,11 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,62}$"
           },
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "schemaVersion": {
             "type": "integer",
             "minimum": 1
@@ -166,6 +171,11 @@
           "artifactType": {
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
           },
           "schemaVersion": {
             "type": "integer",
