@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ProcessJsonError, spawnJson } from "../../src/adapters/process/spawn-json.js";
+import { ProcessJsonError, spawnJson, spawnParsedText } from "../../src/adapters/process/spawn-json.js";
 
 const nodeScriptPrefix = ["--input-type=module", "-e"] as const;
 
@@ -265,6 +265,25 @@ test("nonzero, signal, and invalid JSON failures clean same-group descendants", 
       await rm(marker, { force: true });
     });
   }
+});
+
+test("spawnParsedText cleans same-group descendants when its parser throws", async () => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
+  const marker = path.join(os.tmpdir(), `wspec-parser-survivor-${crypto.randomUUID()}`);
+  const descendant = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'survived'),300)`;
+  const script = [
+    "const {spawn}=await import('node:child_process')",
+    `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref()`,
+    "process.stdout.write('parse-me')",
+  ].join(";");
+
+  await assert.rejects(
+    spawnParsedText(request(script), () => { throw new Error("parser rejected output"); }),
+    /parser rejected output/u,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await assert.rejects(access(marker), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  await rm(marker, { force: true });
 });
 
 test("cleanup deadline fails closed with a dedicated sanitized error", { concurrency: false }, async () => {

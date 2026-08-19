@@ -3,6 +3,7 @@ export type ConnectorExecutable = "git" | "gh" | "glab" | "lark-cli";
 export type ConnectorEnvironmentKey = "HOME" | "XDG_CONFIG_HOME" | "GH_CONFIG_DIR" | "GLAB_CONFIG_DIR" | "LARK_CONFIG_DIR";
 
 export type DoctorVersionParser = { kind: "text-semver" };
+export type DoctorAuthUnavailableReasonCode = "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE";
 
 export interface DoctorVersionProbe {
   kind: "version";
@@ -12,6 +13,7 @@ export interface DoctorVersionProbe {
 
 export type DoctorAuthProbe =
   | { kind: "none" }
+  | { kind: "unavailable"; reasonCode: DoctorAuthUnavailableReasonCode }
   | {
       kind: "auth";
       argv: readonly string[];

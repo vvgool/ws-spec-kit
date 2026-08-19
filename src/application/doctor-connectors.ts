@@ -1,7 +1,14 @@
-import { ProcessJsonError, spawnParsedText, spawnText } from "../adapters/process/spawn-json.js";
+import { ProcessJsonError, spawnParsedText } from "../adapters/process/spawn-json.js";
 import { defineConnectorManifest } from "../registry/connectors/manifest.js";
 import { compareSemVer, extractSemVer, parseSemVer } from "../registry/connectors/semver.js";
-import type { ConnectorEnvironmentKey, ConnectorExecutable, ConnectorManifest, DoctorAuthProbe, DoctorVersionProbe } from "../registry/connectors/types.js";
+import type {
+  ConnectorEnvironmentKey,
+  ConnectorExecutable,
+  ConnectorManifest,
+  DoctorAuthProbe,
+  DoctorAuthUnavailableReasonCode,
+  DoctorVersionProbe,
+} from "../registry/connectors/types.js";
 
 export type ConnectorHealthStatus = "available" | "unauthenticated" | "unsupported_version" | "missing_binary";
 
@@ -9,6 +16,7 @@ export interface ConnectorHealth {
   provider: string;
   status: ConnectorHealthStatus;
   version?: string;
+  reasonCode?: DoctorAuthUnavailableReasonCode;
   diagnostic?: string;
 }
 
@@ -18,9 +26,21 @@ export interface DoctorConnectorsInput {
   locateExecutable(executable: ConnectorExecutable): Promise<string | undefined>;
 }
 
-async function probeVersion(executable: string, probe: DoctorVersionProbe, manifest: ConnectorManifest, environment: SpawnEnvironment): Promise<string | undefined> {
+interface VersionProbeResult {
+  version?: string;
+  supported: boolean;
+}
+
+async function probeVersion(executable: string, probe: DoctorVersionProbe, manifest: ConnectorManifest, environment: SpawnEnvironment): Promise<VersionProbeResult> {
   const request = { executable, argv: probe.argv, input: { operation: "version" }, timeoutMs: manifest.timeoutMs, maxStdoutBytes: manifest.maxStdoutBytes, environment };
-  return (await spawnParsedText(request, (value) => extractSemVer(value)?.source)).value;
+  return (await spawnParsedText(request, (value) => {
+    const actual = extractSemVer(value);
+    const minimum = parseSemVer(manifest.minimumVersion);
+    return {
+      ...(actual === undefined ? {} : { version: actual.source }),
+      supported: actual !== undefined && minimum !== undefined && compareSemVer(actual, minimum) >= 0,
+    };
+  })).value;
 }
 
 type SpawnEnvironment = Readonly<Record<string, string | undefined>>;
@@ -32,10 +52,10 @@ function providerEnvironment(manifest: ConnectorManifest, environment: DoctorCon
   }));
 }
 
-async function probeAuth(executable: string, probe: Exclude<DoctorAuthProbe, { kind: "none" }>, manifest: ConnectorManifest, environment: SpawnEnvironment): Promise<boolean> {
+async function probeAuth(executable: string, probe: Extract<DoctorAuthProbe, { kind: "auth" }>, manifest: ConnectorManifest, environment: SpawnEnvironment): Promise<boolean> {
   const request = { executable, argv: probe.argv, input: { operation: "auth" }, timeoutMs: manifest.timeoutMs, maxStdoutBytes: manifest.maxStdoutBytes, environment };
   let exitCode = 0;
-  try { await spawnText(request); }
+  try { await spawnParsedText(request, (value) => value); }
   catch (error) {
     if (!(error instanceof ProcessJsonError) || error.code !== "WSSPEC_PROCESS_EXIT_NONZERO" || error.exitCode === undefined) throw error;
     exitCode = error.exitCode;
@@ -66,21 +86,29 @@ export async function doctorConnectors(input: DoctorConnectorsInput): Promise<Co
       continue;
     }
     const environment = providerEnvironment(manifest, input.environment);
-    let version: string | undefined;
-    try { version = await probeVersion(executable, manifest.doctor.version, manifest, environment); }
+    let versionResult: VersionProbeResult;
+    try { versionResult = await probeVersion(executable, manifest.doctor.version, manifest, environment); }
     catch {
       health.push({ provider: manifest.id, status: "unsupported_version", diagnostic: "Version probe failed." });
       continue;
     }
-    const actual = version === undefined ? undefined : parseSemVer(version);
-    const minimum = parseSemVer(manifest.minimumVersion);
-    if (actual === undefined || minimum === undefined || compareSemVer(actual, minimum) < 0) {
-      health.push({ provider: manifest.id, status: "unsupported_version", ...(version === undefined ? {} : { version }) });
+    if (!versionResult.supported) {
+      health.push({ provider: manifest.id, status: "unsupported_version", ...(versionResult.version === undefined ? {} : { version: versionResult.version }) });
       continue;
     }
-    const supportedVersion = actual.source;
+    const supportedVersion = versionResult.version!;
     if (manifest.doctor.auth.kind === "none") {
       health.push({ provider: manifest.id, status: "available", version: supportedVersion });
+      continue;
+    }
+    if (manifest.doctor.auth.kind === "unavailable") {
+      health.push({
+        provider: manifest.id,
+        status: "unauthenticated",
+        version: supportedVersion,
+        reasonCode: manifest.doctor.auth.reasonCode,
+        diagnostic: "Authentication probe unavailable in side-effect-free Doctor.",
+      });
       continue;
     }
     try {

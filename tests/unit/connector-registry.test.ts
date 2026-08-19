@@ -96,7 +96,7 @@ test("Manifest validates the complete runtime shape with one stable error code",
   }
 });
 
-test("local git may explicitly omit auth while external providers require a probe", () => {
+test("local git uses no auth while external providers require a probe or explicit unavailability", () => {
   const local = {
     ...manifest("local-git", ["repository.read"]),
     executable: "git",
@@ -107,6 +107,21 @@ test("local git may explicitly omit auth while external providers require a prob
   } as ConnectorManifest;
 
   assert.equal(defineConnectorManifest(local).doctor.auth.kind, "none");
+
+  const unavailable = {
+    ...manifest("github-unavailable", ["issue.read"]),
+    doctor: {
+      ...manifest("github-unavailable", ["issue.read"]).doctor,
+      auth: { kind: "unavailable", reasonCode: "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE" },
+    },
+  };
+  assert.deepEqual(defineConnectorManifest(unavailable).doctor.auth, unavailable.doctor.auth);
+
+  for (const invalid of [
+    { ...manifest("github-none", ["issue.read"]), doctor: { ...manifest("github-none", ["issue.read"]).doctor, auth: { kind: "none" } } },
+    { ...local, doctor: { ...local.doctor, auth: { kind: "unavailable", reasonCode: "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE" } } },
+    { ...unavailable, doctor: { ...unavailable.doctor, auth: { kind: "unavailable", reasonCode: "UNKNOWN" } } },
+  ]) assert.throws(() => defineConnectorManifest(invalid), ConnectorManifestError);
 });
 
 test("Manifest uses strict SemVer validation for minimum versions", () => {
@@ -121,24 +136,26 @@ test("Manifest uses strict SemVer validation for minimum versions", () => {
   }
 });
 
-test("Manifest locks Doctor authentication probes to current read-only CLI contracts", () => {
+test("Manifest makes lark auth explicitly unavailable and locks executable-specific contracts", () => {
   const lark = {
     ...manifest("lark", ["document.read"]),
     executable: "lark-cli",
     doctor: {
       version: { kind: "version", argv: ["--version"], parser: { kind: "text-semver" } },
-      auth: {
-        kind: "auth",
-        argv: ["auth", "status", "--verify"],
-        parser: { kind: "exit-code" },
-        outcomes: { authenticated: [0], unauthenticated: [1] },
-      },
+      auth: { kind: "unavailable", reasonCode: "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE" },
     },
-  } as ConnectorManifest;
+  };
   assert.deepEqual(defineConnectorManifest(lark).doctor.auth, lark.doctor.auth);
 
-  const deviations: ConnectorManifest[] = [
-    { ...lark, doctor: { ...lark.doctor, auth: { ...lark.doctor.auth, argv: ["auth", "status", "--json"] } } } as ConnectorManifest,
+  const deviations: unknown[] = [
+    {
+      ...lark,
+      doctor: {
+        ...lark.doctor,
+        auth: { kind: "auth", argv: ["auth", "status", "--verify"], parser: { kind: "exit-code" }, outcomes: { authenticated: [0], unauthenticated: [1] } },
+      },
+    },
+    { ...lark, doctor: { ...lark.doctor, auth: { kind: "none" } } },
     { ...manifest("github", ["issue.read"]), doctor: { ...manifest("github", ["issue.read"]).doctor, auth: { ...manifest("github", ["issue.read"]).doctor.auth, argv: ["auth", "status"] } } } as ConnectorManifest,
     {
       ...manifest("gitlab", ["issue.read"]),

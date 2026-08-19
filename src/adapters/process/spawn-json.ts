@@ -40,7 +40,7 @@ export interface ProcessTextResult {
 }
 
 export interface ParsedProcessTextResult<T> {
-  value: T | undefined;
+  value: T;
   exitCode: 0;
   stdout: string;
   stderr: string;
@@ -370,12 +370,12 @@ export async function spawnText(request: SpawnJsonRequest): Promise<ProcessTextR
 
 export async function spawnParsedText<T>(
   request: SpawnJsonRequest,
-  parse: (value: string) => T | undefined,
+  parse: (value: string) => T,
 ): Promise<ParsedProcessTextResult<T>> {
   const result = await runProcess(request);
   try {
     const value = parse(result.stdout);
-    if (value === undefined) await result.cleanupFailure();
+    await result.cleanupFailure();
     return { value, exitCode: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
     await result.cleanupFailure();

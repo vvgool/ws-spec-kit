@@ -17,7 +17,7 @@ const auditedDoctorArgv: Record<ConnectorExecutable, { version: readonly string[
   git: { version: ["--version"] },
   gh: { version: ["--version"], auth: ["auth", "status", "--active"] },
   glab: { version: ["--version"], auth: ["auth", "status"] },
-  "lark-cli": { version: ["--version"], auth: ["auth", "status", "--verify"] },
+  "lark-cli": { version: ["--version"] },
 };
 
 export class ConnectorManifestError extends Error {
@@ -68,6 +68,7 @@ function exitCodeOutcomes(value: unknown): { authenticated: readonly number[]; u
 
 function freezeAuth(probe: DoctorAuthProbe): DoctorAuthProbe {
   if (probe.kind === "none") return Object.freeze({ kind: "none" });
+  if (probe.kind === "unavailable") return Object.freeze({ kind: "unavailable", reasonCode: probe.reasonCode });
   return Object.freeze({
     kind: "auth",
     argv: Object.freeze([...probe.argv]),
@@ -95,6 +96,13 @@ function authProbe(value: unknown, executable: ConnectorExecutable): DoctorAuthP
     if (source.kind !== "none") return invalid();
     return { kind: "none" };
   }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).kind === "unavailable") {
+    const source = record(value, ["kind", "reasonCode"]);
+    if (source.reasonCode !== "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE") return invalid();
+    return { kind: "unavailable", reasonCode: "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE" };
+  }
+  if (executable === "lark-cli") return invalid();
   const source = record(value, ["argv", "kind", "outcomes", "parser"]);
   if (source.kind !== "auth") return invalid();
   const parts = argv(source.argv);
@@ -103,7 +111,7 @@ function authProbe(value: unknown, executable: ConnectorExecutable): DoctorAuthP
   const parser = source.parser as Record<string, unknown> | undefined;
   if (parser?.kind === "exit-code" && Object.keys(parser).length === 1) {
     const outcomes = exitCodeOutcomes(source.outcomes);
-    if ((executable !== "gh" && executable !== "glab" && executable !== "lark-cli")
+    if ((executable !== "gh" && executable !== "glab")
       || !sameNumbers(outcomes.authenticated, [0]) || !sameNumbers(outcomes.unauthenticated, [1])) return invalid();
     return {
       kind: "auth",
