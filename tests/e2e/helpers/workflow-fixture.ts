@@ -541,8 +541,8 @@ export async function executeFeatureWorkflow(
     for (const type of required) {
       if (["red-evidence", "tdd-evidence"].includes(type)) continue;
       if (type === "requirement-source") {
-        const source = pkg.requiredOutputs.find(({ artifactType }) => artifactType === type);
-        assert.ok(source);
+        const source = pkg.artifacts.find(({ artifactType }) => artifactType === type);
+        assert.ok(source, "requirement-source output requires an authorized input Artifact");
         refs.push(source);
         continue;
       }
@@ -720,8 +720,8 @@ export async function executeDocumentationWorkflow(
     }
     for (const { artifactType } of pkg.requiredOutputs) {
       if (artifactType === "requirement-source") {
-        const source = pkg.requiredOutputs.find(({ artifactType: type }) => type === artifactType);
-        assert.ok(source);
+        const source = pkg.artifacts.find(({ artifactType: type }) => type === artifactType);
+        assert.ok(source, "requirement-source output requires an authorized input Artifact");
         refs.push(source);
       } else {
         refs.push(await writeArtifact(worktree, pkg, artifactType, true));

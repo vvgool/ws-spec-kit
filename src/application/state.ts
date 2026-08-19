@@ -4,7 +4,7 @@ import { parse } from "yaml";
 
 import { sha256 } from "../domain/digests.js";
 import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
-import { readApplicationAnchor, readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
+import { readApplicationAnchor, readCapturedSourceReference, readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
 import type { WorkItem } from "../storage/work-items.js";
 import { parseApplicationSnapshot, type ApplicationSnapshot, type SnapshotProfile } from "./snapshot.js";
 
@@ -113,7 +113,9 @@ export async function loadApplicationState(root: string, workItemId: string): Pr
     changePolicy: snapshot.profiles[projection.profile.selected].changePolicy,
   };
   const sourceReference = snapshot.source as SourceArtifactReference;
-  if (sourceReference.artifactId !== item.source.artifactId
+  const capturedSourceReference = await readCapturedSourceReference(root, workItemId);
+  if (JSON.stringify(sourceReference) !== JSON.stringify(capturedSourceReference)
+    || sourceReference.artifactId !== item.source.artifactId
     || sourceReference.path !== `.wsspec/work-items/${workItemId}/${item.source.snapshot}`
     || sourceReference.contentHash !== item.source.artifactDigest) {
     throw new ApplicationStateError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "不可变需求来源快照已变化。 ");

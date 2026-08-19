@@ -72,13 +72,17 @@ async function rewriteApplicationSnapshot(
   return { controlPlane: projection.controlPlane, snapshot };
 }
 
-function completedResult(workPackage: WorkPackage, artifacts = workPackage.requiredOutputs): SubmitResult {
+function completedResult(workPackage: WorkPackage, artifacts?: ArtifactReference[]): SubmitResult {
+  const resultArtifacts = artifacts ?? workPackage.requiredOutputs.map((output) => {
+    if (output.artifactType !== "requirement-source") return output;
+    return workPackage.artifacts.find((artifact) => artifact.artifactType === "requirement-source") ?? output;
+  });
   return {
     version: 1,
     status: "completed",
     summary: `${workPackage.stepId} completed`,
     modifiedFiles: [],
-    artifacts,
+    artifacts: resultArtifacts,
     commands: [],
     evidence: [],
     externalWrites: [],
@@ -1024,7 +1028,7 @@ test("recovery cannot downgrade an anchored Application Work Item to a legacy Wo
 
   await assert.rejects(
     recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
-    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_APPLICATION_SNAPSHOT_CHANGED",
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_SOURCE_SNAPSHOT_CHANGED",
   );
 });
 
@@ -1135,7 +1139,7 @@ test("submit rejects Artifacts not declared by the Step output contract", async 
   });
 
   await assert.rejects(
-    submitPackage(current, intake, completedResult(intake, [...intake.requiredOutputs, injected])),
+    submitPackage(current, intake, completedResult(intake, [...completedResult(intake).artifacts, injected])),
     (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_UNDECLARED_ARTIFACT",
   );
 });
@@ -1528,5 +1532,6 @@ test("WorkPackage omits the source reference when the Step does not declare requ
   const workPackage = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
 
   assert.deepEqual(workPackage.artifacts, []);
+  assert.deepEqual(workPackage.requiredOutputs, [{ artifactType: "requirement-source", schemaVersion: 1 }]);
   assert.equal(JSON.stringify(workPackage).includes("Private source"), false);
 });

@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import path from "node:path";
 
@@ -27,13 +27,15 @@ function fail(code: `WSSPEC_${string}`, message: string): never {
 }
 
 function sameIdentity(
-  left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>,
-  right: typeof left,
+  left: BigIntStats,
+  right: BigIntStats,
 ): boolean {
   return left.dev === right.dev
     && left.ino === right.ino
     && left.size === right.size
-    && left.mtimeMs === right.mtimeMs;
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.nlink === right.nlink;
 }
 
 function boundedText(text: string): string {
@@ -58,7 +60,7 @@ export function canonicalRequirementText(text: string): string {
   return boundedText(text);
 }
 
-function canonicalRelativePath(candidate: string): string {
+function canonicalRelativePath(candidate: string): { accessPath: string; stablePath: string } {
   if (candidate === "" || path.isAbsolute(candidate) || candidate.includes("\\")
     || path.posix.normalize(candidate) !== candidate
     || candidate.split("/").some((part) => part === "" || part === "." || part === "..")) {
@@ -67,7 +69,12 @@ function canonicalRelativePath(candidate: string): string {
   if (![".md", ".txt"].includes(path.posix.extname(candidate))) {
     return fail("WSSPEC_SOURCE_TYPE_UNSUPPORTED", "只支持仓库内 .md 或 .txt 需求文件。");
   }
-  return candidate;
+  return { accessPath: candidate, stablePath: candidate.normalize("NFC") };
+}
+
+function contained(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
 async function assertNoSymlinkComponents(root: string, relative: string): Promise<string> {
@@ -95,9 +102,10 @@ async function assertNoSymlinkComponents(root: string, relative: string): Promis
 export async function readLocalRequirementFile(repositoryRoot: string, candidate: string): Promise<{ path: string; text: string }> {
   const relative = canonicalRelativePath(candidate);
   const root = await realpath(repositoryRoot);
-  const filename = await assertNoSymlinkComponents(root, relative);
+  const filename = await assertNoSymlinkComponents(root, relative.accessPath);
   const before = await lstat(filename, { bigint: true });
   if (!before.isFile()) return fail("WSSPEC_SOURCE_NOT_REGULAR_FILE", "需求来源必须是普通文件。");
+  if (before.nlink !== 1n) return fail("WSSPEC_SOURCE_PATH_INVALID", "需求来源必须只有一个文件名链接。");
   if (before.size > BigInt(MAX_REQUIREMENT_BYTES)) {
     return fail("WSSPEC_SOURCE_TOO_LARGE", "需求来源超过 1 MiB 字节上限。");
   }
@@ -114,10 +122,11 @@ export async function readLocalRequirementFile(repositoryRoot: string, candidate
   try {
     const opened = await handle.stat({ bigint: true });
     if (!opened.isFile()) return fail("WSSPEC_SOURCE_NOT_REGULAR_FILE", "需求来源必须是普通文件。");
+    if (opened.nlink !== 1n) return fail("WSSPEC_SOURCE_CHANGED_DURING_READ", "需求文件链接数在打开期间发生变化。");
     if (!sameIdentity(before, opened)) return fail("WSSPEC_SOURCE_CHANGED_DURING_READ", "需求文件在打开期间被替换。");
     const openedPath = await realpath(filename);
     const openedPathTarget = await lstat(openedPath, { bigint: true });
-    if (openedPath !== filename || !sameIdentity(opened, openedPathTarget)) {
+    if (!contained(root, openedPath) || !sameIdentity(opened, openedPathTarget)) {
       return fail("WSSPEC_SOURCE_PATH_INVALID", "需求文件打开后的真实路径或身份不匹配。");
     }
     if (opened.size > BigInt(MAX_REQUIREMENT_BYTES)) {
@@ -137,13 +146,13 @@ export async function readLocalRequirementFile(repositoryRoot: string, candidate
       if (total > MAX_REQUIREMENT_BYTES) return fail("WSSPEC_SOURCE_TOO_LARGE", "需求来源超过 1 MiB 字节上限。");
     }
     const after = await handle.stat({ bigint: true });
-    if (!sameIdentity(opened, after) || BigInt(total) !== opened.size) {
+    if (after.nlink !== 1n || !sameIdentity(opened, after) || BigInt(total) !== opened.size) {
       return fail("WSSPEC_SOURCE_CHANGED_DURING_READ", "需求文件在读取期间发生变化。");
     }
     try {
       const finalPath = await realpath(filename);
       const finalTarget = await lstat(finalPath, { bigint: true });
-      if (finalPath !== filename || !sameIdentity(after, finalTarget)) {
+      if (!contained(root, finalPath) || !sameIdentity(after, finalTarget)) {
         return fail("WSSPEC_SOURCE_CHANGED_DURING_READ", "需求文件路径在读取期间被替换。");
       }
     } catch (error) {
@@ -156,7 +165,7 @@ export async function readLocalRequirementFile(repositoryRoot: string, candidate
     } catch {
       return fail("WSSPEC_SOURCE_BINARY", "需求来源不是严格 UTF-8 文本。");
     }
-    return { path: relative, text: boundedText(decoded) };
+    return { path: relative.stablePath, text: boundedText(decoded) };
   } finally {
     await handle.close();
   }

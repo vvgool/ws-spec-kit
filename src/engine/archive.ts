@@ -19,7 +19,7 @@ import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
 import { externalReceiptMatches } from "../domain/external-receipt.js";
 import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
 import type { ProjectGatePolicy } from "./compiler.js";
-import type { RuntimeApproval, RuntimeProjection } from "../storage/control-plane.js";
+import { readCapturedSourceReferenceFromControlPlane, type RuntimeApproval, type RuntimeProjection } from "../storage/control-plane.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
@@ -355,6 +355,12 @@ function sameArtifactReference(actual: ArtifactReference, expected: ApprovalArti
 
 async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInput): Promise<RuntimeProjection> {
   const contexts = { ...input.projection.contexts };
+  let capturedSource: SourceArtifactReference | undefined;
+  try {
+    capturedSource = await readCapturedSourceReferenceFromControlPlane(input.projection.controlPlane, input.projection.workItemId);
+  } catch {
+    capturedSource = undefined;
+  }
   for (const instance of effectiveStepInstances(input.profile, input.projection)) {
     const attempt = instance.context;
     if (attempt?.result?.status !== "completed" || typeof attempt.workPackage?.attemptId !== "string") continue;
@@ -377,7 +383,10 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
       if (reference.artifactType === "requirement-source") {
         const source = requirementSourceReference(reference);
         try {
-          if (source === undefined || !sameValues(source, input.source)) throw new Error("Source Artifact reference mismatch");
+          if (source === undefined || capturedSource === undefined
+            || !sameValues(source, input.source) || !sameValues(source, capturedSource)) {
+            throw new Error("Source Artifact reference mismatch");
+          }
           await verifySourceArtifact(input.worktree, input.projection.workItemId, source);
           verified.push(reference);
         } catch {

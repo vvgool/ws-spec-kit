@@ -116,6 +116,17 @@ const artifactReferenceSchema: JsonSchema = {
   },
 };
 
+const artifactExpectationSchema: JsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["artifactType", "schemaVersion"],
+  properties: {
+    artifactType: { type: "string", pattern: idPattern },
+    schemaVersion: { type: "integer", minimum: 1 },
+    contentLevel: { type: "string", minLength: 1 },
+  },
+};
+
 const sourceMetadataSchema = (keys: string[]): JsonSchema => ({
   type: "object",
   additionalProperties: false,
@@ -220,7 +231,7 @@ const workPackageSchema: JsonSchema = {
       type: "object", additionalProperties: false, required: ["allowedPaths", "forbiddenActions"],
       properties: { allowedPaths: stringArray, forbiddenActions: stringArray },
     },
-    requiredOutputs: { type: "array", items: artifactReferenceSchema },
+    requiredOutputs: { type: "array", items: artifactExpectationSchema },
     gates: {
       type: "array",
       items: {

@@ -16,7 +16,13 @@
 }
 ```
 
-Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日志、Artifact、Evidence 或错误中泄露 Cookie、Token、Keychain 内容或认证文件。Provider metadata 只能使用来源类型允许的字段，并拒绝 credential-like key/value；canonical URL 不能携带 userinfo、凭据 query 或凭据 fragment。当前不支持的来源类型返回 `WSSPEC_SOURCE_TYPE_UNSUPPORTED`；空来源、越界文件或超限来源分别返回 `WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`。
+Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日志、Artifact、Evidence 或错误中泄露 Cookie、Token、Keychain 内容或认证文件。Provider metadata 只能使用来源类型允许的字段，并通过统一 secret detector 拒绝 credential-like key/value；canonical URL 不能携带 userinfo、凭据 query 或凭据 fragment。拒绝消息不得回显攻击者提供的 metadata key/value。当前不支持的来源类型返回 `WSSPEC_SOURCE_TYPE_UNSUPPORTED`；空来源、越界文件或超限来源分别返回 `WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`。
+
+Artifact 根目录必须位于当前 repository/worktree 内，根本身不能是 symlink，并且根及按需创建的每个目录组件都必须由当前 UID 拥有且不可由 group/world 写入。Source 与 Artifact 文件在路径检查、打开的 FD、读取后路径复检之间绑定 `dev`、`ino`、`size`、`mtimeNs`、`ctimeNs` 和 `nlink`；只接受单链接普通文件，拒绝预置或读取期间出现的 hardlink。新目录和 no-clobber Artifact 在落盘后还要重新验证身份与最终字节。
+
+这些检查是 fail-closed 的宿主文件系统加固，不是对竞态消除的承诺。Node.js 当前没有可用于本实现的 dirfd-relative `openat`/`linkat` 接口，因此无法把逐组件检查、创建和最终打开合并成同一个内核级目录句柄操作；能够在检查间隙替换当前 UID 所拥有路径的同 UID 主体仍属于宿主信任边界。部署必须依赖受信账户、不可被其他主体写入的 repository/worktree 及其父目录，不能把本契约描述为对恶意同 UID 进程 race-free。
+
+Work Package 的 `requiredOutputs` 只是输出期望，不是 Artifact capability。只有 `artifacts` 中由输入解析得到的完整引用授权 Agent 读取现有 Source；仅声明 `requirement-source` output 不得暴露其 ID、路径或摘要。Source 恢复还要求 `application-anchor.json`、Application Snapshot 与唯一 `source.captured` 事件一致；旧版无该可信链的 Work Item 不兼容、不迁移，并以 `WSSPEC_SOURCE_SNAPSHOT_CHANGED` 失败关闭。
 
 ## 2. 审批与外部写入
 

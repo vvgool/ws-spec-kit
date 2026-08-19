@@ -215,7 +215,6 @@ function workPackageFor(input: {
 }): WorkPackage {
   const gatesById = new Map(input.snapshot.gates.map((gate) => [gate.id, gate]));
   const requiredOutputs = input.step.outputs.filter((output) => output.required).map((output) => {
-    if (output.artifact === "requirement-source") return input.snapshot.source;
     return {
       artifactType: output.artifact,
       schemaVersion: 1,

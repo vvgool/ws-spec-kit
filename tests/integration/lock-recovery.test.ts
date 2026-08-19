@@ -4,10 +4,10 @@ import { hostname } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createApplication } from "../../src/application/application.js";
 import { transitionRuntime } from "../../src/engine/scheduler.js";
-import { initializeControlPlane, readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
+import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
 import { initRepository } from "../../src/storage/repository.js";
-import { createWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
 async function prepare() {
@@ -16,9 +16,9 @@ async function prepare() {
   await writeFile(path.join(root, ".wsspec/workflow.yaml"), "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n");
   await writeFile(path.join(root, ".wsspec/config.yaml"), "version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test: { command: [npm, test], cwd: worktree, timeoutSeconds: 60, required: true, evidence: trusted }\n");
   await git(root, "add", "."); await git(root, "commit", "-m", "lock fixture");
-  const workItemId = "WSS-LOCK";
-  await createWorkItem({ root, workItemId, title: "锁恢复", source: { type: "prompt", content: "锁恢复" } });
-  const projection = await initializeControlPlane({ cwd: root, workItemId, stages: ["define"] });
+  const app = createApplication({ provider: "codex", terminal: { isTTY: true }, now: () => new Date("2026-08-18T00:00:00.000Z") });
+  const { workItemId } = await app.start({ root, source: { type: "prompt", text: "锁恢复" }, profile: "standard" });
+  const projection = await readControlPlane(root, workItemId);
   return { root, workItemId, lockPath: path.join(projection.controlPlane, "runtime.lock") };
 }
 
@@ -29,12 +29,12 @@ test("explicit recover clears a stale lock owned by a dead local process", async
   await writeFile(fixture.lockPath, `${JSON.stringify({ version: 1, ownerToken: "dead-owner", pid: 2147483647, hostname: hostname(), createdAt: new Date().toISOString() })}\n`);
 
   await assert.rejects(
-    transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "active", idempotencyKey: "activate" }),
+    transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "verifying", idempotencyKey: "verify" }),
     (error: unknown) => hasCode(error, "WSSPEC_CONTROL_PLANE_STALE_LOCK"),
   );
   await recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId });
-  const active = await transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "active", idempotencyKey: "activate" });
-  assert.equal(active.workItem.status, "active");
+  const verifying = await transitionRuntime({ cwd: fixture.root, workItemId: fixture.workItemId, scope: "work-item", to: "verifying", idempotencyKey: "verify" });
+  assert.equal(verifying.workItem.status, "verifying");
 });
 
 test("recover never steals a lock from another host", async () => {

@@ -223,6 +223,26 @@ test("public schemas reject unknown fields with a stable diagnostic", () => {
   );
 });
 
+test("WorkPackage requiredOutputs accepts expectation descriptors but rejects existing Artifact references", () => {
+  const value = {
+    ...validValues["builtin.work-package.v1"],
+    requiredOutputs: [{
+      artifactType: "requirement-source",
+      schemaVersion: 1,
+      artifactId: `source-${"a".repeat(64)}`,
+      path: `.wsspec/work-items/WSS-20260816-001/source/${"a".repeat(64)}.json`,
+      revision: 1,
+      contentHash: `sha256:${"a".repeat(64)}`,
+      mediaType: "application/json",
+    }],
+  };
+
+  assert.throws(
+    () => validate("builtin.work-package.v1", value),
+    (error: unknown) => error instanceof SchemaValidationError && error.code === "WSSPEC_SCHEMA_UNKNOWN_FIELD",
+  );
+});
+
 test("public schemas reject missing required fields with a field path", () => {
   const value = { ...validValues["builtin.artifact.v1"] } as Record<string, unknown>;
   delete value.contentHash;

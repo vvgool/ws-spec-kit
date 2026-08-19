@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
 import * as canonicalizeModule from "canonicalize";
@@ -10,13 +10,12 @@ import {
   LocalRequirementError,
   readLocalRequirementFile,
 } from "./local-requirement.js";
+import { credentialLikeField, credentialLikeValue } from "./secret-detector.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 const workItemIdPattern = /^WSS-[A-Za-z0-9-]+$/u;
 const artifactIdPattern = /^source-([a-f0-9]{64})$/u;
 const metadataKeyPattern = /^[a-z][a-zA-Z0-9]{0,63}$/u;
-const forbiddenMetadataKeys = /(?:authorization|cookie|credential|password|secret|session|token|api[-_]?key)/iu;
-const credentialValue = /(?:\b(?:authorization|cookie|set-cookie)\s*[:=]|\bbearer\s+\S|\b(?:api[-_ ]?key|password|secret|session(?:id)?|token)\s*[:=]\s*\S|\b(?:gh[pousr]_[A-Za-z0-9]{16,}|glpat-[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{12,}))/iu;
 const prototypeKeys = new Set(["__proto__", "constructor", "prototype"]);
 const metadataAllowlist: Record<NormalizedRequirementSource["type"], ReadonlySet<string>> = {
   "user.prompt": new Set(),
@@ -109,8 +108,8 @@ function normalizedUrl(value: unknown): string {
   let fragment: string;
   try { fragment = decodeURIComponent(parsed.hash); }
   catch { return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl fragment 编码不合法。"); }
-  if ([...parsed.searchParams.entries()].some(([key, value]) => forbiddenMetadataKeys.test(key) || credentialValue.test(value))
-    || credentialValue.test(fragment)) {
+  if ([...parsed.searchParams.entries()].some(([key, value]) => credentialLikeField(key) || credentialLikeField(value))
+    || credentialLikeField(fragment)) {
     return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含 credential-like 参数或片段。");
   }
   return parsed.toString();
@@ -134,22 +133,22 @@ function metadataRecord(type: NormalizedRequirementSource["type"], value: unknow
   for (const key of keys) {
     const descriptor = descriptors[key]!;
     if (!descriptor.enumerable || !("value" in descriptor) || prototypeKeys.has(key)
-      || forbiddenMetadataKeys.test(key) || !metadataKeyPattern.test(key)
+      || credentialLikeField(key) || !metadataKeyPattern.test(key)
       || !metadataAllowlist[type].has(key)) {
-      return fail("WSSPEC_SOURCE_METADATA_INVALID", `metadata key ${key} 不在允许列表。`);
+      return fail("WSSPEC_SOURCE_METADATA_INVALID", "metadata 包含不允许的字段。");
     }
     const values = Array.isArray(descriptor.value) ? descriptor.value : [descriptor.value];
     if (values.length === 0 || values.length > 32 || values.some((item) => typeof item !== "string")) {
-      return fail("WSSPEC_SOURCE_METADATA_INVALID", `metadata ${key} 数组不合法。`);
+      return fail("WSSPEC_SOURCE_METADATA_INVALID", "metadata 数组不合法。");
     }
     const normalized = values.map((item) => {
       let current: string;
       try {
-        current = normalizedScalar(item, `metadata.${key}`, 256);
+        current = normalizedScalar(item, "metadata value", 256);
       } catch {
-        return fail("WSSPEC_SOURCE_METADATA_INVALID", `metadata ${key} 值不合法。`);
+        return fail("WSSPEC_SOURCE_METADATA_INVALID", "metadata 值不合法。");
       }
-      if (credentialValue.test(current)) return fail("WSSPEC_SOURCE_METADATA_INVALID", `metadata ${key} 包含凭据样式内容。`);
+      if (credentialLikeValue(current)) return fail("WSSPEC_SOURCE_METADATA_INVALID", "metadata 包含凭据样式内容。");
       aggregateBytes += Buffer.byteLength(key, "utf8") + Buffer.byteLength(current, "utf8");
       return current;
     });
@@ -222,29 +221,89 @@ export function sourceArtifactReference(workItemId: string, artifact: SourceArti
   };
 }
 
-async function ensureArtifactDirectory(root: string, relativeDirectory: string): Promise<string> {
-  const realRoot = await realpath(root);
-  let current = realRoot;
+function sameDirectoryIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameFileIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return sameDirectoryIdentity(left, right)
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.nlink === right.nlink;
+}
+
+function assertSafeDirectory(target: BigIntStats): void {
+  const uid = process.getuid?.();
+  if (uid === undefined || !target.isDirectory() || target.uid !== BigInt(uid) || (target.mode & 0o022n) !== 0n) {
+    fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 目录必须由当前用户拥有且不可被组或其他用户写入。");
+  }
+}
+
+async function authenticateArtifactRoot(repositoryRoot: string | undefined, artifactRoot: string): Promise<{ root: string; identity: BigIntStats }> {
+  let supplied: BigIntStats;
+  try { supplied = await lstat(artifactRoot, { bigint: true }); }
+  catch { return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 根目录不存在或不可验证。"); }
+  if (supplied.isSymbolicLink()) return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 根目录不能是符号链接。");
+  assertSafeDirectory(supplied);
+  const root = await realpath(artifactRoot);
+  const canonical = await lstat(root, { bigint: true });
+  assertSafeDirectory(canonical);
+  if (!sameDirectoryIdentity(supplied, canonical)) return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 根目录身份不稳定。");
+  if (repositoryRoot !== undefined) {
+    const repository = await realpath(repositoryRoot);
+    const relative = path.relative(repository, root);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 根目录必须位于当前仓库或 worktree 内。");
+    }
+  }
+  return { root, identity: canonical };
+}
+
+async function ensureArtifactDirectory(repositoryRoot: string, artifactRoot: string, relativeDirectory: string): Promise<string> {
+  const authenticated = await authenticateArtifactRoot(repositoryRoot, artifactRoot);
+  let current = authenticated.root;
   for (const part of relativeDirectory.split("/")) {
     current = path.join(current, part);
+    let target: BigIntStats;
     try {
-      const target = await lstat(current);
-      if (target.isSymbolicLink() || !target.isDirectory()) return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 目录包含非目录或符号链接。");
+      target = await lstat(current, { bigint: true });
+      if (target.isSymbolicLink()) return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 目录包含符号链接。");
+      assertSafeDirectory(target);
     } catch (error) {
+      if (error instanceof SourceArtifactError) throw error;
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       try {
         await mkdir(current, { mode: 0o700 });
       } catch (mkdirError) {
         if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
-        const target = await lstat(current);
-        if (target.isSymbolicLink() || !target.isDirectory()) return fail("WSSPEC_SOURCE_PATH_INVALID", "并发创建的 Artifact 目录不安全。");
       }
+      target = await lstat(current, { bigint: true });
+      if (target.isSymbolicLink()) return fail("WSSPEC_SOURCE_PATH_INVALID", "并发创建的 Artifact 目录不安全。");
+      assertSafeDirectory(target);
     }
+    const canonical = await realpath(current);
+    const rechecked = await lstat(current, { bigint: true });
+    if (canonical !== current || !sameDirectoryIdentity(target, rechecked)) {
+      return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 目录在创建或验证期间被替换。");
+    }
+    assertSafeDirectory(rechecked);
   }
+  const rootAfter = await lstat(authenticated.root, { bigint: true });
+  if (!sameDirectoryIdentity(authenticated.identity, rootAfter)) {
+    return fail("WSSPEC_SOURCE_PATH_INVALID", "Artifact 根目录在创建期间被替换。");
+  }
+  assertSafeDirectory(rootAfter);
   return current;
 }
 
 async function readExistingBytes(filename: string, maximum: number): Promise<Buffer> {
+  let pathBefore: BigIntStats;
+  try { pathBefore = await lstat(filename, { bigint: true }); }
+  catch { return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 不可读取或已变化。"); }
+  if (!pathBefore.isFile() || pathBefore.nlink !== 1n || pathBefore.size > BigInt(maximum)) {
+    return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 必须是单链接普通文件。");
+  }
   let handle;
   try {
     handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -253,17 +312,34 @@ async function readExistingBytes(filename: string, maximum: number): Promise<Buf
   }
   try {
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.size > BigInt(maximum)) return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 不合法。");
+    if (!before.isFile() || before.nlink !== 1n || before.size > BigInt(maximum)
+      || !sameFileIdentity(pathBefore, before)) return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 不合法。");
     const bytes = await handle.readFile();
     const after = await handle.stat({ bigint: true });
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
-      || before.mtimeMs !== after.mtimeMs || BigInt(bytes.length) !== before.size) {
+    let pathAfter: BigIntStats;
+    try { pathAfter = await lstat(filename, { bigint: true }); }
+    catch { return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 在读取期间消失。"); }
+    if (after.nlink !== 1n || !sameFileIdentity(before, after) || !sameFileIdentity(after, pathAfter)
+      || BigInt(bytes.length) !== before.size) {
       return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 在读取期间发生变化。");
     }
     return bytes;
   } finally {
     await handle.close();
   }
+}
+
+async function readSettledExistingBytes(filename: string, maximum: number): Promise<Buffer> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const target = await lstat(filename, { bigint: true });
+      if (target.nlink !== 2n) break;
+    } catch {
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  }
+  return readExistingBytes(filename, maximum);
 }
 
 async function writeNoClobber(filename: string, bytes: Buffer): Promise<void> {
@@ -280,10 +356,13 @@ async function writeNoClobber(filename: string, bytes: Buffer): Promise<void> {
       await link(temporary, filename);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const existing = await readExistingBytes(filename, bytes.length + 1);
+      const existing = await readSettledExistingBytes(filename, bytes.length + 1);
       if (!existing.equals(bytes)) return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "同摘要 Artifact 的现有字节不一致，拒绝覆盖。");
       return;
     }
+    await unlink(temporary);
+    const written = await readExistingBytes(filename, bytes.length + 1);
+    if (!written.equals(bytes)) return fail("WSSPEC_SOURCE_ARTIFACT_CONFLICT", "新建 Artifact 的最终字节不一致。");
     const directory = await open(path.dirname(filename), constants.O_RDONLY);
     try { await directory.sync(); } finally { await directory.close(); }
   } finally {
@@ -318,7 +397,7 @@ export async function captureRequirement(input: CaptureRequirementInput): Promis
   if (encoded === undefined) return fail("WSSPEC_SOURCE_INVALID", "Source Artifact 无法规范化。");
   const reference = sourceArtifactReference(input.workItemId, artifact);
   const relativeDirectory = path.posix.dirname(reference.path);
-  const directory = await ensureArtifactDirectory(input.artifactRoot, relativeDirectory);
+  const directory = await ensureArtifactDirectory(input.repositoryRoot, input.artifactRoot, relativeDirectory);
   await writeNoClobber(path.join(directory, path.posix.basename(reference.path)), Buffer.from(`${encoded}\n`, "utf8"));
   return artifact;
 }
@@ -365,7 +444,7 @@ export async function verifySourceArtifact(artifactRoot: string, workItemId: str
     || match === null || reference.contentHash !== `sha256:${match[1]}`) {
     return fail("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source Artifact 引用不合法。");
   }
-  const root = await realpath(artifactRoot);
+  const root = (await authenticateArtifactRoot(undefined, artifactRoot)).root;
   const filename = path.join(root, reference.path);
   const relative = path.relative(root, filename);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return fail("WSSPEC_SOURCE_PATH_INVALID", "Source Artifact 越出允许边界。");

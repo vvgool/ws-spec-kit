@@ -172,28 +172,9 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,62}$"
           },
-          "artifactId": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 128
-          },
           "schemaVersion": {
             "type": "integer",
             "minimum": 1
-          },
-          "path": {
-            "type": "string"
-          },
-          "revision": {
-            "type": "integer",
-            "minimum": 1
-          },
-          "contentHash": {
-            "type": "string",
-            "pattern": "^sha256:.+$"
-          },
-          "mediaType": {
-            "type": "string"
           },
           "contentLevel": {
             "type": "string",

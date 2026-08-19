@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,7 +21,8 @@ const workItemId = "WSS-SOURCE";
 
 async function fixture(): Promise<{ repositoryRoot: string; artifactRoot: string }> {
   const repositoryRoot = await mkdtemp(path.join(os.tmpdir(), "wsspec-source-repository-"));
-  const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "wsspec-source-artifacts-"));
+  const artifactRoot = path.join(repositoryRoot, "artifacts");
+  await mkdir(artifactRoot);
   return { repositoryRoot, artifactRoot };
 }
 
@@ -73,6 +74,33 @@ test("local.file captures a canonical repository-relative regular Markdown file"
   assert.equal(artifact.title, "Checkout");
   assert.equal(artifact.body, "# Checkout\n\nRetry payment.\n");
   assert.deepEqual(artifact.metadata, {});
+});
+
+test("local.file stores NFC identity while opening the caller's NFD or NFC spelling", async () => {
+  const current = await fixture();
+  await mkdir(path.join(current.repositoryRoot, "requirements"));
+  const nfd = "requirements/Cafe\u0301.md";
+  const nfc = nfd.normalize("NFC");
+  await writeFile(path.join(current.repositoryRoot, nfd), "# Unicode path\n", "utf8");
+
+  const fromNfd = await captureRequirement({ ...current, workItemId, source: { type: "local.file", path: nfd } });
+  const fromNfc = await captureRequirement({ ...current, workItemId, source: { type: "local.file", path: nfc } });
+
+  assert.equal(fromNfd.stableId, nfc);
+  assert.equal(fromNfc.stableId, nfc);
+  assert.equal(fromNfd.artifactId, fromNfc.artifactId);
+});
+
+test("local.file rejects a regular file with another hardlink name", async () => {
+  const current = await fixture();
+  const outside = path.join(await mkdtemp(path.join(os.tmpdir(), "wsspec-source-hardlink-")), "outside.md");
+  await writeFile(outside, "# Shared inode\n", "utf8");
+  await link(outside, path.join(current.repositoryRoot, "linked.md"));
+
+  await assert.rejects(
+    captureRequirement({ ...current, workItemId, source: { type: "local.file", path: "linked.md" } }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_PATH_INVALID"),
+  );
 });
 
 test("local.file rejects non-canonical, absolute, escaping and symlinked paths", async () => {
@@ -199,6 +227,10 @@ test("Provider metadata rejects unknown, prototype and credential-like keys or v
     { access_token: "secret" },
     { author: "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456" },
     { labels: ["bug", "Cookie: session=private"] },
+    { author: "github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+    { author: "Basic dXNlcjpwYXNz" },
+    { author: "Set-Cookie: sid=private" },
+    { author: "xapp-1-private-slack-token" },
     JSON.parse('{"__proto__":"polluted"}') as Record<string, string>,
     Object.create({ token: "inherited-secret" }) as Record<string, string>,
   ];
@@ -208,6 +240,33 @@ test("Provider metadata rejects unknown, prototype and credential-like keys or v
       (error: unknown) => hasCode(error, "WSSPEC_SOURCE_METADATA_INVALID"),
     );
   }
+});
+
+test("Provider metadata rejection never echoes attacker-controlled keys or values", async () => {
+  const current = await fixture();
+  const attackerKey = "attackerSecretKey";
+  const attackerValue = "github_pat_abcdefghijklmnopqrstuvwxyz123456";
+  let rejected: unknown;
+  try {
+    await captureRequirement({
+      ...current,
+      workItemId,
+      source: {
+        type: "github.issue",
+        stableId: "org/repo#17",
+        canonicalUrl: "https://github.com/org/repo/issues/17",
+        title: "Issue",
+        body: "Body",
+        metadata: { [attackerKey]: attackerValue },
+      },
+    });
+  } catch (error) {
+    rejected = error;
+  }
+  assert.ok(rejected instanceof SourceArtifactError);
+  assert.equal(rejected.code, "WSSPEC_SOURCE_METADATA_INVALID");
+  assert.equal(rejected.message.includes(attackerKey), false);
+  assert.equal(rejected.message.includes(attackerValue), false);
 });
 
 test("Provider canonical URLs reject embedded credentials and credential-like query or fragment content", async () => {
@@ -223,13 +282,38 @@ test("Provider canonical URLs reject embedded credentials and credential-like qu
     "https://user:password@github.com/org/repo/issues/17",
     "https://github.com/org/repo/issues/17?access_token=private",
     "https://github.com/org/repo/issues/17?redirect=Bearer%20ghp_abcdefghijklmnopqrstuvwxyz123456",
+    "https://github.com/org/repo/issues/17?redirect=github_pat_abcdefghijklmnopqrstuvwxyz123456",
+    "https://github.com/org/repo/issues/17?Basic=dXNlcjpwYXNz",
+    "https://github.com/org/repo/issues/17?xapp-1-private-slack-token=value",
     "https://github.com/org/repo/issues/17#cookie=session%3Dprivate",
+    "https://github.com/org/repo/issues/17#Set-Cookie%3A%20sid%3Dprivate",
   ]) {
     await assert.rejects(
       captureRequirement({ ...current, workItemId, source: { ...base, canonicalUrl } }),
       (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
     );
   }
+});
+
+test("Provider metadata rejects aggregate overflow when every key, array and item is individually valid", async () => {
+  const current = await fixture();
+  const values = Array.from({ length: 32 }, (_, index) => `${index.toString().padStart(2, "0")}-${"a".repeat(253)}`);
+  const metadata = {
+    assignees: values,
+    author: values[0]!,
+    labels: values,
+    repository: values[1]!,
+    state: values[2]!,
+  };
+
+  await assert.rejects(
+    captureRequirement({
+      ...current,
+      workItemId,
+      source: { type: "github.issue", stableId: "org/repo#17", title: "Issue", body: "Body", metadata },
+    }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_METADATA_INVALID"),
+  );
 });
 
 test("Provider metadata enforces key, item, array and aggregate bounds", async () => {
@@ -272,6 +356,75 @@ test("content-addressed writes are byte-idempotent and never overwrite older art
   await assert.rejects(
     captureRequirement({ ...current, workItemId, source: { type: "user.prompt", text: "First" } }),
     (error: unknown) => hasCode(error, "WSSPEC_SOURCE_ARTIFACT_CONFLICT"),
+  );
+});
+
+test("content-addressed capture rejects a pre-seeded same-byte hardlink", async () => {
+  const current = await fixture();
+  const artifact = await captureRequirement({ ...current, workItemId, source: { type: "user.prompt", text: "Hardlink seed" } });
+  const reference = sourceArtifactReference(workItemId, artifact);
+  const target = path.join(current.artifactRoot, reference.path);
+  const outside = path.join(current.repositoryRoot, "outside-artifact.json");
+  await writeFile(outside, await readFile(target));
+  await unlink(target);
+  await link(outside, target);
+  assert.equal((await stat(target)).nlink, 2);
+
+  await assert.rejects(
+    captureRequirement({ ...current, workItemId, source: { type: "user.prompt", text: "Hardlink seed" } }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_ARTIFACT_CONFLICT"),
+  );
+});
+
+test("artifact verification rejects post-capture mutation through a new hardlink name", async () => {
+  const current = await fixture();
+  const artifact = await captureRequirement({ ...current, workItemId, source: { type: "user.prompt", text: "Immutable bytes" } });
+  const reference = sourceArtifactReference(workItemId, artifact);
+  const alias = path.join(current.repositoryRoot, "artifact-alias.json");
+  await link(path.join(current.artifactRoot, reference.path), alias);
+
+  await assert.rejects(
+    verifySourceArtifact(current.artifactRoot, workItemId, reference),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_SNAPSHOT_CHANGED"),
+  );
+  await writeFile(alias, "{}\n", "utf8");
+
+  await assert.rejects(
+    verifySourceArtifact(current.artifactRoot, workItemId, reference),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_SNAPSHOT_CHANGED"),
+  );
+});
+
+test("capture rejects a symlink artifact root before writing outside the repository", async () => {
+  const current = await fixture();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "wsspec-artifact-outside-"));
+  const linkedRoot = path.join(current.repositoryRoot, "linked-artifacts");
+  await symlink(outside, linkedRoot);
+
+  await assert.rejects(
+    captureRequirement({ ...current, artifactRoot: linkedRoot, workItemId, source: { type: "user.prompt", text: "Stay inside" } }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_PATH_INVALID"),
+  );
+  assert.deepEqual(await readdir(outside), []);
+});
+
+test("capture rejects a real artifact root outside the canonical repository", async () => {
+  const current = await fixture();
+  const outside = await mkdtemp(path.join(os.tmpdir(), "wsspec-artifact-outside-"));
+
+  await assert.rejects(
+    captureRequirement({ ...current, artifactRoot: outside, workItemId, source: { type: "user.prompt", text: "Stay inside" } }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_PATH_INVALID"),
+  );
+});
+
+test("capture rejects group or world writable artifact root components", async () => {
+  const current = await fixture();
+  await chmod(current.artifactRoot, 0o777);
+
+  await assert.rejects(
+    captureRequirement({ ...current, workItemId, source: { type: "user.prompt", text: "Safe permissions" } }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_PATH_INVALID"),
   );
 });
 

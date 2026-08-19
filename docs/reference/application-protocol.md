@@ -89,7 +89,9 @@
 
 Source Artifact 使用 canonical JSON 存放在 `.wsspec/work-items/<workItemId>/source/<digest>.json`。`contentDigest` 只绑定规范化正文；`artifactId` 和引用的 `contentHash` 绑定除 `artifactId` 外的完整规范 Artifact，因此来源类型、稳定身份、标题、允许的 metadata 和正文任一变化都会得到新文件，旧文件不会被覆盖。并发捕获相同来源只能收敛到逐字节相同的既有 Artifact。Provider metadata 使用按来源类型固定的字段白名单，拒绝自定义 prototype、凭据样式 key/value；`canonicalUrl` 只接受不含 userinfo、凭据样式 query 或 fragment 的 HTTP(S) URL。
 
-Work Item manifest 与 Application Snapshot 持有完整 Source Artifact 引用。只有声明 `requirement-source` 输入或输出的 Work Package 才获得该引用，正文和 metadata 不复制进 Work Package。`source.captured` 事件的 value 严格限制为 `{ artifactId, path, digest }`。恢复、Application 加载和 Close 都重新验证 canonical bytes、Schema、Artifact 身份与摘要，并要求 Work Item、Application 和磁盘 Artifact 三方引用一致。
+Source 的恢复权威由控制面中的 `application-anchor.json`、其绑定的 Application Snapshot 和唯一有效的 `source.captured` 事件共同组成。Work Item manifest 与 Application Snapshot 中的完整 Source Artifact 引用必须先与该事件的 `{ artifactId, path, digest }` 完全一致，Runtime 才会跟随路径读取磁盘 Artifact。恢复、Application 加载和 Close 使用同一权威链，并重新验证 canonical bytes、Schema、Artifact 身份与摘要。缺少锚点、Application Snapshot 或唯一 Source 事件的旧版 Work Item 不兼容且不迁移，统一 fail closed 为 `WSSPEC_SOURCE_SNAPSHOT_CHANGED`。
+
+只有在 Step 的 `inputs` 中声明 `requirement-source`，Work Package 的 `artifacts` 才获得可读取的完整 Source 引用；正文和 metadata 不复制进 Work Package。`requiredOutputs` 仅描述 Agent 应产出的 `artifactType`、`schemaVersion` 和可选 `contentLevel`，不携带现有 Artifact 的 ID、路径、摘要或其他读取授权。仅声明 Source output 不能借此读取已有 Source。
 
 首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`；引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
 
@@ -151,7 +153,7 @@ skills:
 | `acquire` | `WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
 | `artifact` | `WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
 | `submit` | `WSSPEC_ARTIFACT_REFERENCE_INVALID`、`WSSPEC_ATTEMPT_NOT_ACTIVE`、`WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`、`WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED`、`WSSPEC_MODIFIED_FILES_MISMATCH`、`WSSPEC_REQUIRED_ARTIFACT_MISSING`、`WSSPEC_STEP_CONFIGURATION_INVALID`、`WSSPEC_STEP_FAILED`、`WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID`、`WSSPEC_STEP_INPUT_INVALID`、`WSSPEC_UNDECLARED_ARTIFACT` |
-| `approval` | `WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED` |
+| `approval` | `WSSPEC_APPROVAL_DIGEST_INVALID`、`WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED` |
 | `workflowEject` | `WSSPEC_WORKFLOW_EJECT_SOURCE_INVALID`、`WSSPEC_WORKFLOW_EJECT_TARGET_EXISTS` |
 | `agentInstall` | `WSSPEC_SKILL_INSTALL_CONFLICT` |
 

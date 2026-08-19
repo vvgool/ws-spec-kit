@@ -11,6 +11,12 @@ export interface ArtifactReference {
   contentLevel?: string;
 }
 
+export interface ArtifactExpectation {
+  artifactType: string;
+  schemaVersion: number;
+  contentLevel?: string;
+}
+
 export interface ResolvedSkillDescriptor {
   ref: string;
   version: string;
@@ -41,7 +47,7 @@ export interface WorkPackage {
     allowedPaths: string[];
     forbiddenActions: string[];
   };
-  requiredOutputs: ArtifactReference[];
+  requiredOutputs: ArtifactExpectation[];
   gates: WorkPackageGate[];
   resultSchema: "builtin.submit-result.v1";
 }

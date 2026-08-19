@@ -78,13 +78,19 @@ export function requireExecute(action: AgentAction): WorkPackage {
   return action.workPackage;
 }
 
-export function completedResult(workPackage: WorkPackage, artifacts = workPackage.requiredOutputs): SubmitResult {
+export function completedResult(workPackage: WorkPackage, artifacts?: ArtifactReference[]): SubmitResult {
+  const resultArtifacts = artifacts ?? workPackage.requiredOutputs.map((output) => {
+    if (output.artifactType !== "requirement-source") return output;
+    const source = workPackage.artifacts.find((artifact) => artifact.artifactType === "requirement-source");
+    assert.ok(source, "requirement-source output requires an authorized input Artifact");
+    return source;
+  });
   return {
     version: 1,
     status: "completed",
     summary: `${workPackage.stepId} 完成`,
     modifiedFiles: [],
-    artifacts,
+    artifacts: resultArtifacts,
     commands: [],
     evidence: [],
     externalWrites: [],

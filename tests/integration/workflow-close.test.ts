@@ -23,7 +23,7 @@ import {
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import type { RuntimeProjection } from "../../src/storage/control-plane.js";
 import { readControlPlane, recoverControlPlane, replayEvents, writeArchiveSnapshot } from "../../src/storage/control-plane.js";
-import { readEvents, withControlPlaneLock } from "../../src/storage/events.js";
+import { appendEvent, readEvents, withControlPlaneLock } from "../../src/storage/events.js";
 import {
   controlRuntimeFixture,
   rewriteSelectedSnapshot,
@@ -636,7 +636,11 @@ test("Close 对 Approval 已规范化的多 Artifact 顺序不产生伪差异", 
   };
   const current = approvalReadyProjection({
     artifacts: [proposalArtifact, supportingArtifact],
-    contentHash: "sha256:6d4832a91e74c61f26159fbe69d51852a15e9c2f1af4346aa36204a521170667",
+    contentHash: approvalBindingDigest({
+      stageId: "author-proposal",
+      attemptId: "attempt-author",
+      artifacts: [proposalArtifact, supportingArtifact],
+    }),
   });
   const attempt = current.contexts["author-proposal"] as { result: { artifacts: unknown[] } };
   attempt.result.artifacts = [supportingArtifact, proposalArtifact];
@@ -724,6 +728,7 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
 
 test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", async () => {
   const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-source-"));
+  const controlPlane = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-control-plane-"));
   const artifact = await captureRequirement({
     repositoryRoot: worktree,
     artifactRoot: worktree,
@@ -731,6 +736,26 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
     source: { type: "user.prompt", text: "Immutable source" },
   });
   const source = sourceArtifactReference("WSS-CLOSE", artifact);
+  await appendEvent(controlPlane, {
+    eventId: "event-source-captured",
+    eventType: "source.captured",
+    occurredAt: "2026-08-18T00:00:00.000Z",
+    actor: "application",
+    repositoryId: "repo-test",
+    workItemId: "WSS-CLOSE",
+    stageId: null,
+    attemptId: null,
+    from: "active",
+    to: "active",
+    idempotencyKey: `source:captured:${source.artifactId}`,
+    workflowDigest: "sha256:workflow",
+    configDigest: "sha256:config",
+    baselineTreeDigest: "sha256:baseline",
+    inputWorkspaceTreeDigest: "sha256:workspace",
+    outputWorkspaceTreeDigest: null,
+    inputDigest: "sha256:input",
+    result: { value: { artifactId: source.artifactId, path: source.path, digest: source.contentHash } },
+  });
   const selected = profile("quick", []);
   selected.order = ["intake", "close"];
   selected.steps = [
@@ -745,6 +770,7 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
     },
   ];
   const current = projection({
+    controlPlane,
     stages: { intake: { status: "succeeded" }, close: { status: "ready" } },
     contexts: {
       intake: { workPackage: { attemptId: "attempt-intake" }, result: { status: "completed", artifacts: [source] } },
@@ -762,6 +788,21 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
   };
 
   assert.equal((await closeChecklistForWorktree(input)).allowed, true);
+
+  const replacementArtifact = await captureRequirement({
+    repositoryRoot: worktree,
+    artifactRoot: worktree,
+    workItemId: "WSS-CLOSE",
+    source: { type: "user.prompt", text: "Replacement source" },
+  });
+  const replacement = sourceArtifactReference("WSS-CLOSE", replacementArtifact);
+  (current.contexts.intake as { result: { artifacts: unknown[] } }).result.artifacts = [replacement];
+  input.source = replacement;
+  assert.deepEqual((await closeChecklistForWorktree(input)).missing, [
+    { category: "artifact", id: "requirement-source" },
+  ]);
+  (current.contexts.intake as { result: { artifacts: unknown[] } }).result.artifacts = [source];
+  input.source = source;
 
   await writeFile(path.join(worktree, source.path), "{}\n", "utf8");
   assert.deepEqual((await closeChecklistForWorktree(input)).missing, [

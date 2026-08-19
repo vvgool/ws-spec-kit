@@ -109,6 +109,35 @@ function sameCanonicalValue(left: unknown, right: unknown): boolean {
   return encoded !== undefined && encoded === canonicalize(right);
 }
 
+function sourceReferenceFromEvents(events: readonly StoredEvent[], workItemId: string): SourceArtifactReference {
+  const captured = events.filter((event) => event.eventType === "source.captured");
+  if (captured.length !== 1) {
+    throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Work Item 缺少唯一可信 Source 捕获事件。");
+  }
+  const result = captured[0]!.result;
+  const value = result !== null && typeof result === "object" && !Array.isArray(result)
+    ? (result as { value?: unknown }).value
+    : undefined;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source 捕获事件引用不完整。");
+  }
+  const reference = value as Record<string, unknown>;
+  if (Object.keys(reference).sort().join("\0") !== ["artifactId", "digest", "path"].join("\0")
+    || typeof reference.artifactId !== "string" || typeof reference.path !== "string" || typeof reference.digest !== "string"
+    || !reference.path.startsWith(`.wsspec/work-items/${workItemId}/source/`)) {
+    throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source 捕获事件引用不完整。");
+  }
+  return {
+    artifactType: "requirement-source",
+    schemaVersion: 1,
+    artifactId: reference.artifactId,
+    path: reference.path,
+    revision: 1,
+    contentHash: reference.digest,
+    mediaType: "application/json",
+  };
+}
+
 function assertedTddEvidence(projection: RuntimeProjection): { red?: import("../engine/tdd/types.js").TrustedEvidence; cycle?: import("../engine/tdd/types.js").TddCycleEvidence } {
   const prefix = `tdd:${projection.workItemId}:`;
   const entries = Object.entries(projection.evidence).filter(([key]) => key.startsWith("tdd:"));
@@ -277,6 +306,19 @@ export async function readApplicationAnchor(cwd: string, workItemId: string): Pr
   return anchor;
 }
 
+export async function readCapturedSourceReference(cwd: string, workItemId: string): Promise<SourceArtifactReference> {
+  const resolved = await resolveControlPlane(cwd, workItemId);
+  return readCapturedSourceReferenceFromControlPlane(resolved.directory, workItemId);
+}
+
+export async function readCapturedSourceReferenceFromControlPlane(controlPlane: string, workItemId: string): Promise<SourceArtifactReference> {
+  const events = await readEvents(controlPlane).catch((error: unknown) => {
+    if (error instanceof EventStoreError) throw new ControlPlaneStorageError(error.code, error.message);
+    throw error;
+  });
+  return sourceReferenceFromEvents(events, workItemId);
+}
+
 export async function writeArchiveSnapshot(input: { projection: RuntimeProjection; worktree: string; closedAt: string; workspaceTreeDigest: string; artifactTreeDigest: string }): Promise<void> {
   assertExternalReceipts(input.projection.evidence, "WSSPEC_EVENT_CHAIN_INVALID");
   const { controlPlane: _controlPlane, ...publicProjection } = input.projection;
@@ -440,12 +482,13 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const anchor = await readApplicationAnchorFile(resolved.directory);
+  if (anchor === undefined || applicationText === undefined) {
+    throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Work Item 缺少可信 Application 锚点、快照或 Source 捕获事件。");
+  }
   if (anchor !== undefined && (anchor.workItemId !== input.workItemId || sha256(manifestText) !== anchor.manifestDigest)) {
     throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_MANIFEST_CHANGED", "Work Item manifest 与可信 Application 锚点不一致。");
   }
-  if (applicationText !== undefined && anchor === undefined) {
-    throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_MANIFEST_CHANGED", "Application Work Item 缺少可信 manifest 锚点。");
-  }
+  const eventSourceReference = sourceReferenceFromEvents(events, input.workItemId);
   const manifest = parse(manifestText) as {
     execution?: { workflowDigest?: unknown };
     source?: { artifactId?: unknown; snapshot?: unknown; artifactDigest?: unknown; contentDigest?: unknown; type?: unknown };
@@ -464,6 +507,9 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     contentHash: manifest.source.artifactDigest,
     mediaType: "application/json",
   };
+  if (!sameCanonicalValue(manifestSourceReference, eventSourceReference)) {
+    throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Work Item manifest 与可信 Source 捕获事件不一致。");
+  }
   const verifiedSource = await verifySourceArtifact(worktree, input.workItemId, manifestSourceReference);
   if (verifiedSource.contentDigest !== manifest.source.contentDigest || verifiedSource.type !== manifest.source.type) {
     throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source Artifact 与 Work Item manifest 不一致。");
@@ -477,8 +523,8 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "Application 快照摘要与 Work Item manifest 不一致。");
     }
     const application = parseApplicationSnapshot(JSON.parse(applicationText));
-    if (canonicalize(application.source) !== canonicalize(manifestSourceReference)) {
-      throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Application 与 Work Item 的 Source Artifact 引用不一致。");
+    if (!sameCanonicalValue(application.source, eventSourceReference)) {
+      throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Application 与可信 Source 捕获事件不一致。");
     }
     const profile = application.profiles[application.selectedProfile];
     stageIds = profile.order;
@@ -486,12 +532,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     initialStages = deriveInitialStages(profile);
     initialProfile = { mode: application.selectedProfile, selected: application.selectedProfile, provisional: false, reasonRuleIds: [], riskSignals: emptyRuntimeRiskSignals() };
   } else {
-    if (anchor !== undefined) {
-      throw new ControlPlaneStorageError("WSSPEC_APPLICATION_SNAPSHOT_CHANGED", "已锚定 Work Item 缺少 Application 快照，拒绝降级恢复。");
-    }
-    stageIds = durableProjection === undefined
-      ? [...new Set(events.map((event) => event.stageId).filter((stageId): stageId is string => stageId !== null))]
-      : Object.keys(durableProjection.stages);
+    throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Work Item 缺少可信 Application 快照。");
   }
   if (durableProjection !== undefined) {
     const anchoredEvent = durableProjection.lastSequence === 0 ? undefined : events[durableProjection.lastSequence - 1];

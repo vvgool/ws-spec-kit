@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import * as canonicalizeModule from "canonicalize";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import { verifyArtifact } from "../domain/artifacts.js";
@@ -7,6 +8,8 @@ import type { ArtifactReference } from "../protocol/work-package.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { readControlPlane, type RuntimeApproval } from "../storage/control-plane.js";
 import { mutateControlPlane } from "./scheduler.js";
+
+const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
 export class ApprovalError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = "ApprovalError"; }
@@ -17,10 +20,22 @@ export function approvalBindingDigest(input: {
   attemptId: string;
   artifacts: readonly Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">[];
 }): string {
-  if (input.artifacts.length === 1) return input.artifacts[0]!.contentHash;
-  return sha256(JSON.stringify(input.artifacts.length === 0
-    ? { version: 1, stageId: input.stageId, attemptId: input.attemptId, artifacts: [] }
-    : input.artifacts));
+  const binding = canonicalize({
+    version: 1,
+    stageId: input.stageId,
+    attemptId: input.attemptId,
+    artifacts: input.artifacts.map((artifact) => ({
+      artifactType: artifact.artifactType,
+      artifactId: artifact.artifactId ?? null,
+      schemaVersion: artifact.schemaVersion,
+      path: artifact.path,
+      revision: artifact.revision,
+      contentHash: artifact.contentHash,
+      mediaType: artifact.mediaType ?? null,
+    })).sort((left, right) => `${left.artifactType}\0${left.path}`.localeCompare(`${right.artifactType}\0${right.path}`)),
+  });
+  if (binding === undefined) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_INVALID", "审批 Artifact 引用无法规范化。");
+  return sha256(binding);
 }
 
 export async function prepareArtifactApproval(input: {
