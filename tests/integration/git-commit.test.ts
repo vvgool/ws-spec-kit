@@ -58,6 +58,15 @@ async function fixture(files: Readonly<Record<string, string>> = { "src/a.txt": 
   return { root: await realpath(root), baselineRevision, repositoryCommonDir, executable: await gitExecutable() };
 }
 
+async function gitlinkFixture() {
+  const setup = await fixture({});
+  const targetOid = await git(setup.root, "rev-parse", "HEAD");
+  await git(setup.root, "update-index", "--add", "--cacheinfo", `160000,${targetOid},submodule`);
+  await git(setup.root, "commit", "-m", "test: add gitlink");
+  setup.baselineRevision = await git(setup.root, "rev-parse", "HEAD");
+  return setup;
+}
+
 async function approval(input: Awaited<ReturnType<typeof fixture>>, files: readonly string[], message = "feat: approved change"): Promise<GitCommitApproval> {
   return {
     repositoryRoot: input.root,
@@ -251,6 +260,51 @@ test("git.commit requires reapproval when a failing hook changes content before 
   assert.equal(await git(setup.root, "rev-parse", "HEAD"), setup.baselineRevision);
 });
 
+test("git.commit never exposes hook stderr through public errors or receipts", async () => {
+  const setup = await fixture();
+  await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+  const input = await approval(setup, ["src/a.txt"]);
+  const secrets = [
+    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    "cookie-session-secret-123456",
+    "authorization-bearer-secret-123456",
+    "arbitrary-secret-marker-123456",
+  ];
+  const hook = path.join(setup.repositoryCommonDir, "hooks/pre-commit");
+  await writeFile(hook, [
+    "#!/bin/sh",
+    `printf '%s\\n' '${secrets[0]}' >&2`,
+    `printf '%s\\n' 'Cookie: session=${secrets[1]}' >&2`,
+    `printf '%s\\n' 'Authorization: Bearer ${secrets[2]}' >&2`,
+    `printf '%s\\n' '${secrets[3]}' >&2`,
+    "rm \"$GIT_INDEX_FILE\"",
+    "mkdir \"$GIT_INDEX_FILE\"",
+    "exit 1",
+    "",
+  ].join("\n"), "utf8");
+  await chmod(hook, 0o755);
+
+  let receipt: unknown;
+  let observedError: unknown;
+  try {
+    receipt = await commitGitChanges({ executable: setup.executable, approval: input });
+  } catch (error) {
+    observedError = error;
+  }
+
+  assert.equal(receipt, undefined);
+  assert.ok(observedError instanceof GitCommitError);
+  assert.equal(observedError.code, "WSSPEC_GIT_PROCESS_FAILED");
+  assert.equal(observedError.message, "WSSPEC_GIT_PROCESS_FAILED: Git 命令执行失败。");
+  const observable = JSON.stringify({
+    name: observedError.name,
+    code: observedError.code,
+    message: observedError.message,
+    receipt,
+  });
+  for (const secret of secrets) assert.equal(observable.includes(secret), false);
+});
+
 test("git.commit requires reapproval when a hook creates an unapproved dirty file", async () => {
   const setup = await fixture();
   await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
@@ -261,6 +315,22 @@ test("git.commit requires reapproval when a hook creates an unapproved dirty fil
 
   await assert.rejects(commitGitChanges({ executable: setup.executable, approval: input }), hasCode("WSSPEC_GIT_REAPPROVAL_REQUIRED"));
   assert.equal(await readFile(path.join(setup.root, "hook-output.txt"), "utf8"), "not approved\n");
+});
+
+test("git.commit verifies post-hook worktree state with an index hooks cannot flag away", async (t) => {
+  for (const flag of ["--skip-worktree", "--assume-unchanged"] as const) {
+    await t.test(flag, async () => {
+      const setup = await fixture();
+      await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+      const input = await approval(setup, ["src/a.txt"]);
+      const hook = path.join(setup.repositoryCommonDir, "hooks/post-commit");
+      await writeFile(hook, `#!/bin/sh\ngit update-index ${flag} src/b.txt\nprintf 'hook drift\\n' > src/b.txt\n`, "utf8");
+      await chmod(hook, 0o755);
+
+      await assert.rejects(commitGitChanges({ executable: setup.executable, approval: input }), hasCode("WSSPEC_GIT_REAPPROVAL_REQUIRED"));
+      assert.equal(await readFile(path.join(setup.root, "src/b.txt"), "utf8"), "hook drift\n");
+    });
+  }
 });
 
 test("git.commit treats an exact unique file list as a set and canonicalizes receipt order", async () => {
@@ -286,6 +356,45 @@ test("git.commit fails closed when post-commit read-back no longer describes the
 
   await assert.rejects(commitGitChanges({ executable: setup.executable, approval: input }), hasCode("WSSPEC_GIT_READBACK_MISMATCH"));
   assert.notEqual(await git(setup.root, "rev-parse", "HEAD^"), setup.baselineRevision);
+});
+
+test("git.commit rejects a post-commit hook that replaces HEAD with an approved-looking merge commit", async () => {
+  const setup = await fixture();
+  await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+  const input = await approval(setup, ["src/a.txt"]);
+  const hook = path.join(setup.repositoryCommonDir, "hooks/post-commit");
+  await writeFile(hook, [
+    "#!/bin/sh",
+    "tree=$(git rev-parse 'HEAD^{tree}')",
+    "first=$(git rev-parse 'HEAD^')",
+    "second=$(git rev-parse HEAD)",
+    "merge=$(printf 'feat: approved change\\n' | git commit-tree \"$tree\" -p \"$first\" -p \"$second\")",
+    "git update-ref HEAD \"$merge\" \"$second\"",
+    "",
+  ].join("\n"), "utf8");
+  await chmod(hook, 0o755);
+
+  await assert.rejects(commitGitChanges({ executable: setup.executable, approval: input }), hasCode("WSSPEC_GIT_READBACK_MISMATCH"));
+  assert.equal((await git(setup.root, "rev-list", "--parents", "-n", "1", "HEAD")).split(" ").length, 3);
+});
+
+test("git.commit rejects baseline gitlinks when the approved change deletes or replaces them", async (t) => {
+  await t.test("delete", async () => {
+    const setup = await gitlinkFixture();
+    const input = await approval(setup, ["submodule"]);
+
+    await assert.rejects(commitGitChanges({ executable: setup.executable, approval: input }), hasCode("WSSPEC_GIT_PATH_INVALID"));
+    assert.equal(await git(setup.root, "rev-parse", "HEAD"), setup.baselineRevision);
+  });
+
+  await t.test("replace with a regular file", async () => {
+    const setup = await gitlinkFixture();
+    await writeFile(path.join(setup.root, "submodule"), "replacement\n", "utf8");
+    const input = await approval(setup, ["submodule"]);
+
+    await assert.rejects(commitGitChanges({ executable: setup.executable, approval: input }), hasCode("WSSPEC_GIT_PATH_INVALID"));
+    assert.equal(await git(setup.root, "rev-parse", "HEAD"), setup.baselineRevision);
+  });
 });
 
 test("git-native registers only git.commit and rejects push, merge, and release surfaces", () => {

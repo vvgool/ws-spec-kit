@@ -143,6 +143,7 @@ export const gitCommitManifest = defineConnectorManifest({
     ["-c", "core.fsmonitor=false", "--literal-pathspecs", "add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"],
     ["-c", "core.fsmonitor=false", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", "{baselineRevision}", "--"],
     ["-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "commit", "--file=-", "--cleanup=verbatim"],
+    ["-c", "core.fsmonitor=false", "rev-list", "--parents", "-n", "1", "{commitOid}"],
     ["-c", "core.fsmonitor=false", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames", "{parentOid}", "{commitOid}", "--"],
   ],
   doctor: {

@@ -4,7 +4,6 @@ import { lstat, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { redactText } from "../process/redaction.js";
 import {
   failGitCommit,
   GitCommitError,
@@ -73,6 +72,7 @@ function strictEnvironment(input: GitCommitInput["environment"], index?: string)
     GIT_TERMINAL_PROMPT: "0",
     GIT_PAGER: "cat",
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_NO_REPLACE_OBJECTS: "1",
     GIT_OPTIONAL_LOCKS: "0",
     ...(index === undefined ? {} : { GIT_INDEX_FILE: index }),
   };
@@ -156,8 +156,7 @@ async function runGit(input: {
       const stdoutValue = Buffer.concat(stdout);
       const stderrValue = Buffer.concat(stderr);
       if (code !== 0 || signal !== null) {
-        const diagnostic = redactText(stderrValue.toString("utf8")).slice(0, 1_024);
-        reject(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", diagnostic === "" ? "Git 命令执行失败。" : `Git 命令执行失败：${diagnostic}`));
+        reject(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 命令执行失败。"));
         return;
       }
       resolve({ stdout: stdoutValue, stderr: stderrValue });
@@ -222,9 +221,19 @@ async function assertApprovedPaths(root: string, approval: Readonly<GitCommitApp
         throw error;
       }
     }
-    const baselineEntry = nulPaths((await git(["ls-tree", "-z", approval.baselineRevision, "--", filename])).stdout);
-    if (baselineEntry.some((entry) => entry.startsWith("120000 "))) {
-      return failGitCommit("WSSPEC_GIT_PATH_INVALID", "批准文件在 baseline 中是符号链接。");
+    const baselineEntries = nulPaths((await git([
+      "--literal-pathspecs", "ls-tree", "-z", approval.baselineRevision, "--", filename,
+    ])).stdout);
+    if (baselineEntries.length === 0) continue;
+    if (baselineEntries.length !== 1) {
+      return failGitCommit("WSSPEC_GIT_PATH_INVALID", "批准文件在 baseline 中的条目无法安全解析。");
+    }
+    const separator = baselineEntries[0]!.indexOf("\t");
+    const metadata = separator === -1 ? [] : baselineEntries[0]!.slice(0, separator).split(" ");
+    const baselinePath = separator === -1 ? "" : baselineEntries[0]!.slice(separator + 1);
+    if (metadata.length !== 3 || (metadata[0] !== "100644" && metadata[0] !== "100755")
+      || metadata[1] !== "blob" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(metadata[2]!) || baselinePath !== filename) {
+      return failGitCommit("WSSPEC_GIT_PATH_INVALID", "批准文件在 baseline 中必须是普通 Git blob。");
     }
   }
 }
@@ -267,6 +276,37 @@ async function actualDirtyFiles(git: (argv: readonly string[], stdin?: Buffer | 
     if (record.length < 4 || record[2] !== " ") return failGitCommit("WSSPEC_GIT_STATE_UNSAFE", "Git status 输出无法安全解析。");
     return record.slice(3);
   }));
+}
+
+async function actualWorktreeDrift(git: (argv: readonly string[], stdin?: Buffer | string) => Promise<GitResult>): Promise<string[]> {
+  const tracked = nulPaths((await git([
+    "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", "--",
+  ])).stdout);
+  const untracked = nulPaths((await git(["ls-files", "--others", "--exclude-standard", "-z", "--"])).stdout);
+  return byteSort([...new Set([...tracked, ...untracked])]);
+}
+
+async function worktreeDriftFromTree(input: {
+  executable: string;
+  root: string;
+  environment: GitCommitInput["environment"];
+  treeish: string;
+}): Promise<string[]> {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "wspec-git-readback-"));
+  const readbackEnvironment = strictEnvironment(input.environment, path.join(temporary, "index"));
+  const git = (argv: readonly string[], stdin?: Buffer | string): Promise<GitResult> => runGit({
+    executable: input.executable,
+    cwd: input.root,
+    argv,
+    environment: readbackEnvironment,
+    ...(stdin === undefined ? {} : { stdin }),
+  });
+  try {
+    await git(["read-tree", input.treeish]);
+    return await actualWorktreeDrift(git);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 }
 
 function sameFiles(left: readonly string[], right: readonly string[]): boolean {
@@ -393,20 +433,34 @@ export async function commitGitChanges(input: GitCommitInput): Promise<GitCommit
     try {
       await gitWithIndex(["-c", "commit.gpgSign=false", "commit", "--file=-", "--cleanup=verbatim"], `${approval.message}\n`);
     } catch (error) {
+      let hookChangedContent = false;
       try {
         const hookTree = text(await gitWithIndex(["write-tree"]));
         const hookDigest = sha256((await gitWithIndex(diffArgv(approval.baselineRevision))).stdout);
-        const hookWorktree = await actualDirtyFiles(gitWithIndex);
-        if (hookTree !== proposal.treeOid || hookDigest !== approval.diffDigest || hookWorktree.length !== 0) {
-          return failGitCommit("WSSPEC_GIT_REAPPROVAL_REQUIRED", "Git hook 在失败前修改了内容，必须基于新 diff 重新审批。");
-        }
-      } catch (inspectionError) {
-        if (inspectionError instanceof GitCommitError && inspectionError.code === "WSSPEC_GIT_REAPPROVAL_REQUIRED") throw inspectionError;
+        hookChangedContent = hookTree !== proposal.treeOid || hookDigest !== approval.diffDigest;
+      } catch {}
+      try {
+        const hookWorktree = await worktreeDriftFromTree({
+          executable,
+          root,
+          environment: input.environment,
+          treeish: proposal.treeOid,
+        });
+        const hookHead = text(await git(["rev-parse", "--verify", "HEAD^{commit}"]));
+        hookChangedContent ||= hookWorktree.length !== 0 || hookHead !== approval.baselineRevision
+          || !sameIdentity(indexBefore, await optionalIdentity(userIndex));
+      } catch {}
+      if (hookChangedContent) {
+        return failGitCommit("WSSPEC_GIT_REAPPROVAL_REQUIRED", "Git hook 在失败前修改了内容，必须基于新 diff 重新审批。");
       }
       throw error;
     }
     const commitOid = text(await git(["rev-parse", "--verify", "HEAD^{commit}"]));
-    const parentOid = text(await git(["rev-parse", "--verify", `${commitOid}^` ]));
+    const ancestry = text(await git(["rev-list", "--parents", "-n", "1", commitOid])).split(/\s+/u);
+    if (ancestry.length !== 2 || ancestry[0] !== commitOid || ancestry[1] !== approval.baselineRevision) {
+      return failGitCommit("WSSPEC_GIT_READBACK_MISMATCH", "Git commit 成功后的 parent 回读不一致，不能形成成功 Receipt。");
+    }
+    const parentOid = ancestry[1];
     const treeOid = text(await git(["rev-parse", "--verify", `${commitOid}^{tree}`]));
     const files = byteSort(nulPaths((await git([
       "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", parentOid, commitOid, "--",
@@ -414,7 +468,12 @@ export async function commitGitChanges(input: GitCommitInput): Promise<GitCommit
     const readBackDigest = sha256((await git(diffArgv(parentOid, commitOid))).stdout);
     const readBackMessage = (await git(["show", "-s", "--format=%B", commitOid])).stdout.toString("utf8").replace(/\n+$/u, "");
     const indexAfter = await optionalIdentity(userIndex);
-    const worktreeAfter = await actualDirtyFiles(gitWithIndex);
+    const worktreeAfter = await worktreeDriftFromTree({
+      executable,
+      root,
+      environment: input.environment,
+      treeish: commitOid,
+    });
     const hookWorktreeDrift = worktreeAfter.length !== 0;
 
     if (parentOid !== approval.baselineRevision || !sameIdentity(indexBefore, indexAfter)) {
