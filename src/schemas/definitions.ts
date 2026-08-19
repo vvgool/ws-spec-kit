@@ -524,7 +524,7 @@ export const schemas = {
     $id: "builtin.tdd-trusted-evidence.v1",
     type: "object",
     additionalProperties: false,
-    required: ["evidenceId", "level", "phase", "taskId", "stepId", "commandId", "commandDigest", "exitCode", "failedTests", "testPaths", "testFiles", "testPathsDigest", "testPathRules", "testAssets", "testAssetsDigest", "testAssetPaths", "productPaths", "workspaceDigest", "summary"],
+    required: ["evidenceId", "level", "phase", "taskId", "stepId", "commandId", "commandDigest", "exitCode", "failedTests", "testPaths", "testFiles", "testPathsDigest", "testPathRules", "testAssets", "testAssetsDigest", "testAssetPaths", "testAssetRoots", "productPaths", "workspaceDigest", "summary"],
     properties: {
       evidenceId: { type: "string", pattern: "^evidence-[a-f0-9]{64}$" },
       level: { const: "trusted" },
@@ -552,6 +552,7 @@ export const schemas = {
       },
       testAssetsDigest: { type: "string", pattern: digestPattern },
       testAssetPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
+      testAssetRoots: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
       productPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
       workspaceDigest: { type: "string", pattern: digestPattern },
       summary: { type: "string", maxLength: 8192 },
@@ -562,7 +563,7 @@ export const schemas = {
     $id: "builtin.tdd-cycle-evidence.v1",
     type: "object",
     additionalProperties: false,
-    required: ["taskId", "testPaths", "testPathRules", "testAssets", "testAssetsDigest", "testAssetPaths", "productPaths", "commandId", "redEvidenceId", "greenEvidenceId"],
+    required: ["taskId", "testPaths", "testPathRules", "testAssets", "testAssetsDigest", "testAssetPaths", "testAssetRoots", "productPaths", "commandId", "redEvidenceId", "greenEvidenceId"],
     properties: {
       taskId: { type: "string", pattern: workItemIdPattern },
       testPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
@@ -575,6 +576,7 @@ export const schemas = {
       },
       testAssetsDigest: { type: "string", pattern: digestPattern },
       testAssetPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
+      testAssetRoots: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
       productPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 1024 } },
       commandId: { type: "string", pattern: idPattern },
       redEvidenceId: { type: "string", pattern: "^evidence-[a-f0-9]{64}$" },

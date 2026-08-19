@@ -1,5 +1,5 @@
 import { computeWorkspaceTreeDigest } from "../../domain/digests.js";
-import { executeTrustedTestGate, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./red-gate.js";
+import { executeTrustedTestGate, parseTrustedEvidence, testAssetScopeManifest, testFileManifest, trustedTestAssetFiles } from "./red-gate.js";
 import type { GreenEvidenceInput, TddCycleEvidence, TrustedEvidence } from "./types.js";
 import { VerificationError } from "./types.js";
 
@@ -20,6 +20,7 @@ export async function recordGreenEvidenceDetails(input: GreenEvidenceInput): Pro
     || input.redEvidence.commandId !== input.gate.commandId
     || JSON.stringify(parsedRed.testPathRules) !== JSON.stringify(input.gate.testPathRules)
     || JSON.stringify(parsedRed.testAssetPaths) !== JSON.stringify(input.gate.testAssetPaths)
+    || JSON.stringify(parsedRed.testAssetRoots) !== JSON.stringify(input.gate.testAssetRoots)
     || JSON.stringify(parsedRed.productPaths) !== JSON.stringify(input.gate.productPaths)
     || input.redEvidence.testPathsDigest !== currentTests.digest
     || parsedRed.testAssetsDigest !== currentAssets.digest
@@ -36,8 +37,10 @@ export async function recordGreenEvidenceDetails(input: GreenEvidenceInput): Pro
     testPaths: input.redEvidence.testPaths,
     expectedCommandDigest: parsedRed.commandDigest,
   });
-  const sameAssets = evidence.testAssets.length === parsedRed.testAssets.length
-    && evidence.testAssets.every((asset, index) => asset.path === parsedRed.testAssets[index]?.path && asset.digest === parsedRed.testAssets[index]?.digest);
+  const redTrustedAssets = trustedTestAssetFiles(parsedRed.testAssets, parsedRed);
+  const greenTrustedAssets = trustedTestAssetFiles(evidence.testAssets, evidence);
+  const sameAssets = greenTrustedAssets.length === redTrustedAssets.length
+    && greenTrustedAssets.every((asset, index) => asset.path === redTrustedAssets[index]?.path && asset.digest === redTrustedAssets[index]?.digest);
   if (evidence.testAssetsDigest !== parsedRed.testAssetsDigest || !sameAssets) {
     const redPaths = new Set(parsedRed.testAssets.map(({ path }) => path));
     const greenPaths = new Set(evidence.testAssets.map(({ path }) => path));
@@ -53,6 +56,7 @@ export async function recordGreenEvidenceDetails(input: GreenEvidenceInput): Pro
     testAssets: input.redEvidence.testAssets.map((asset) => ({ ...asset })),
     testAssetsDigest: input.redEvidence.testAssetsDigest,
     testAssetPaths: [...input.redEvidence.testAssetPaths],
+    testAssetRoots: [...input.redEvidence.testAssetRoots],
     productPaths: [...input.redEvidence.productPaths],
     commandId: input.gate.commandId,
     redEvidenceId: input.redEvidence.evidenceId,

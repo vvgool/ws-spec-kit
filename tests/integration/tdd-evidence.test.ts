@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { link, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import test from "node:test";
@@ -8,7 +9,7 @@ import test from "node:test";
 import { computeWorkspaceTreeDigest, sha256 } from "../../src/domain/digests.js";
 import { tddFailureDisposition } from "../../src/application/submit.js";
 import { recordGreenEvidence } from "../../src/engine/tdd/green-gate.js";
-import { isTestPath, recordRedEvidence } from "../../src/engine/tdd/red-gate.js";
+import { isTestPath, isTrustedTestAssetPath, recordRedEvidence, testAssetScopeManifest } from "../../src/engine/tdd/red-gate.js";
 import type { FixedTestGate, TddVerificationCode, TrustedEvidence } from "../../src/engine/tdd/types.js";
 import {
   assertImplementHasTrustedRed,
@@ -60,6 +61,7 @@ function nodeGate(_script = "", timeoutMs = 2_000): FixedTestGate {
     env: {},
     testPathRules: ["node", "java", "ruby", "dotnet"],
     testAssetPaths: ["tests/**"],
+    testAssetRoots: ["tests"],
     productPaths: ["src/**"],
     reporter: { type: "node-test", version: 1 },
   } as FixedTestGate;
@@ -563,7 +565,103 @@ test("trusted Red binds every regular file in the configured test asset scope de
   }
 });
 
-test("configured test asset scope fails closed on symlinks, ambiguous classification, entry limits and byte limits", async () => {
+test("narrow test asset globs bind the complete trusted parent root", async () => {
+  const root = await workspace([
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    "import { expected } from './support/helper.mjs';",
+    "test('narrow scope remains red', () => assert.equal(expected, 1));",
+    "",
+  ].join("\n"));
+  await mkdir(path.join(root, "tests", "support"), { recursive: true });
+  await mkdir(path.join(root, "tests", "fixtures"), { recursive: true });
+  await mkdir(path.join(root, "tests", "snapshots"), { recursive: true });
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 0;\n", "utf8");
+  await writeFile(path.join(root, "tests", "fixtures", "value.json"), "{\"value\":0}\n", "utf8");
+  await writeFile(path.join(root, "tests", "snapshots", "value.snap"), "value 0\n", "utf8");
+  await git(root, "add", "tests");
+  await git(root, "commit", "-m", "test: seed narrow test asset scope");
+  const gate = { ...featureGate(), testAssetPaths: ["tests/*.test.mjs"], testAssetRoots: ["tests"] };
+
+  const red = await recordRedEvidence(await redInput(root, gate));
+
+  assert.deepEqual((red as TrustedEvidence & { testAssetRoots?: string[] }).testAssetRoots, ["tests"]);
+  assert.deepEqual(red.testAssets.map(({ path: filename }) => filename), [
+    "tests/feature.test.mjs",
+    "tests/fixtures/value.json",
+    "tests/snapshots/value.snap",
+    "tests/support/helper.mjs",
+  ]);
+  await writeFile(path.join(root, "src", "feature.mjs"), "export const value = 1;\n", "utf8");
+  await assert.doesNotReject(
+    assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }),
+  );
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 1;\n", "utf8");
+  await assert.rejects(
+    assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+  );
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 0;\n", "utf8");
+  await writeFile(path.join(root, "tests", "fixtures", "late.json"), "{}\n", "utf8");
+  await assert.rejects(
+    assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+  );
+});
+
+test("root-level test patterns conservatively bind the repository while allowing product-only digest changes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-root-scope-"));
+  await mkdir(path.join(root, "src"), { recursive: true });
+  await writeFile(path.join(root, "feature.test.mjs"), "test source\n", "utf8");
+  await writeFile(path.join(root, "support.mjs"), "support source\n", "utf8");
+  await writeFile(path.join(root, "src", "feature.mjs"), "product 0\n", "utf8");
+  const scope = { testAssetPaths: ["*.test.mjs"], testAssetRoots: ["."], productPaths: ["src/**"] };
+
+  const before = await testAssetScopeManifest(root, scope);
+
+  assert.deepEqual(before.files.map(({ path: filename }) => filename), [
+    "feature.test.mjs",
+    "src/feature.mjs",
+    "support.mjs",
+  ]);
+  await writeFile(path.join(root, "src", "feature.mjs"), "product 1\n", "utf8");
+  const after = await testAssetScopeManifest(root, scope);
+  assert.notDeepEqual(after.files, before.files);
+  assert.equal(after.digest, before.digest);
+});
+
+test("cross-stack narrow patterns promote canonical parent directories to trusted roots", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-cross-stack-"));
+  for (const filename of [
+    "src/test/java/FeatureTest.java",
+    "src/test/resources/fixture.json",
+    "spec/feature_spec.rb",
+    "spec/fixtures/value.yml",
+    "Tests/FeatureTests.cs",
+    "Tests/Snapshots/value.snap",
+  ]) {
+    await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
+    await writeFile(path.join(root, filename), `${filename}\n`, "utf8");
+  }
+  const scope = {
+    testAssetPaths: ["src/test/**/*.java", "spec/**/*_spec.rb", "Tests/**/*Tests.cs"],
+    testAssetRoots: ["Tests", "spec", "src/test"],
+    productPaths: ["src/main/**"],
+  };
+
+  const manifest = await testAssetScopeManifest(root, scope);
+
+  assert.deepEqual(manifest.files.map(({ path: filename }) => filename), [
+    "Tests/FeatureTests.cs",
+    "Tests/Snapshots/value.snap",
+    "spec/feature_spec.rb",
+    "spec/fixtures/value.yml",
+    "src/test/java/FeatureTest.java",
+    "src/test/resources/fixture.json",
+  ]);
+});
+
+test("configured test asset scope fails closed on symlinks, entry limits and byte limits", async () => {
   const symlinkRoot = await workspace();
   await writeFile(path.join(symlinkRoot, "outside-test-asset.txt"), "outside\n", "utf8");
   await symlink(path.join(symlinkRoot, "outside-test-asset.txt"), path.join(symlinkRoot, "tests", "linked-fixture.txt"));
@@ -572,10 +670,25 @@ test("configured test asset scope fails closed on symlinks, ambiguous classifica
     (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_TEST_PATH_INVALID",
   );
 
-  const ambiguousRoot = await workspace();
-  const ambiguousGate = { ...featureGate(), productPaths: ["src/**", "tests/**"] };
+  const rootSymlink = await workspace();
+  await mkdir(path.join(rootSymlink, "linked-tests"), { recursive: true });
+  await rm(path.join(rootSymlink, "tests"), { recursive: true });
+  await symlink(path.join(rootSymlink, "linked-tests"), path.join(rootSymlink, "tests"));
   await assert.rejects(
-    recordRedEvidence(await redInput(ambiguousRoot, ambiguousGate)),
+    testAssetScopeManifest(rootSymlink, featureGate()),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_TEST_PATH_INVALID",
+  );
+
+  const overlappingRoot = await workspace();
+  const overlappingGate = { ...featureGate(), productPaths: ["src/**", "tests/**"] };
+  await assert.doesNotReject(
+    recordRedEvidence(await redInput(overlappingRoot, overlappingGate)),
+  );
+  assert.equal(isTrustedTestAssetPath("tests/feature.test.mjs", overlappingGate), true);
+  assert.equal(isTrustedTestAssetPath("src/feature.mjs", overlappingGate), false);
+
+  await assert.rejects(
+    testAssetScopeManifest(overlappingRoot, { ...overlappingGate, testAssetRoots: ["src"] }),
     (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_GATE_CONFIGURATION_INVALID",
   );
 

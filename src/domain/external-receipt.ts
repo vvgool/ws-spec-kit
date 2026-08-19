@@ -122,18 +122,21 @@ export function assertExternalReceipts(evidence: Readonly<Record<string, unknown
     .some(([key, value]) => {
       const binding = parseExternalBinding(value);
       return binding === undefined
-        || (key.startsWith("external-binding:") && key !== `external-binding:${binding.target}`);
+        || key !== `external-binding:${binding.target}`;
     });
-  const invalidReceipt = externalReceiptValues(evidence).some((value) => {
-    const receipt = parseExternalReceipt(value);
-    if (receipt === undefined) return true;
-    return !externalReceiptMatches({
-      receipt,
-      target: receipt.target,
-      binding: evidence[`external-binding:${receipt.target}`],
-      readBackRequired: true,
+  const invalidReceipt = Object.entries(evidence)
+    .filter(([key, value]) => key.startsWith("external-receipt:") || record(value)?.kind === "external-receipt")
+    .some(([key, value]) => {
+      const receipt = parseExternalReceipt(value);
+      if (receipt === undefined) return true;
+      return key !== `external-receipt:${receipt.target}`
+        || !externalReceiptMatches({
+          receipt,
+          target: receipt.target,
+          binding: evidence[`external-binding:${receipt.target}`],
+          readBackRequired: true,
+        });
     });
-  });
   if (invalidBinding || invalidReceipt) {
     const error = new Error("External receipt 不符合严格身份与内容摘要契约。") as Error & { code: string };
     error.code = code;

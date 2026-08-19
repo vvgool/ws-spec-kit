@@ -86,6 +86,12 @@
 
 首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`；引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
 
+`testing.testAssetPaths` 是测试资产选择器，不是可由项目任意收窄的可信边界。引擎把每个 pattern 在首个 `*` 或 `?` 前的静态前缀提升为 `testAssetRoots`；精确文件 pattern 使用其父目录，根级 pattern 使用仓库根 `.`。例如 `tests/*.test.mjs`、`tests/**/*.ts` 和 `tests/feature.test.ts` 都将 `tests` 作为 trusted root，`*.test.mjs` 则保守绑定整个仓库。Red、Green、Implement、Review-Fix、recovery 与 Close 都扫描这些 root 下的全部 regular file，并将 roots 与测试所有的文件摘要写入 Evidence；root 或子级 symlink、非普通文件、路径逃逸、超过 4096 个文件或总计超过 1 MiB 都 fail closed。
+
+只有仓库根 `.` 带来的文件可以应用 product-only 例外：文件匹配 `testing.productPaths` 且不匹配任何 `testAssetPaths` 时，其逐文件摘要仍记录在 `testAssets` 清单中，但不进入 TDD 测试资产聚合摘要，因此正常产品实现可以在 Red 后变化。任何非根 trusted test root 下的文件始终归测试所有，即使 `productPaths` 同时匹配；修改或新增这些文件会使原 Red Evidence 失效并重启 TDD cycle。
+
+External binding 与 receipt 只允许存入与自身 target 一致的规范 Evidence key：`external-binding:<target>` 与 `external-receipt:<target>`。append、event replay/recovery、archive 写入和 Close 使用同一 key/target、稳定身份、发布 Attempt、输入摘要及发布/回读内容摘要校验；错位 key 或陈旧 receipt 均 fail closed。
+
 ```yaml contract=schema:builtin.application-project-config-snapshot.v1
 version: 1
 skills:

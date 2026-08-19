@@ -24,6 +24,7 @@ export interface FixedTestGate {
   env: Readonly<Record<string, string>>;
   testPathRules: readonly TestPathRule[];
   testAssetPaths: readonly string[];
+  testAssetRoots: readonly string[];
   productPaths: readonly string[];
   reporter: { type: "node-test"; version: 1 };
 }
@@ -50,6 +51,7 @@ export interface TrustedEvidence {
   testAssets: TestFileDigest[];
   testAssetsDigest: string;
   testAssetPaths: string[];
+  testAssetRoots: string[];
   productPaths: string[];
   workspaceDigest: string;
   summary: string;
@@ -62,6 +64,7 @@ export interface TddCycleEvidence {
   testAssets: TestFileDigest[];
   testAssetsDigest: string;
   testAssetPaths: string[];
+  testAssetRoots: string[];
   productPaths: string[];
   commandId: string;
   redEvidenceId: string;

@@ -49,6 +49,7 @@ function trustedTddEvidence(phase: "red" | "green", overrides: Partial<TrustedEv
     testAssets: [{ path: "tests/feature.test.mjs", digest: "sha256:test" }],
     testAssetsDigest: "sha256:test-assets",
     testAssetPaths: ["tests/**"],
+    testAssetRoots: ["tests"],
     productPaths: ["src/**"],
     workspaceDigest: phase === "red" ? "sha256:red-workspace" : "sha256:workspace",
     summary: phase === "red" ? "feature is red" : "all tests passed",
@@ -242,11 +243,11 @@ test("Close binds external receipt identity and published/read-back content to t
     publishInputDigest: "sha256:publish-input",
     expectedPublishedContentDigest: "sha256:published",
   };
-  const input = (value: Record<string, unknown>, binding: Record<string, unknown> = currentBinding) => closeChecklist({
+  const input = (value: Record<string, unknown>, binding: Record<string, unknown> = currentBinding, receiptKey = "external-receipt:issue") => closeChecklist({
     profile: { ...selected, publishing: { issueRequired: true, knowledgeRequired: false, readBackRequired: true } },
     projection: {
       ...base,
-      evidence: { [`external-binding:issue`]: binding, "external-receipt:issue": value },
+      evidence: { [`external-binding:issue`]: binding, [receiptKey]: value },
     },
     gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
     gates: [],
@@ -278,6 +279,10 @@ test("Close binds external receipt identity and published/read-back content to t
   );
   assert.deepEqual(
     input(receipt, { ...currentBinding, target: "knowledge" }).missing.filter(({ category }) => category === "external-receipt"),
+    [{ category: "external-receipt", id: "issue" }],
+  );
+  assert.deepEqual(
+    input(receipt, currentBinding, "external-receipt:knowledge").missing.filter(({ category }) => category === "external-receipt"),
     [{ category: "external-receipt", id: "issue" }],
   );
 });
@@ -372,6 +377,7 @@ test("Close requires a schema-valid linked Red and Green TDD evidence chain", ()
     testAssets: [...red.testAssets],
     testAssetsDigest: red.testAssetsDigest,
     testAssetPaths: [...red.testAssetPaths],
+    testAssetRoots: [...red.testAssetRoots],
     productPaths: [...red.productPaths],
     commandId: red.commandId,
     redEvidenceId: red.evidenceId,
@@ -397,7 +403,7 @@ test("Close rejects a TDD cycle when the configured test asset scope changes aft
   await writeFile(path.join(worktree, "tests", "feature.test.mjs"), "test source\n", "utf8");
   await writeFile(path.join(worktree, "src", "feature.mjs"), "product source\n", "utf8");
   const tests = await testFileManifest(worktree, ["tests/feature.test.mjs"], ["node"]);
-  const assets = await testAssetScopeManifest(worktree, { testAssetPaths: ["tests/**"], productPaths: ["src/**"] });
+  const assets = await testAssetScopeManifest(worktree, { testAssetPaths: ["tests/**"], testAssetRoots: ["tests"], productPaths: ["src/**"] });
   const red = trustedTddEvidence("red", {
     testPaths: tests.files.map(({ path: filename }) => filename),
     testFiles: tests.files,
@@ -419,6 +425,7 @@ test("Close rejects a TDD cycle when the configured test asset scope changes aft
     testAssets: [...red.testAssets],
     testAssetsDigest: red.testAssetsDigest,
     testAssetPaths: [...red.testAssetPaths],
+    testAssetRoots: [...red.testAssetRoots],
     productPaths: [...red.productPaths],
     commandId: red.commandId,
     redEvidenceId: red.evidenceId,
@@ -1296,6 +1303,116 @@ test("external binding validation rejects invalid binding-only evidence before a
   await assert.rejects(access(auditPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
 });
 
+test("external receipt validation rejects a canonical key whose suffix disagrees with receipt target", async () => {
+  const { fixture, started } = await prepareCloseFixture();
+  const before = await readControlPlane(fixture.root, started.workItemId);
+  const eventsBefore = await readEvents(before.controlPlane);
+  const binding = {
+    version: 1,
+    kind: "external-binding",
+    target: "issue",
+    exists: true,
+    stableId: "issue-current",
+    externalWorkItemId: started.workItemId,
+    publishStepId: "update-issue",
+    publishAttemptId: "attempt-update-issue",
+    publishInputDigest: "sha256:publish-input",
+    expectedPublishedContentDigest: "sha256:published",
+  };
+  const receipt = {
+    version: 1,
+    kind: "external-receipt",
+    target: "issue",
+    stableId: binding.stableId,
+    externalWorkItemId: binding.externalWorkItemId,
+    publishStepId: binding.publishStepId,
+    publishAttemptId: binding.publishAttemptId,
+    publishInputDigest: binding.publishInputDigest,
+    publishedContentDigest: binding.expectedPublishedContentDigest,
+    readBackContentDigest: binding.expectedPublishedContentDigest,
+    status: "confirmed",
+    readBackStatus: "confirmed",
+  };
+
+  await assert.rejects(
+    mutateControlPlane({
+      cwd: fixture.root,
+      workItemId: started.workItemId,
+      eventType: "evidence.recorded",
+      idempotencyKey: "test:mismatched-external-receipt-target",
+      operationInput: receipt,
+      mutate: (current) => ({
+        projection: {
+          ...current,
+          evidence: {
+            ...current.evidence,
+            "external-binding:issue": binding,
+            "external-receipt:knowledge": receipt,
+          },
+        },
+        value: null,
+      }),
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_INVALID",
+  );
+  assert.equal((await readEvents(before.controlPlane)).length, eventsBefore.length);
+
+  await assert.rejects(
+    mutateControlPlane({
+      cwd: fixture.root,
+      workItemId: started.workItemId,
+      eventType: "evidence.recorded",
+      idempotencyKey: "test:noncanonical-external-receipt-key",
+      operationInput: receipt,
+      mutate: (current) => ({
+        projection: {
+          ...current,
+          evidence: {
+            ...current.evidence,
+            "external-binding:issue": binding,
+            publicationReceipt: receipt,
+          },
+        },
+        value: null,
+      }),
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_INVALID",
+  );
+  assert.equal((await readEvents(before.controlPlane)).length, eventsBefore.length);
+
+  const invalidEvidence = {
+    ...before.evidence,
+    "external-binding:issue": binding,
+    "external-receipt:knowledge": receipt,
+  };
+  const source = eventsBefore.find(({ eventType }) => !["work-item.transitioned", "stage.transitioned"].includes(eventType));
+  assert.ok(source);
+  assert.throws(
+    () => replayEvents({
+      repositoryId: before.repositoryId,
+      workItemId: before.workItemId,
+      stageIds: Object.keys(before.stages),
+      controlPlane: before.controlPlane,
+      events: [{ ...source, result: { ...(source.result as Record<string, unknown>), projection: { evidence: invalidEvidence } } }],
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+  );
+
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const auditPath = path.join(worktree, ".wsspec", "archive", started.workItemId, "audit.json");
+  await assert.rejects(
+    writeArchiveSnapshot({
+      projection: { ...before, evidence: invalidEvidence },
+      worktree,
+      closedAt: "2026-08-19T00:00:00.000Z",
+      workspaceTreeDigest: "sha256:workspace",
+      artifactTreeDigest: "sha256:artifacts",
+    }),
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+  );
+  await assert.rejects(access(auditPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
 test("event replay rejects TDD cycles whose scope or Green references do not bind the stored evidence", async () => {
   const { fixture, started } = await prepareCloseFixture();
   const before = await readControlPlane(fixture.root, started.workItemId);
@@ -1313,6 +1430,7 @@ test("event replay rejects TDD cycles whose scope or Green references do not bin
     testAssets: red.testAssets,
     testAssetsDigest: red.testAssetsDigest,
     testAssetPaths: red.testAssetPaths,
+    testAssetRoots: red.testAssetRoots,
     productPaths: red.productPaths,
   });
   const cycle = {
@@ -1322,6 +1440,7 @@ test("event replay rejects TDD cycles whose scope or Green references do not bin
     testAssets: red.testAssets,
     testAssetsDigest: red.testAssetsDigest,
     testAssetPaths: red.testAssetPaths,
+    testAssetRoots: red.testAssetRoots,
     productPaths: red.productPaths,
     commandId: red.commandId,
     redEvidenceId: red.evidenceId,

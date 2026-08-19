@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import * as canonicalizeModule from "canonicalize";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../../domain/digests.js";
-import { matchesRepositoryPath, resolveRepositoryRegularFile } from "../../domain/repository-path.js";
+import { isRepositoryRelativePattern, matchesRepositoryPath, resolveRepositoryRegularFile } from "../../domain/repository-path.js";
 import { validate } from "../../schemas/index.js";
 import {
   testPathRules as supportedTestPathRules,
@@ -145,46 +145,82 @@ export async function testFileManifest(worktree: string, testPaths: readonly str
   return fileManifest(worktree, paths, "Test Gate 至少需要一个测试文件。 ");
 }
 
-type TestingScope = Pick<FixedTestGate, "testAssetPaths" | "productPaths">;
+type TestingScope = Pick<FixedTestGate, "testAssetPaths" | "testAssetRoots" | "productPaths">;
 
 function scopeRoot(pattern: string): string {
   const segments = pattern.split("/");
   const firstPattern = segments.findIndex((segment) => /[*?]/u.test(segment));
-  return firstPattern < 0 ? segments.slice(0, -1).join("/") : segments.slice(0, firstPattern).join("/");
+  const root = firstPattern < 0 ? segments.slice(0, -1).join("/") : segments.slice(0, firstPattern).join("/");
+  return root === "" ? "." : root;
+}
+
+export function deriveTestAssetRoots(patterns: readonly string[]): string[] {
+  if (patterns.length === 0 || patterns.some((pattern) => !isRepositoryRelativePattern(pattern))) {
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Test Gate 缺少有限且规范的测试资产 pattern。 ");
+  }
+  return [...new Set(patterns.map(scopeRoot))].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+}
+
+function withinRoot(filename: string, root: string): boolean {
+  return root === "." || filename.startsWith(`${root}/`);
+}
+
+export function isTrustedTestAssetPath(filename: string, scope: TestingScope): boolean {
+  if (!scope.testAssetRoots.some((root) => withinRoot(filename, root))) return false;
+  if (scope.testAssetRoots.some((root) => root !== "." && withinRoot(filename, root))) return true;
+  if (scope.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, filename))) return true;
+  return !scope.productPaths.some((pattern) => matchesRepositoryPath(pattern, filename));
+}
+
+export function trustedTestAssetFiles(files: readonly TestFileDigest[], scope: TestingScope): TestFileDigest[] {
+  return files.filter(({ path: filename }) => isTrustedTestAssetPath(filename, scope));
 }
 
 export async function testAssetScopeManifest(worktree: string, scope: TestingScope): Promise<{ files: TestFileDigest[]; digest: string }> {
   const canonicalRoot = await realpath(worktree);
-  const configuredRoots = [...new Set(scope.testAssetPaths.map(scopeRoot))];
-  const roots = configuredRoots.includes("") ? [""] : configuredRoots
-    .filter((candidate) => !configuredRoots.some((other) => other !== candidate && candidate.startsWith(`${other}/`)))
+  const derivedRoots = deriveTestAssetRoots(scope.testAssetPaths);
+  if (JSON.stringify(scope.testAssetRoots) !== JSON.stringify(derivedRoots)) {
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Test Gate 的 trusted test asset roots 与 pattern 静态前缀不一致。 ");
+  }
+  const roots = derivedRoots.includes(".") ? ["."] : derivedRoots
+    .filter((candidate) => !derivedRoots.some((other) => other !== candidate && candidate.startsWith(`${other}/`)))
     .sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
   const candidates = new Set<string>();
   const walk = async (relativeDirectory: string): Promise<void> => {
-    const absoluteDirectory = relativeDirectory === "" ? canonicalRoot : path.join(canonicalRoot, ...relativeDirectory.split("/"));
+    const requestedDirectory = relativeDirectory === "." ? canonicalRoot : path.join(canonicalRoot, ...relativeDirectory.split("/"));
+    let rootStat;
+    try { rootStat = await lstat(requestedDirectory); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 无法读取：${relativeDirectory}`);
+    }
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 必须是工作区内 canonical directory：${relativeDirectory}`);
+    }
+    let absoluteDirectory: string;
+    try { absoluteDirectory = await realpath(requestedDirectory); }
+    catch { throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 无法解析：${relativeDirectory}`); }
+    const canonicalRelative = path.relative(canonicalRoot, absoluteDirectory);
+    if (absoluteDirectory !== requestedDirectory
+      || (relativeDirectory !== "." && (canonicalRelative === "" || canonicalRelative.startsWith("..") || path.isAbsolute(canonicalRelative)))) {
+      throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 越出工作区或经过 symlink：${relativeDirectory}`);
+    }
     let entries;
     try { entries = await readdir(absoluteDirectory, { withFileTypes: true }); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域无法读取：${relativeDirectory || "."}`);
+      throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 无法读取：${relativeDirectory}`);
     }
     entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
     for (const entry of entries) {
-      if (relativeDirectory === "" && entry.name === ".git") continue;
-      const relative = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
-      const testAsset = scope.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, relative));
-      const product = scope.productPaths.some((pattern) => matchesRepositoryPath(pattern, relative));
-      if (testAsset && product) throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", `测试资产路径无法唯一分类：${relative}`);
-      if (entry.isSymbolicLink()) {
-        if (testAsset) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域不允许 symlink：${relative}`);
-        continue;
-      }
+      if (relativeDirectory === "." && entry.name === ".git") continue;
+      const relative = relativeDirectory === "." ? entry.name : `${relativeDirectory}/${entry.name}`;
+      if (entry.isSymbolicLink()) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 不允许 symlink：${relative}`);
       if (entry.isDirectory()) {
         await walk(relative);
         continue;
       }
-      if (!testAsset) continue;
-      if (!entry.isFile()) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产必须是普通文件：${relative}`);
+      if (!entry.isFile()) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 只允许普通文件：${relative}`);
       candidates.add(relative);
       if (candidates.size > testAssetLimit) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域超过 ${testAssetLimit} 个文件。`);
     }
@@ -201,8 +237,9 @@ export async function testAssetScopeManifest(worktree: string, scope: TestingSco
     if (totalBytes > testAssetByteLimit) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域超过 ${testAssetByteLimit} 字节。`);
     files.push({ path: filename, digest: sha256(content) });
   }
-  if (files.length === 0) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", "Test Gate 配置的测试资产作用域为空。 ");
-  return { files, digest: sha256(`${JSON.stringify({ version: 1, files })}\n`) };
+  const trustedFiles = trustedTestAssetFiles(files, scope);
+  if (trustedFiles.length === 0) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", "Test Gate 配置的 trusted test asset roots 为空。 ");
+  return { files, digest: sha256(`${JSON.stringify({ version: 2, testAssetRoots: derivedRoots, files: trustedFiles })}\n`) };
 }
 
 function effectiveEnvironment(gate: FixedTestGate): Record<string, string> {
@@ -242,7 +279,7 @@ async function resolveExecutable(command: string, environment: Readonly<Record<s
 }
 
 function gateConfiguration(gate: FixedTestGate): Record<string, unknown> {
-  return { commandId: gate.commandId, argv: [...gate.argv], cwd: gate.cwd, timeoutMs: gate.timeoutMs, inheritEnv: [...gate.inheritEnv], env: gate.env, testPathRules: [...gate.testPathRules], testAssetPaths: [...gate.testAssetPaths], productPaths: [...gate.productPaths], reporter: gate.reporter };
+  return { commandId: gate.commandId, argv: [...gate.argv], cwd: gate.cwd, timeoutMs: gate.timeoutMs, inheritEnv: [...gate.inheritEnv], env: gate.env, testPathRules: [...gate.testPathRules], testAssetPaths: [...gate.testAssetPaths], testAssetRoots: [...gate.testAssetRoots], productPaths: [...gate.productPaths], reporter: gate.reporter };
 }
 
 async function resolveGate(gate: FixedTestGate, worktree: string): Promise<ResolvedGate> {
@@ -411,8 +448,8 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
     testAssetScopeManifest(input.worktree, input.gate),
   ]);
   if (outputWorkspaceDigest !== currentWorkspaceDigest || outputManifest.digest !== manifest.digest || assetManifest.digest !== initialAssetManifest.digest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 执行期间修改了 workspace 或测试资产。 ");
-  if (manifest.files.some(({ path: filename }) => !assetManifest.files.some((asset) => asset.path === filename))) {
-    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "测试入口不在 Project Config 的 testAssetPaths 作用域内。 ");
+  if (manifest.files.some(({ path: filename }) => !isTrustedTestAssetPath(filename, input.gate))) {
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "测试入口不在编译后的 trusted test asset roots 所有权范围内。 ");
   }
   if (report.truncated || report.failureTotal !== report.failures.length || report.failureTotal !== report.summary.failed) {
     throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test reporter failure 聚合不完整，不能形成可信 Evidence。 ");
@@ -447,6 +484,7 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
     testAssets: assetManifest.files,
     testAssetsDigest: assetManifest.digest,
     testAssetPaths: [...input.gate.testAssetPaths],
+    testAssetRoots: [...input.gate.testAssetRoots],
     productPaths: [...input.gate.productPaths],
     workspaceDigest: outputWorkspaceDigest,
     summary,

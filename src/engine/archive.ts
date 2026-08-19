@@ -12,7 +12,7 @@ import {
   tddRedEvidenceKey,
   type EvidenceLevel,
 } from "./verification.js";
-import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./tdd/red-gate.js";
+import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest, trustedTestAssetFiles } from "./tdd/red-gate.js";
 import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
 import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
@@ -215,17 +215,21 @@ function independentReviewsSatisfied(input: CloseChecklistInput, step: SnapshotS
 function externalReceiptSatisfied(input: CloseChecklistInput, target: "issue" | "knowledge"): boolean {
   const binding = input.projection.evidence[`external-binding:${target}`];
   if (binding === undefined) return false;
-  return Object.values(input.projection.evidence).some((receipt) => externalReceiptMatches({
-    receipt,
+  return externalReceiptMatches({
+    receipt: input.projection.evidence[`external-receipt:${target}`],
     target,
     binding,
     readBackRequired: input.profile.publishing.readBackRequired === true,
-  }));
+  });
 }
 
 function sameValues(left: unknown, right: unknown): boolean {
   const encoded = canonicalize(left);
   return encoded !== undefined && encoded === canonicalize(right);
+}
+
+function sameTrustedAssets(left: TrustedEvidence, right: TrustedEvidence): boolean {
+  return sameValues(trustedTestAssetFiles(left.testAssets, left), trustedTestAssetFiles(right.testAssets, right));
 }
 
 function closeRedEvidence(input: CloseChecklistInput): TrustedEvidence | undefined {
@@ -243,8 +247,9 @@ function greenMatchesRed(green: TrustedEvidence, red: TrustedEvidence): boolean 
     && sameValues(green.testPaths, red.testPaths)
     && sameValues(green.testFiles, red.testFiles)
     && sameValues(green.testPathRules, red.testPathRules)
-    && sameValues(green.testAssets, red.testAssets)
+    && sameTrustedAssets(green, red)
     && sameValues(green.testAssetPaths, red.testAssetPaths)
+    && sameValues(green.testAssetRoots, red.testAssetRoots)
     && sameValues(green.productPaths, red.productPaths);
 }
 
@@ -260,6 +265,7 @@ function completeTddCycle(input: CloseChecklistInput): boolean {
     || cycle.testAssetsDigest !== red.testAssetsDigest
     || !sameValues(cycle.testAssets, red.testAssets)
     || !sameValues(cycle.testAssetPaths, red.testAssetPaths)
+    || !sameValues(cycle.testAssetRoots, red.testAssetRoots)
     || !sameValues(cycle.productPaths, red.productPaths)) return false;
   const green = parseTrustedEvidence(input.projection.evidence[tddGreenEvidenceKey(input.projection.workItemId, cycle.greenEvidenceId)]);
   if (green === undefined || green.evidenceId !== cycle.greenEvidenceId || !greenMatchesRed(green, red)) return false;
@@ -383,7 +389,7 @@ export async function closeChecklistForWorktree(input: WorktreeCloseChecklistInp
     try {
       const [tests, assets] = await Promise.all([
         testFileManifest(input.worktree, red.testPaths, red.testPathRules),
-        testAssetScopeManifest(input.worktree, { testAssetPaths: red.testAssetPaths, productPaths: red.productPaths }),
+        testAssetScopeManifest(input.worktree, { testAssetPaths: red.testAssetPaths, testAssetRoots: red.testAssetRoots, productPaths: red.productPaths }),
       ]);
       if (tests.digest !== red.testPathsDigest || assets.digest !== red.testAssetsDigest) throw new Error("TDD scope mismatch");
     } catch {

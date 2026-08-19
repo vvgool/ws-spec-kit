@@ -8,7 +8,7 @@ import { deriveInitialStages } from "../application/initial-stages.js";
 import type { LoopProjection, RetryProjection, StageState, WorkItemState } from "../domain/states.js";
 import { sha256, type TreeEntry } from "../domain/digests.js";
 import { assertExternalReceipts } from "../domain/external-receipt.js";
-import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "../engine/tdd/red-gate.js";
+import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest, trustedTestAssetFiles } from "../engine/tdd/red-gate.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { interruptedRetry } from "../engine/control/retry.js";
 import { emptyRuntimeRiskSignals, type RuntimeProfileProjection } from "../application/profile.js";
@@ -127,6 +127,7 @@ function assertedTddEvidence(projection: RuntimeProjection): { red?: import("../
         || !sameCanonicalValue(cycle.testPathRules, red.testPathRules)
         || !sameCanonicalValue(cycle.testAssets, red.testAssets)
         || !sameCanonicalValue(cycle.testAssetPaths, red.testAssetPaths)
+        || !sameCanonicalValue(cycle.testAssetRoots, red.testAssetRoots)
         || !sameCanonicalValue(cycle.productPaths, red.productPaths)) {
         throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件重放包含无效或不兼容的 TDD Cycle Evidence。");
       }
@@ -141,8 +142,9 @@ function assertedTddEvidence(projection: RuntimeProjection): { red?: import("../
       || !sameCanonicalValue(green.testPaths, red.testPaths)
       || !sameCanonicalValue(green.testFiles, red.testFiles)
       || !sameCanonicalValue(green.testPathRules, red.testPathRules)
-      || !sameCanonicalValue(green.testAssets, red.testAssets)
+      || !sameCanonicalValue(trustedTestAssetFiles(green.testAssets, green), trustedTestAssetFiles(red.testAssets, red))
       || !sameCanonicalValue(green.testAssetPaths, red.testAssetPaths)
+      || !sameCanonicalValue(green.testAssetRoots, red.testAssetRoots)
       || !sameCanonicalValue(green.productPaths, red.productPaths)) {
       throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件重放包含未绑定当前 Red 的 Green Evidence。");
     }
@@ -163,7 +165,7 @@ async function assertRecoveredTddScope(worktree: string, projection: RuntimeProj
   try {
     [tests, assets] = await Promise.all([
       testFileManifest(worktree, red.testPaths, red.testPathRules),
-      testAssetScopeManifest(worktree, { testAssetPaths: red.testAssetPaths, productPaths: red.productPaths }),
+      testAssetScopeManifest(worktree, { testAssetPaths: red.testAssetPaths, testAssetRoots: red.testAssetRoots, productPaths: red.productPaths }),
     ]);
   } catch {
     throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件恢复时测试资产作用域已新增、删除或修改，旧 Red Evidence 失效。");

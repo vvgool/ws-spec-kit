@@ -20,6 +20,7 @@
     "testAssets",
     "testAssetsDigest",
     "testAssetPaths",
+    "testAssetRoots",
     "productPaths",
     "workspaceDigest",
     "summary"
@@ -142,6 +143,16 @@
       "pattern": "^sha256:.+$"
     },
     "testAssetPaths": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    },
+    "testAssetRoots": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
