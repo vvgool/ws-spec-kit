@@ -20,8 +20,6 @@ export function canonicalDigest(value: unknown, code: `WSSPEC_${string}` = "WSSP
 export interface ExternalIdempotencyIdentity {
   workItemId: string;
   stepId: string;
-  provider: string;
-  action: string;
   target: { stableId: string };
   payloadDigest: string;
 }
@@ -30,8 +28,6 @@ export function externalIdempotencyKey(input: ExternalIdempotencyIdentity): stri
   return `external:${canonicalDigest({
     workItemId: input.workItemId,
     stepId: input.stepId,
-    provider: input.provider,
-    action: input.action,
     targetStableId: input.target.stableId,
     payloadDigest: input.payloadDigest,
   }, "WSSPEC_EXTERNAL_IDEMPOTENCY_INVALID").slice("sha256:".length)}`;

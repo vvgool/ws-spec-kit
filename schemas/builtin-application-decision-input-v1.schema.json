@@ -133,6 +133,38 @@
           "minLength": 1
         }
       }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "root",
+        "workItemId",
+        "requestId",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "external_reconciliation"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workItemId": {
+          "type": "string",
+          "pattern": "^WSS-[A-Za-z0-9-]+$"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   ]
 }

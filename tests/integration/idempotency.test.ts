@@ -26,17 +26,37 @@ async function approvedAction() {
   return { ...fixture, input, approved };
 }
 
-test("canonical idempotency key binds work item, step, provider, action, stable target, and payload digest", async () => {
+test("canonical idempotency key binds exactly work item, step, stable target, and payload digest", async () => {
   const fixture = await externalActionFixture();
   const first = await prepareExternalAction(prepareInput(fixture.root, fixture.workPackage));
   const repeated = await prepareExternalAction(prepareInput(fixture.root, fixture.workPackage));
   assert.deepEqual(repeated, first);
   assert.equal(first.request.idempotencyKey, externalIdempotencyKey(first.request));
 
+  const providerChanged = { ...first.request, provider: "gitlab" };
+  const actionChanged = { ...first.request, action: "issue.close" };
+  assert.equal(externalIdempotencyKey(providerChanged), first.request.idempotencyKey);
+  assert.equal(externalIdempotencyKey(actionChanged), first.request.idempotencyKey);
+
   await assert.rejects(prepareExternalAction(prepareInput(fixture.root, fixture.workPackage, {
     idempotencyKey: first.request.idempotencyKey,
     payload: { body: "different payload" },
   })), (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT");
+});
+
+test("provider or action changes conflict with an existing canonical logical write", async () => {
+  const fixture = await externalActionFixture();
+  await prepareExternalAction(prepareInput(fixture.root, fixture.workPackage));
+
+  for (const changed of [
+    { provider: "gitlab" },
+    { action: "issue.close" as const },
+  ]) {
+    await assert.rejects(
+      prepareExternalAction(prepareInput(fixture.root, fixture.workPackage, changed)),
+      (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT",
+    );
+  }
 });
 
 test("verified duplicate execute returns the original receipt without another provider call", async () => {
@@ -117,4 +137,38 @@ test("repeated application submit reuses the approved logical request when the c
   const completed = await submitExternalAction(fixture);
   assert.equal(completed.action, "completed");
   assert.equal(writes, 1);
+});
+
+test("concurrent application submits atomically assign one Provider dispatch owner", async () => {
+  let providerCalls = 0;
+  let enteredResolve!: () => void;
+  let releaseResolve!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+  const release = new Promise<void>((resolve) => { releaseResolve = resolve; });
+  const fixture = await applicationExternalActionFixture({
+    async execute({ request, markDispatched }) {
+      providerCalls += 1;
+      enteredResolve();
+      await release;
+      await markDispatched();
+      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
+    },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "approved", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+
+  const submissions = Promise.all([submitExternalAction(fixture), submitExternalAction(fixture)]);
+  await entered;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  releaseResolve();
+  await submissions;
+
+  assert.equal(providerCalls, 1);
+  assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId]?.status, "verified");
 });

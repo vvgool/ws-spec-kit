@@ -7,7 +7,7 @@ import { readWorkflowTrustRequest } from "../storage/workflow-trust.js";
 import { loadWorkflowPackage } from "../workflow-package/loader.js";
 import { recordWorkflowTrust } from "../workflow-package/trust.js";
 import { acquireApplication, type AcquireDependencies } from "./acquire.js";
-import { approveExternalAction, rejectExternalAction } from "./external-action.js";
+import { approveExternalAction, reconcileExternalAction, rejectExternalAction } from "./external-action.js";
 import { readControlPlane } from "../storage/control-plane.js";
 
 export interface DecideDependencies extends AcquireDependencies {
@@ -68,6 +68,20 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
     return input.decision === "trusted"
       ? { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_TRUST_RECORDED", message: "已记录 Workflow 信任决定，请重新执行 start。", retryable: true }] }
       : { action: "blocked", problems: [{ code: "WSSPEC_WORKFLOW_TRUST_REJECTED", message: "Workflow Package 已被拒绝。", retryable: false }] };
+  }
+
+  if (input.kind === "external_reconciliation") {
+    const projection = await readControlPlane(input.root, input.workItemId);
+    const state = projection.externalActions[input.requestId];
+    if (state === undefined) throw new ApplicationDecisionError("WSSPEC_EXTERNAL_REQUEST_NOT_FOUND", "外部动作请求不存在。 ");
+    await reconcileExternalAction({
+      root: input.root,
+      workItemId: input.workItemId,
+      requestId: input.requestId,
+      executor: dependencies.externalExecutor(state.request.provider, state.request.action),
+      now: dependencies.now().toISOString(),
+    });
+    return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
   }
 
   if (input.kind === "external_action") {

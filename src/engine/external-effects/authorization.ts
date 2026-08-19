@@ -88,7 +88,7 @@ export interface ExternalWriteReceipt {
 export type ExternalActionState =
   | { status: "prepared"; request: ExternalActionRequest }
   | { status: "approved"; request: ExternalActionRequest; grant: ExternalActionGrant }
-  | { status: "executing"; request: ExternalActionRequest; grant: ExternalActionGrant; dispatch: "not_sent" | "sent_or_unknown"; startedAt: string; dispatchedAt?: string }
+  | { status: "executing"; request: ExternalActionRequest; grant: ExternalActionGrant; dispatch: "not_sent" | "sent_or_unknown"; startedAt: string; executionOwner?: string; dispatchedAt?: string }
   | { status: "reconciliation_required"; request: ExternalActionRequest; grant: ExternalActionGrant; reason: string; requiredAt: string; lastCheckedAt?: string }
   | { status: "verified"; request: ExternalActionRequest; grant: ExternalActionGrant; receipt: ExternalWriteReceipt }
   | { status: "failed"; request: ExternalActionRequest; grant: ExternalActionGrant; reason: string; failedAt: string };
@@ -271,6 +271,9 @@ export function assertExternalActionProjection(
     assertGrantAuthorizes(request, grant, new Date(grant.decidedAt));
     if (state.status === "approved") continue;
     if (state.status === "executing") {
+      if (state.executionOwner !== undefined && state.executionOwner === "") {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROJECTION_INVALID", "外部动作执行 owner 无效。");
+      }
       if (state.dispatch === "sent_or_unknown" && state.dispatchedAt === undefined) {
         throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROJECTION_INVALID", "外部动作 dispatch 投影缺少时间证据。");
       }

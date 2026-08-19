@@ -52,6 +52,7 @@ import {
   type ExternalWriteReceipt,
 } from "./external-action.js";
 import { canonicalDigest } from "../engine/external-effects/idempotency.js";
+import { evaluateExternalDelivery, type ExternalDeliveryStatus } from "../engine/external-effects/reconciliation.js";
 
 export interface SubmitDependencies extends AcquireDependencies {
   executors: ExecutorRegistry;
@@ -156,8 +157,14 @@ function internalPath(workItemId: string, filename: string): boolean {
 
 async function actualChangedFiles(state: ApplicationState, before: readonly TreeEntry[]): Promise<string[]> {
   const after = await computeWorkspaceSnapshot(state.worktree);
-  const beforeByPath = new Map(before.map((entry) => [entry.path, JSON.stringify(entry)]));
-  const afterByPath = new Map(after.map((entry) => [entry.path, JSON.stringify(entry)]));
+  const identity = (entry: TreeEntry): string => JSON.stringify([
+    entry.type,
+    entry.mode,
+    entry.digest ?? null,
+    entry.target ?? null,
+  ]);
+  const beforeByPath = new Map(before.map((entry) => [entry.path, identity(entry)]));
+  const afterByPath = new Map(after.map((entry) => [entry.path, identity(entry)]));
   return [...new Set([...beforeByPath.keys(), ...afterByPath.keys()].filter((file) => beforeByPath.get(file) !== afterByPath.get(file)))]
     .filter((file) => !internalPath(state.item.workItemId, file))
     .sort((left, right) => left.localeCompare(right));
@@ -462,6 +469,27 @@ function previousVerifiedIssueUpdate(projection: RuntimeProjection, stableId: st
     .at(-1)?.receipt;
 }
 
+function knowledgeDeliveryStatus(
+  projection: RuntimeProjection,
+  profile: ReturnType<typeof selectedProfile>,
+): ExternalDeliveryStatus {
+  const actions = Object.values(projection.externalActions)
+    .filter((state) => state.request.action === "knowledge.publish")
+    .sort((left, right) => left.request.createdAt.localeCompare(right.request.createdAt));
+  const latest = actions.at(-1);
+  if (latest !== undefined) {
+    if (latest.status === "failed") {
+      const warning = projection.evidence[`external-warning:${latest.request.requestId}`] as { code?: unknown } | undefined;
+      if (warning?.code === "WSSPEC_OPTIONAL_KNOWLEDGE_FAILED") return "warning";
+    }
+    return latest.status;
+  }
+  const steps = profile.steps.filter((step) => step.action === "knowledge.publish");
+  if (steps.length === 0) return "absent";
+  if (steps.every((step) => projection.stages[step.id]?.status === "skipped")) return "skipped";
+  return "missing";
+}
+
 async function governExternalSubmit(
   input: SubmitInput,
   state: ApplicationState,
@@ -509,6 +537,15 @@ async function governExternalSubmit(
     const previous = previousVerifiedIssueUpdate(state.projection, discovered.stableId);
     if (previous === undefined) {
       throw new ApplicationSubmitError("WSSPEC_EXTERNAL_ORDER_INVALID", "Issue Close 前缺少已验证的 Issue Update Receipt。 ");
+    }
+    const delivery = evaluateExternalDelivery({
+      issueUpdate: "verified",
+      knowledge: knowledgeDeliveryStatus(state.projection, profile),
+      knowledgeRequired: profile.publishing.knowledgeRequired,
+      issueClose: "verified",
+    });
+    if (!delivery.allowed) {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_ORDER_INVALID", "Issue Close 前的 Knowledge 发布状态尚未满足 Profile 约束。 ");
     }
     bindingDigest = canonicalDigest({ kind: "issue", ...discovered }, "WSSPEC_EXTERNAL_BINDING_INVALID");
     inputDigest = previous.readBackContentDigest;
@@ -595,6 +632,9 @@ async function governExternalSubmit(
   }
   if (governed.status === "reconciliation_required") {
     return { input, action: externalBlocked("WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED", "外部动作结果未知，必须先完成只读协调回查。") };
+  }
+  if (governed.status === "executing") {
+    return { input, action: externalBlocked("WSSPEC_EXTERNAL_EXECUTION_IN_PROGRESS", "外部动作已有执行 owner，请稍后重试。", true) };
   }
   return {
     input: { ...input, result: { ...input.result, externalWrites: [{ ...governed.receipt }] } },

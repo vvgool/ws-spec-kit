@@ -91,6 +91,41 @@ test("AgentAction 只接受四种公开动作", () => {
   );
 });
 
+test("await_approval 的 step 与 workflow_trust variant 禁止外部动作字段", () => {
+  const base = {
+    action: "await_approval",
+    approval: {
+      kind: "step",
+      requestId: "approval-01",
+      workItemId: "WSS-20260817-001",
+      title: "批准方案设计",
+      digest: "sha256:approval",
+    },
+  } as const;
+  const externalFields = {
+    provider: "github",
+    action: "issue.update",
+    target: { kind: "issue", stableId: "github:example/project#42" },
+    sideEffects: ["更新 Issue 正文"],
+  };
+
+  for (const kind of ["step", "workflow_trust"] as const) {
+    assert.throws(
+      () => validate("builtin.agent-action.v1" as SchemaId, {
+        ...base,
+        approval: { ...base.approval, kind, ...externalFields },
+      }),
+      (error: unknown) => error instanceof SchemaValidationError,
+    );
+  }
+
+  const external = {
+    ...base,
+    approval: { ...base.approval, kind: "external_action", ...externalFields },
+  };
+  assert.deepEqual(validate("builtin.agent-action.v1" as SchemaId, external), external);
+});
+
 test("Work Package 只携带执行引用和约束", () => {
   assert.deepEqual(validate("builtin.work-package.v1" as SchemaId, workPackage), workPackage);
 
@@ -140,7 +175,7 @@ test("StartInput 支持显式 Workflow，也允许交给项目 activeWorkflow", 
   assert.deepEqual(validate("builtin.application-start-input.v1" as SchemaId, explicit), explicit);
 });
 
-test("DecisionInput 只接受执行审批或 Workflow Package 信任决定", () => {
+test("DecisionInput 只接受执行审批、Workflow Package 信任决定或外部只读协调", () => {
   const approval = {
     kind: "approval",
     root: "/workspace",
@@ -159,9 +194,17 @@ test("DecisionInput 只接受执行审批或 Workflow Package 信任决定", () 
     expectedCapabilityDigest: "sha256:capability",
     actor: "user@example.com",
   };
+  const externalReconciliation = {
+    kind: "external_reconciliation",
+    root: "/workspace",
+    workItemId: "WSS-20260817-001",
+    requestId: "external-request-01",
+    actor: "user@example.com",
+  };
 
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, approval), approval);
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, workflowTrust), workflowTrust);
+  assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, externalReconciliation), externalReconciliation);
   assertSchemaError(
     () => validate("builtin.application-decision-input.v1" as SchemaId, { ...approval, kind: "profile_override" }),
     "WSSPEC_SCHEMA_INVALID_VALUE",

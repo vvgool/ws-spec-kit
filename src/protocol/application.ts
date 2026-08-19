@@ -83,7 +83,15 @@ export interface ExternalActionDecisionInput {
   actor: string;
 }
 
-export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput | ExternalActionDecisionInput;
+export interface ExternalActionReconciliationInput {
+  kind: "external_reconciliation";
+  root: string;
+  workItemId: WorkItemId;
+  requestId: string;
+  actor: string;
+}
+
+export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput | ExternalActionDecisionInput | ExternalActionReconciliationInput;
 
 export interface InspectInput {
   root: string;

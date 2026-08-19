@@ -92,6 +92,19 @@ interface ProjectionEventResult {
 
 interface StoredProjection extends Omit<RuntimeProjection, "controlPlane"> {}
 
+function assertExternalProjectionContract(stored: StoredProjection): void {
+  const actions = stored.externalActions as unknown;
+  const idempotency = stored.externalActionIdempotency as unknown;
+  if (!Object.hasOwn(stored, "externalActions") || actions === null || typeof actions !== "object" || Array.isArray(actions)
+    || !Object.hasOwn(stored, "externalActionIdempotency") || idempotency === null
+    || typeof idempotency !== "object" || Array.isArray(idempotency)) {
+    throw new ControlPlaneStorageError(
+      "WSSPEC_RUNTIME_PROJECTION_INCOMPATIBLE",
+      "运行投影缺少 externalActions/externalActionIdempotency；当前版本不提供隐式迁移。",
+    );
+  }
+}
+
 export interface ApplicationAnchor {
   version: 1;
   workItemId: string;
@@ -470,6 +483,7 @@ export async function readControlPlane(cwd: string, workItemId: string): Promise
   if (stored.repositoryId !== resolved.repositoryId || stored.workItemId !== workItemId) {
     throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
   }
+  assertExternalProjectionContract(stored);
   const projection: RuntimeProjection = {
     ...stored,
     profile: stored.profile === undefined
@@ -564,6 +578,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     if (stored.repositoryId !== resolved.repositoryId || stored.workItemId !== input.workItemId) {
       throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "运行投影与当前仓库身份不一致。");
     }
+    assertExternalProjectionContract(stored);
     durableProjection = stored;
   } catch (error) {
     if (error instanceof ControlPlaneStorageError) throw error;
@@ -626,12 +641,28 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
   const approvalStages = Object.entries(recovered.stages)
     .filter(([stageId, stage]) => stage.status === "awaiting_approval" && !durableApprovalStages.has(stageId))
     .map(([stageId]) => stageId);
+  const abandonedStageSet = new Set(abandonedStages);
+  const preDispatchExternalActionIds = Object.entries(recovered.externalActions)
+    .filter(([, action]) => abandonedStageSet.has(action.request.stepId)
+      && (action.status === "prepared" || action.status === "approved"
+        || (action.status === "executing" && action.dispatch === "not_sent")))
+    .map(([requestId]) => requestId);
+  const preservedExternalStageIds = [...new Set(Object.values(recovered.externalActions)
+    .filter((action) => abandonedStageSet.has(action.request.stepId)
+      && (action.status === "reconciliation_required" || action.status === "verified" || action.status === "failed"
+        || (action.status === "executing" && action.dispatch === "sent_or_unknown")))
+    .map((action) => action.request.stepId))];
+  const preservedExternalStageSet = new Set(preservedExternalStageIds);
   const uncertainExternalActionIds = Object.entries(recovered.externalActions)
     .filter(([, action]) => action.status === "executing" && action.dispatch === "sent_or_unknown")
     .map(([requestId]) => requestId);
-  const recoveryStages = [...new Set([...abandonedStages, ...approvalStages])];
+  const recoveryStages = [...new Set([
+    ...abandonedStages.filter((stageId) => !preservedExternalStageSet.has(stageId)),
+    ...approvalStages,
+  ])];
   const recoverWorkItem = recovered.workItem.status === "awaiting_approval" && durableApprovalIds.size === 0;
-  if (recoveryStages.length > 0 || recoverWorkItem || invalidPendingApprovalIds.size > 0 || uncertainExternalActionIds.length > 0) {
+  if (recoveryStages.length > 0 || recoverWorkItem || invalidPendingApprovalIds.size > 0
+    || uncertainExternalActionIds.length > 0 || preDispatchExternalActionIds.length > 0 || preservedExternalStageIds.length > 0) {
     const recoveredAt = recoveryTime.toISOString();
     const next = {
       ...recovered,
@@ -642,8 +673,16 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       approvals: { ...recovered.approvals },
       externalActions: { ...recovered.externalActions },
       externalActionIdempotency: { ...recovered.externalActionIdempotency },
+      evidence: { ...recovered.evidence },
       retries: { ...recovered.retries },
     };
+    for (const requestId of preDispatchExternalActionIds) {
+      const action = next.externalActions[requestId];
+      if (action === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "待失效外部动作不存在。");
+      delete next.externalActions[requestId];
+      delete next.externalActionIdempotency[action.request.idempotencyKey];
+      delete next.evidence[`external-rejection:${requestId}`];
+    }
     for (const stageId of recoveryStages) {
       const stepInstanceId = recovered.claims[stageId]?.stageId ?? stageId;
       const retry = Object.hasOwn(next.retries, stepInstanceId) ? next.retries[stepInstanceId] : undefined;
@@ -653,6 +692,30 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
         : { status: "ready" };
       delete next.claims[stageId];
       delete next.contexts[stageId];
+    }
+    for (const stageId of preservedExternalStageIds) {
+      const claim = next.claims[stageId];
+      const context = next.contexts[stageId] as {
+        workPackage?: { attemptId?: unknown; lease?: { token?: unknown; expiresAt?: unknown } };
+      } | undefined;
+      if (claim === undefined || context?.workPackage?.attemptId !== claim.attemptId
+        || context.workPackage.lease?.token !== claim.claimToken) {
+        throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "外部动作恢复缺少原 Attempt/Lease 上下文。");
+      }
+      const claimedAt = Date.parse(claim.claimedAt);
+      const expiresAt = Date.parse(claim.expiresAt);
+      const leaseDuration = Number.isFinite(claimedAt) && Number.isFinite(expiresAt) && expiresAt > claimedAt
+        ? expiresAt - claimedAt
+        : 30 * 60 * 1_000;
+      const renewedExpiresAt = new Date(recoveryTime.getTime() + leaseDuration).toISOString();
+      next.claims[stageId] = { ...claim, expiresAt: renewedExpiresAt };
+      next.contexts[stageId] = {
+        ...context,
+        workPackage: {
+          ...context.workPackage,
+          lease: { ...context.workPackage.lease, expiresAt: renewedExpiresAt },
+        },
+      };
     }
     for (const requestId of invalidPendingApprovalIds) {
       const approval = next.approvals[requestId]!;
@@ -678,7 +741,12 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
       from: recovered.workItem.status, to: recovered.workItem.status, idempotencyKey,
       workflowDigest: previous.workflowDigest, configDigest: previous.configDigest, baselineTreeDigest: previous.baselineTreeDigest,
       inputWorkspaceTreeDigest: previous.outputWorkspaceTreeDigest ?? previous.inputWorkspaceTreeDigest, outputWorkspaceTreeDigest: null,
-      inputDigest: sha256(recoveryStages.sort().join("\n")),
+      inputDigest: sha256(JSON.stringify({
+        recoveryStages: [...recoveryStages].sort(),
+        preDispatchExternalActionIds: [...preDispatchExternalActionIds].sort(),
+        preservedExternalStageIds: [...preservedExternalStageIds].sort(),
+        uncertainExternalActionIds: [...uncertainExternalActionIds].sort(),
+      })),
       result: {
         projection: {
           workItem: next.workItem,
@@ -694,7 +762,13 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
           retries: next.retries,
           readOnly: next.readOnly,
         },
-        value: { abandonedStages, approvalStages, uncertainExternalActionIds },
+        value: {
+          abandonedStages,
+          approvalStages,
+          preDispatchExternalActionIds,
+          preservedExternalStageIds,
+          uncertainExternalActionIds,
+        },
       },
     };
     const stored = await appendEventUnlocked(resolved.directory, event);

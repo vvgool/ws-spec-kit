@@ -243,108 +243,147 @@
           "const": "await_approval"
         },
         "approval": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "requestId",
-            "workItemId",
-            "title",
-            "digest"
-          ],
-          "properties": {
-            "kind": {
-              "enum": [
-                "step",
-                "external_action",
-                "workflow_trust"
-              ]
-            },
-            "requestId": {
-              "type": "string",
-              "minLength": 1
-            },
-            "workItemId": {
-              "type": "string",
-              "pattern": "^WSS-[A-Za-z0-9-]+$"
-            },
-            "title": {
-              "type": "string",
-              "minLength": 1
-            },
-            "digest": {
-              "type": "string",
-              "pattern": "^sha256:.+$"
-            },
-            "provider": {
-              "type": "string",
-              "pattern": "^[a-z][a-z0-9-]{0,62}$"
-            },
-            "action": {
-              "enum": [
-                "issue.update",
-                "knowledge.publish",
-                "issue.close"
-              ]
-            },
-            "target": {
+          "oneOf": [
+            {
               "type": "object",
               "additionalProperties": false,
               "required": [
                 "kind",
-                "stableId"
+                "requestId",
+                "workItemId",
+                "title",
+                "digest"
               ],
               "properties": {
                 "kind": {
-                  "enum": [
-                    "issue",
-                    "knowledge"
-                  ]
+                  "const": "step"
                 },
-                "stableId": {
+                "requestId": {
                   "type": "string",
-                  "minLength": 1,
-                  "maxLength": 512
+                  "minLength": 1
+                },
+                "workItemId": {
+                  "type": "string",
+                  "pattern": "^WSS-[A-Za-z0-9-]+$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:.+$"
                 }
               }
             },
-            "sideEffects": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256
-              }
-            }
-          },
-          "allOf": [
             {
-              "if": {
-                "properties": {
-                  "kind": {
-                    "const": "external_action"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "requestId",
+                "workItemId",
+                "title",
+                "digest"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "workflow_trust"
+                },
+                "requestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workItemId": {
+                  "type": "string",
+                  "pattern": "^WSS-[A-Za-z0-9-]+$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:.+$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "requestId",
+                "workItemId",
+                "title",
+                "digest",
+                "provider",
+                "action",
+                "target",
+                "sideEffects"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "external_action"
+                },
+                "requestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workItemId": {
+                  "type": "string",
+                  "pattern": "^WSS-[A-Za-z0-9-]+$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:.+$"
+                },
+                "provider": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                },
+                "action": {
+                  "enum": [
+                    "issue.update",
+                    "knowledge.publish",
+                    "issue.close"
+                  ]
+                },
+                "target": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "stableId"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "issue",
+                        "knowledge"
+                      ]
+                    },
+                    "stableId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    }
                   }
                 },
-                "required": [
-                  "kind"
-                ]
-              },
-              "then": {
-                "type": "object",
-                "properties": {
-                  "provider": {},
-                  "action": {},
-                  "target": {},
-                  "sideEffects": {}
-                },
-                "required": [
-                  "provider",
-                  "action",
-                  "target",
-                  "sideEffects"
-                ]
+                "sideEffects": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
+                }
               }
             }
           ]

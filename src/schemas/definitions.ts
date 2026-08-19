@@ -539,6 +539,15 @@ export const schemas = {
           actor: { type: "string", minLength: 1 },
         },
       },
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "actor"],
+        properties: {
+          kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          actor: { type: "string", minLength: 1 },
+        },
+      },
     ],
   },
   "builtin.application-inspect-input.v1": {
@@ -558,25 +567,30 @@ export const schemas = {
         properties: {
           action: { const: "await_approval" },
           approval: {
-            type: "object", additionalProperties: false,
-            required: ["kind", "requestId", "workItemId", "title", "digest"],
-            properties: {
-              kind: { enum: ["step", "external_action", "workflow_trust"] }, requestId: { type: "string", minLength: 1 },
-              workItemId: { type: "string", pattern: workItemIdPattern }, title: { type: "string", minLength: 1 },
-              digest: { type: "string", pattern: digestPattern },
-              provider: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}$" },
-              action: externalActionIdentityProperties.action,
-              target: externalTargetSchema,
-              sideEffects: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 256 } },
-            },
-            allOf: [{
-              if: { properties: { kind: { const: "external_action" } }, required: ["kind"] },
-              then: {
-                type: "object",
-                properties: { provider: {}, action: {}, target: {}, sideEffects: {} },
-                required: ["provider", "action", "target", "sideEffects"],
+            oneOf: [
+              ...(["step", "workflow_trust"] as const).map((kind) => ({
+                type: "object", additionalProperties: false,
+                required: ["kind", "requestId", "workItemId", "title", "digest"],
+                properties: {
+                  kind: { const: kind }, requestId: { type: "string", minLength: 1 },
+                  workItemId: { type: "string", pattern: workItemIdPattern }, title: { type: "string", minLength: 1 },
+                  digest: { type: "string", pattern: digestPattern },
+                },
+              })),
+              {
+                type: "object", additionalProperties: false,
+                required: ["kind", "requestId", "workItemId", "title", "digest", "provider", "action", "target", "sideEffects"],
+                properties: {
+                  kind: { const: "external_action" }, requestId: { type: "string", minLength: 1 },
+                  workItemId: { type: "string", pattern: workItemIdPattern }, title: { type: "string", minLength: 1 },
+                  digest: { type: "string", pattern: digestPattern },
+                  provider: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}$" },
+                  action: externalActionIdentityProperties.action,
+                  target: externalTargetSchema,
+                  sideEffects: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 256 } },
+                },
               },
-            }],
+            ],
           },
         },
       },
