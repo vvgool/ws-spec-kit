@@ -2,6 +2,7 @@ import { spawnJson } from "../process/spawn-json.js";
 import { credentialLikeValue } from "../../registry/connectors/secret-detector.js";
 import {
   assertStableIssueIdentity,
+  canonicalIssueText,
   IssueProviderError,
   mapIssueProcessError,
   stableId,
@@ -29,13 +30,13 @@ export interface GithubIssueWriteInput extends GithubIssueReadInput {
 }
 
 function invalid(): never {
-  throw new IssueProviderError("WSSPEC_ISSUE_RESPONSE_INVALID", "GitHub Issue 响应不符合精确 Schema。");
+  throw new IssueProviderError("WSSPEC_ISSUE_RESPONSE_INVALID", "GitHub Issue 响应不符合受审计 Schema。");
 }
 
-function exactRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
+function requiredRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)
     || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
-    || Object.keys(value).sort().join("\0") !== [...keys].sort().join("\0")) return invalid();
+    || keys.some((key) => !Object.hasOwn(value, key))) return invalid();
   return value as Record<string, unknown>;
 }
 
@@ -51,13 +52,13 @@ function positiveInteger(value: unknown): number {
 }
 
 function actor(value: unknown): string {
-  const source = exactRecord(value, ["login"]);
+  const source = requiredRecord(value, ["login"]);
   return text(source.login, 256);
 }
 
 function labels(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 100) return invalid();
-  const result = value.map((label) => text(exactRecord(label, ["name"]).name, 255));
+  const result = value.map((label) => canonicalIssueText(text(requiredRecord(label, ["name"]).name, 255)));
   if (new Set(result).size !== result.length) return invalid();
   return result;
 }
@@ -77,7 +78,7 @@ function timestamp(value: unknown): string {
 }
 
 function mapIssue(value: unknown, target: ValidatedGithubTarget): NormalizedIssue {
-  const source = exactRecord(value, ["assignees", "body", "html_url", "labels", "node_id", "number", "state", "title", "updated_at", "user"]);
+  const source = requiredRecord(value, ["assignees", "body", "html_url", "labels", "node_id", "number", "state", "title", "updated_at", "user"]);
   const number = positiveInteger(source.number);
   if (number !== target.number || text(source.html_url, 2048) !== target.canonicalUrl) return invalid();
   const title = text(source.title, 512);
@@ -139,20 +140,24 @@ export async function readGithubIssue(input: GithubIssueReadInput): Promise<Norm
 }
 
 function mapComment(value: unknown, expectedBody: string): void {
-  const source = exactRecord(value, ["body", "id", "node_id"]);
+  const source = requiredRecord(value, ["body", "id", "node_id"]);
   positiveInteger(source.id);
   stableId("github", source.node_id);
-  if (text(source.body, 1024 * 1024) !== expectedBody) {
+  if (canonicalIssueText(text(source.body, 1024 * 1024)) !== canonicalIssueText(expectedBody)) {
     throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitHub comment 响应与批准内容不一致。");
   }
 }
 
 function sameLabels(actual: readonly string[], expected: readonly string[]): boolean {
-  return actual.length === expected.length && [...actual].sort().every((label, index) => label === [...expected].sort()[index]);
+  const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+  const sortedActual = actual.map(canonicalIssueText).sort(compare);
+  const sortedExpected = expected.map(canonicalIssueText).sort(compare);
+  return sortedActual.length === sortedExpected.length && sortedActual.every((label, index) => label === sortedExpected[index]);
 }
 
 function assertActionReadback(issue: NormalizedIssue, action: Exclude<IssueWriteAction, { type: "issue.close" }>): void {
-  if ((action.type === "body" && issue.body !== (action.body.trim() === "" ? issue.title : action.body))
+  const expectedBody = action.type === "body" ? canonicalIssueText(action.body) : undefined;
+  if ((action.type === "body" && issue.body !== (expectedBody!.trim() === "" ? issue.title : expectedBody))
     || (action.type === "labels" && !sameLabels(issue.labels, action.labels))
     || (action.type === "state" && issue.state !== action.state)) {
     throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitHub Issue 回读结果与批准写入不一致。");

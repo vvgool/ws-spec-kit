@@ -11,7 +11,7 @@ import {
   LocalRequirementError,
   readLocalRequirementFile,
 } from "./local-requirement.js";
-import { credentialLikeField, credentialLikeValue } from "./secret-detector.js";
+import { credentialLikeField, credentialLikeValue, inspectDecodedCredentialSurface } from "./secret-detector.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 const workItemIdPattern = /^WSS-[A-Za-z0-9-]+$/u;
@@ -97,30 +97,17 @@ export function requirementTitle(body: string): string {
 
 const maximumUrlSurfaceBytes = 8_192;
 const maximumUrlDecodeRounds = 4;
-const invalidPercentEscape = /%(?![A-Fa-f0-9]{2})/u;
 
 function inspectDecodedUrlSurface(surface: string): string {
-  let current = surface;
-  for (let round = 0; round <= maximumUrlDecodeRounds; round += 1) {
-    if (Buffer.byteLength(current, "utf8") > maximumUrlSurfaceBytes) {
-      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 解码表面超过上限。");
-    }
-    if (credentialLikeField(current)) {
-      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含凭据样式内容。");
-    }
-    if (!current.includes("%")) return current;
-    if (invalidPercentEscape.test(current)) {
-      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。");
-    }
-    if (round === maximumUrlDecodeRounds) {
-      return fail("WSSPEC_SOURCE_METADATA_INVALID", "canonicalUrl 编码嵌套超过上限。");
-    }
-    try {
-      current = decodeURIComponent(current);
-    } catch {
-      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。");
-    }
-  }
+  const result = inspectDecodedCredentialSurface(surface, {
+    detectCredentialKeys: true,
+    maximumBytes: maximumUrlSurfaceBytes,
+    maximumDecodeRounds: maximumUrlDecodeRounds,
+  });
+  if (result.ok) return result.value;
+  if (result.reason === "too-large") return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 解码表面超过上限。");
+  if (result.reason === "credential") return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含凭据样式内容。");
+  if (result.reason === "invalid-encoding") return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。");
   return fail("WSSPEC_SOURCE_METADATA_INVALID", "canonicalUrl 编码嵌套超过上限。");
 }
 

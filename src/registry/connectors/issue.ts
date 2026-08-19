@@ -7,6 +7,7 @@ import { ProcessJsonError } from "../../adapters/process/spawn-json.js";
 import type { NormalizedRequirementSource } from "./requirement-source.js";
 import { defineConnectorManifest } from "./manifest.js";
 import type { ConnectorRegistry } from "./registry.js";
+import { inspectDecodedCredentialSurface } from "./secret-detector.js";
 import type { ConnectorManifest } from "./types.js";
 
 const maximumManifestBytes = 64 * 1024;
@@ -53,7 +54,7 @@ export type IssueWriteAction =
   | { type: "comment"; body: string }
   | { type: "body"; body: string }
   | { type: "labels"; labels: readonly string[] }
-  | { type: "state"; state: "open" | "closed" }
+  | { type: "state"; state: "open" }
   | { type: "issue.close" };
 
 export interface NormalizedIssue extends NormalizedRequirementSource {
@@ -90,6 +91,16 @@ function hostname(value: unknown): string {
   return value.toLowerCase();
 }
 
+function rejectCredentialTargetSurfaces(values: readonly unknown[]): void {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const result = inspectDecodedCredentialSurface(value);
+    if (!result.ok && result.reason === "credential") {
+      return fail("WSSPEC_ISSUE_TARGET_INVALID", "Issue 目标包含凭据样式内容。");
+    }
+  }
+}
+
 function pathSegment(value: unknown): string {
   if (typeof value !== "string" || !pathSegmentPattern.test(value) || value === "." || value === "..") {
     return fail("WSSPEC_ISSUE_TARGET_INVALID", "Issue 目标路径字段无效。");
@@ -112,6 +123,7 @@ export interface ValidatedGithubTarget extends GithubIssueTarget {
 
 export function validateGithubIssueTarget(value: GithubIssueTarget): ValidatedGithubTarget {
   const source = ownRecord(value, ["host", "number", "owner", "repo"], "WSSPEC_ISSUE_TARGET_INVALID");
+  rejectCredentialTargetSurfaces([source.host, source.owner, source.repo]);
   const host = hostname(source.host);
   const encodedOwner = pathSegment(source.owner);
   const encodedRepo = pathSegment(source.repo);
@@ -137,11 +149,13 @@ export interface ValidatedGitlabTarget extends GitlabIssueTarget {
 
 export function validateGitlabIssueTarget(value: GitlabIssueTarget): ValidatedGitlabTarget {
   const source = ownRecord(value, ["host", "iid", "projectPath"], "WSSPEC_ISSUE_TARGET_INVALID");
-  const host = hostname(source.host);
+  rejectCredentialTargetSurfaces([source.host]);
   if (typeof source.projectPath !== "string" || source.projectPath.length > 1024) {
     return fail("WSSPEC_ISSUE_TARGET_INVALID", "GitLab projectPath 无效。");
   }
   const segments = source.projectPath.split("/");
+  rejectCredentialTargetSurfaces([source.projectPath, ...segments]);
+  const host = hostname(source.host);
   if (segments.length < 2 || segments.length > 32 || segments.some((segment) => segment === "")) {
     return fail("WSSPEC_ISSUE_TARGET_INVALID", "GitLab projectPath 必须由有界路径段组成。");
   }
@@ -166,6 +180,10 @@ function boundedText(value: unknown, maximum: number, allowEmpty: boolean): stri
   return value;
 }
 
+export function canonicalIssueText(value: string): string {
+  return value.replace(/\r\n?/gu, "\n").normalize("NFC");
+}
+
 export function validateIssueWriteAction(value: IssueWriteAction): IssueWriteAction {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return fail("WSSPEC_ISSUE_ACTION_INVALID", "Issue 写动作不在允许列表中。");
@@ -181,12 +199,14 @@ export function validateIssueWriteAction(value: IssueWriteAction): IssueWriteAct
       return fail("WSSPEC_ISSUE_ACTION_INVALID", "Issue labels 无效或超过上限。");
     }
     const labels = source.labels.map((label) => boundedText(label, 255, false));
-    if (new Set(labels).size !== labels.length) return fail("WSSPEC_ISSUE_ACTION_INVALID", "Issue labels 不能重复。");
+    if (new Set(labels.map(canonicalIssueText)).size !== labels.length) {
+      return fail("WSSPEC_ISSUE_ACTION_INVALID", "Issue labels 不能重复。");
+    }
     return Object.freeze({ type, labels: Object.freeze(labels) });
   }
   if (type === "state") {
     const source = ownRecord(value, ["state", "type"], "WSSPEC_ISSUE_ACTION_INVALID");
-    if (source.state !== "open" && source.state !== "closed") {
+    if (source.state !== "open") {
       return fail("WSSPEC_ISSUE_ACTION_INVALID", "Issue state 不在允许列表中。");
     }
     return Object.freeze({ type, state: source.state });
@@ -290,9 +310,9 @@ const gitlabManifestInput = {
   executable: "glab",
   minimumVersion: "1.0.0",
   argvTemplates: [
-    ["api", "--method", "GET", "projects/{encodedPath}/issues/{iid}", "--host", "{host}"],
-    ["api", "--method", "POST", "projects/{encodedPath}/issues/{iid}/notes", "--host", "{host}", "--input", "-"],
-    ["api", "--method", "PUT", "projects/{encodedPath}/issues/{iid}", "--host", "{host}", "--input", "-"],
+    ["api", "--method", "GET", "projects/{encodedPath}/issues/{iid}", "--hostname", "{host}"],
+    ["api", "--method", "POST", "projects/{encodedPath}/issues/{iid}/notes", "--hostname", "{host}", "--input", "-"],
+    ["api", "--method", "PUT", "projects/{encodedPath}/issues/{iid}", "--hostname", "{host}", "--input", "-"],
   ],
   doctor: {
     version: { kind: "version", argv: ["--version"], parser: { kind: "text-semver" } },

@@ -2,6 +2,7 @@ import { spawnJson } from "../process/spawn-json.js";
 import { credentialLikeValue } from "../../registry/connectors/secret-detector.js";
 import {
   assertStableIssueIdentity,
+  canonicalIssueText,
   IssueProviderError,
   mapIssueProcessError,
   stableId,
@@ -29,13 +30,13 @@ export interface GitlabIssueWriteInput extends GitlabIssueReadInput {
 }
 
 function invalid(): never {
-  throw new IssueProviderError("WSSPEC_ISSUE_RESPONSE_INVALID", "GitLab Issue 响应不符合精确 Schema。");
+  throw new IssueProviderError("WSSPEC_ISSUE_RESPONSE_INVALID", "GitLab Issue 响应不符合受审计 Schema。");
 }
 
-function exactRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
+function requiredRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)
     || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
-    || Object.keys(value).sort().join("\0") !== [...keys].sort().join("\0")) return invalid();
+    || keys.some((key) => !Object.hasOwn(value, key))) return invalid();
   return value as Record<string, unknown>;
 }
 
@@ -51,12 +52,12 @@ function positiveInteger(value: unknown): number {
 }
 
 function actor(value: unknown): string {
-  return text(exactRecord(value, ["username"]).username, 256);
+  return text(requiredRecord(value, ["username"]).username, 256);
 }
 
 function labels(value: unknown): string[] {
   if (!Array.isArray(value) || value.length > 100) return invalid();
-  const result = value.map((label) => text(label, 255));
+  const result = value.map((label) => canonicalIssueText(text(label, 255)));
   if (new Set(result).size !== result.length) return invalid();
   return result;
 }
@@ -76,7 +77,7 @@ function timestamp(value: unknown): string {
 }
 
 function mapIssue(value: unknown, target: ValidatedGitlabTarget): NormalizedIssue {
-  const source = exactRecord(value, ["assignees", "author", "description", "id", "iid", "labels", "state", "title", "updated_at", "web_url"]);
+  const source = requiredRecord(value, ["assignees", "author", "description", "id", "iid", "labels", "state", "title", "updated_at", "web_url"]);
   const iid = positiveInteger(source.iid);
   const globalId = positiveInteger(source.id);
   if (iid !== target.iid || text(source.web_url, 2048) !== target.canonicalUrl) return invalid();
@@ -129,7 +130,7 @@ async function execute(input: GitlabIssueReadInput, argv: readonly string[], pay
 }
 
 async function readValidated(input: GitlabIssueReadInput, target: ValidatedGitlabTarget): Promise<NormalizedIssue> {
-  return mapIssue(await execute(input, ["api", "--method", "GET", target.endpoint, "--host", target.host], {}), target);
+  return mapIssue(await execute(input, ["api", "--method", "GET", target.endpoint, "--hostname", target.host], {}), target);
 }
 
 export async function readGitlabIssue(input: GitlabIssueReadInput): Promise<NormalizedIssue> {
@@ -137,20 +138,23 @@ export async function readGitlabIssue(input: GitlabIssueReadInput): Promise<Norm
 }
 
 function mapComment(value: unknown, expectedBody: string): void {
-  const source = exactRecord(value, ["body", "id"]);
+  const source = requiredRecord(value, ["body", "id"]);
   positiveInteger(source.id);
-  if (text(source.body, 1024 * 1024) !== expectedBody) {
+  if (canonicalIssueText(text(source.body, 1024 * 1024)) !== canonicalIssueText(expectedBody)) {
     throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitLab note 响应与批准内容不一致。");
   }
 }
 
 function sameLabels(actual: readonly string[], expected: readonly string[]): boolean {
-  const sortedExpected = [...expected].sort();
-  return actual.length === expected.length && [...actual].sort().every((label, index) => label === sortedExpected[index]);
+  const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+  const sortedActual = actual.map(canonicalIssueText).sort(compare);
+  const sortedExpected = expected.map(canonicalIssueText).sort(compare);
+  return sortedActual.length === sortedExpected.length && sortedActual.every((label, index) => label === sortedExpected[index]);
 }
 
 function assertActionReadback(issue: NormalizedIssue, action: Exclude<IssueWriteAction, { type: "issue.close" }>): void {
-  if ((action.type === "body" && issue.body !== (action.body.trim() === "" ? issue.title : action.body))
+  const expectedBody = action.type === "body" ? canonicalIssueText(action.body) : undefined;
+  if ((action.type === "body" && issue.body !== (expectedBody!.trim() === "" ? issue.title : expectedBody))
     || (action.type === "labels" && !sameLabels(issue.labels, action.labels))
     || (action.type === "state" && issue.state !== action.state)) {
     throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitLab Issue 回读结果与批准写入不一致。");
@@ -164,7 +168,7 @@ async function mutateIssue(
   endpoint: string,
   payload: unknown,
 ): Promise<unknown> {
-  return execute(input, ["api", "--method", method, endpoint, "--host", target.host, "--input", "-"], payload);
+  return execute(input, ["api", "--method", method, endpoint, "--hostname", target.host, "--input", "-"], payload);
 }
 
 export async function writeGitlabIssue(input: GitlabIssueWriteInput): Promise<NormalizedIssue> {
@@ -191,7 +195,7 @@ export async function writeGitlabIssue(input: GitlabIssueWriteInput): Promise<No
   }
   const payload = action.type === "body" ? { description: action.body }
     : action.type === "labels" ? { labels: [...action.labels] }
-      : { state_event: action.state === "closed" ? "close" : "reopen" };
+      : { state_event: "reopen" };
   const writeResult = mapIssue(await mutateIssue(input, target, "PUT", target.endpoint, payload), target);
   const after = await readValidated(input, target);
   assertStableIssueIdentity(writeResult, after);

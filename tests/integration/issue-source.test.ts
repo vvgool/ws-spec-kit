@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile as execFileCallback } from "node:child_process";
 import { chmod, copyFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,16 @@ import { ConnectorRegistry } from "../../src/registry/connectors/registry.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const fixtureBin = path.join(root, "tests/fixtures/bin");
+
+function executeText(executable: string, argv: readonly string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFileCallback(executable, argv, { encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error === null) resolve({ stdout, stderr });
+      else reject(Object.assign(error, { stderr, stdout }));
+    });
+    child.stdin?.end("{}");
+  });
+}
 
 async function privateFixtureBinaries(t: test.TestContext): Promise<{ gh: string; glab: string }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "wspec-issue-cli-")); await chmod(directory, 0o700);
@@ -40,6 +51,18 @@ test("private fixture CLI copies create Task 2 source artifacts without real CLI
   assert.deepEqual({ type: second.type, stableId: second.stableId, repository: second.metadata.repository, state: second.metadata.state },
     { type: "gitlab.issue", stableId: "gitlab:9001", repository: "group/service", state: "open" });
   assert.match(await readFile(path.join(repositoryRoot, ".wsspec/work-items/WSS-GITHUB/source", `${first.artifactId.slice(7)}.json`), "utf8"), /Ship the connector/u);
+});
+
+test("GitLab fixture exposes native --hostname help and rejects the non-native --host flag", async (t) => {
+  const { glab } = await privateFixtureBinaries(t);
+  const help = await executeText(glab, ["api", "--help"]);
+  assert.match(help.stdout, /--hostname string/u);
+  assert.equal(help.stdout.includes("--host string"), false);
+  await assert.rejects(
+    executeText(glab, ["api", "--method", "GET", "projects/group%2Fservice/issues/9", "--host", "gitlab.example.com"]),
+    (error: unknown) => (error as { code?: number; stderr?: string }).code === 9
+      && (error as { stderr?: string }).stderr === "unexpected fixture argv\n",
+  );
 });
 
 test("provider failures map to stable missing, not-found, auth, forbidden, rate-limit and schema codes", async (t) => {

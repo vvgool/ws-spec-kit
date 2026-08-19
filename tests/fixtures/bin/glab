@@ -2,15 +2,29 @@
 import process from "node:process";
 
 const argv = process.argv.slice(2);
-const endpoint = argv[argv.indexOf("--method") + 2];
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
 JSON.parse(input || "{}");
+
+function apiRequest() {
+  if (argv[0] !== "api" || argv[1] !== "--method" || !["GET", "POST", "PUT"].includes(argv[2])
+    || typeof argv[3] !== "string" || argv[4] !== "--hostname" || argv[5] !== "gitlab.example.com") return undefined;
+  if (argv[2] === "GET" && argv.length === 6) return { method: argv[2], endpoint: argv[3] };
+  if (argv[2] !== "GET" && argv.length === 8 && argv[6] === "--input" && argv[7] === "-") {
+    return { method: argv[2], endpoint: argv[3] };
+  }
+  return undefined;
+}
+
+const request = apiRequest();
+const endpoint = request?.endpoint;
 
 if (argv.length === 1 && argv[0] === "--version") {
   process.stdout.write("glab version 1.68.0\n");
 } else if (argv.join("\0") === ["auth", "status"].join("\0")) {
   process.stdout.write("authenticated\n");
+} else if (argv.join("\0") === ["api", "--help"].join("\0")) {
+  process.stdout.write("Usage: glab api <endpoint> [flags]\n\nFlags:\n      --hostname string   The GitLab hostname for the request\n      --input string      The file to use as body for the HTTP request\n  -X, --method string     The HTTP method for the request\n");
 } else if (endpoint?.includes("not-found")) {
   process.stderr.write("HTTP 404: issue not found\n");
   process.exitCode = 1;
@@ -29,14 +43,22 @@ if (argv.length === 1 && argv[0] === "--version") {
   process.stdout.write(JSON.stringify({
     iid: 9,
     id: 9001,
+    project_id: 901,
     web_url: "https://gitlab.example.com/group/service/-/issues/9",
     title: "Ship the GitLab connector",
     description: "Read the GitLab issue body.",
     state: "opened",
     labels: ["connector", "ready"],
+    upvotes: 1,
+    downvotes: 0,
+    merge_requests_count: 0,
+    created_at: "2026-08-18T02:03:04Z",
     updated_at: "2026-08-19T02:03:04Z",
-    author: { username: "fox" },
-    assignees: [{ username: "maintainer" }]
+    closed_at: null,
+    author: { id: 9101, username: "fox", name: "Redacted Author", state: "active", locked: false, avatar_url: "https://avatars.example.com/9101", web_url: "https://gitlab.example.com/fox" },
+    assignees: [{ id: 9102, username: "maintainer", name: "Redacted Maintainer", state: "active", locked: false, avatar_url: "https://avatars.example.com/9102", web_url: "https://gitlab.example.com/maintainer" }],
+    references: { short: "#9", relative: "#9", full: "group/service#9" },
+    _links: { self: "https://gitlab.example.com/api/v4/projects/901/issues/9", notes: "https://gitlab.example.com/api/v4/projects/901/issues/9/notes" }
   }));
 } else {
   process.stderr.write("unexpected fixture argv\n");

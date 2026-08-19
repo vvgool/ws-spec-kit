@@ -3,6 +3,9 @@ const credentialHeader = /\b(?:authorization|cookie|set-cookie)\s*[:=]\s*\S/iu;
 const authorizationScheme = /\b(?:bearer|basic)\s+[A-Za-z0-9+/=._~-]{4,}/iu;
 const labelledSecret = /\b(?:api[-_ ]?key|client[-_ ]?secret|credential|password|private[-_ ]?key|refresh[-_ ]?token|session(?:id)?|secret|token)\s*[:=]\s*\S/iu;
 const larkTokenCandidate = /(?:^|[^A-Za-z0-9])([tua]-[A-Za-z0-9_-]{24,})(?=$|[^A-Za-z0-9])/gu;
+const invalidPercentEscape = /%(?![A-Fa-f0-9]{2})/u;
+const defaultMaximumSurfaceBytes = 8_192;
+const defaultMaximumDecodeRounds = 4;
 
 function shannonEntropy(value: string): number {
   const frequencies = new Map<string, number>();
@@ -41,4 +44,31 @@ export function credentialLikeValue(value: string): boolean {
 
 export function credentialLikeField(value: string): boolean {
   return credentialLikeKey(value) || credentialLikeValue(value);
+}
+
+export type DecodedCredentialSurfaceResult =
+  | Readonly<{ ok: true; value: string }>
+  | Readonly<{ ok: false; reason: "credential" | "decode-limit" | "invalid-encoding" | "too-large" }>;
+
+export function inspectDecodedCredentialSurface(
+  surface: string,
+  options: Readonly<{ detectCredentialKeys?: boolean; maximumBytes?: number; maximumDecodeRounds?: number }> = {},
+): DecodedCredentialSurfaceResult {
+  const maximumBytes = options.maximumBytes ?? defaultMaximumSurfaceBytes;
+  const maximumDecodeRounds = options.maximumDecodeRounds ?? defaultMaximumDecodeRounds;
+  const detector = options.detectCredentialKeys === true ? credentialLikeField : credentialLikeValue;
+  let current = surface;
+  for (let round = 0; round <= maximumDecodeRounds; round += 1) {
+    if (Buffer.byteLength(current, "utf8") > maximumBytes) return { ok: false, reason: "too-large" };
+    if (detector(current)) return { ok: false, reason: "credential" };
+    if (!current.includes("%")) return { ok: true, value: current };
+    if (invalidPercentEscape.test(current)) return { ok: false, reason: "invalid-encoding" };
+    if (round === maximumDecodeRounds) return { ok: false, reason: "decode-limit" };
+    try {
+      current = decodeURIComponent(current);
+    } catch {
+      return { ok: false, reason: "invalid-encoding" };
+    }
+  }
+  return { ok: false, reason: "decode-limit" };
 }

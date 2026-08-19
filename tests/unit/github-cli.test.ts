@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { readGithubIssue, writeGithubIssue } from "../../src/adapters/connectors/github-cli.js";
-import { IssueProviderError, type IssueWriteAction } from "../../src/registry/connectors/issue.js";
+import { IssueProviderError, validateGithubIssueTarget, type IssueWriteAction } from "../../src/registry/connectors/issue.js";
 
 const target = { host: "github.example.com", owner: "acme", repo: "widget", number: 7 } as const;
 
@@ -21,9 +21,19 @@ async function scriptedCli(t: test.TestContext, responses: readonly unknown[]): 
 }
 
 const openIssue = {
+  url: "https://github.example.com/api/v3/repos/acme/widget/issues/7",
+  repository_url: "https://github.example.com/api/v3/repos/acme/widget",
+  labels_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7/labels{/name}",
+  comments_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7/comments",
+  events_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7/events",
+  id: 7001,
   number: 7, node_id: "I_kwDOStableNode", html_url: "https://github.example.com/acme/widget/issues/7",
-  title: "Title", body: "Body", state: "open", labels: [{ name: "bug" }], updated_at: "2026-08-19T00:00:00Z",
-  user: { login: "author" }, assignees: [{ login: "owner" }],
+  title: "Title", body: "Body", state: "open", locked: false,
+  labels: [{ id: 7101, node_id: "LA_label", url: "https://github.example.com/api/v3/repos/acme/widget/labels/bug", name: "bug", color: "d73a4a", default: true, description: "A redacted label" }],
+  comments: 2, created_at: "2026-08-18T00:00:00Z", updated_at: "2026-08-19T00:00:00Z", closed_at: null,
+  user: { login: "author", id: 7201, node_id: "U_author", avatar_url: "https://avatars.example.com/u/7201", type: "User", site_admin: false },
+  assignees: [{ login: "owner", id: 7202, node_id: "U_owner", avatar_url: "https://avatars.example.com/u/7202", type: "User", site_admin: false }],
+  author_association: "MEMBER",
 };
 const closedIssue = { ...openIssue, state: "closed" };
 
@@ -35,6 +45,8 @@ test("GitHub read emits only the fixed GET argv and keeps number separate from n
   assert.equal(issue.number, 7);
   assert.equal(issue.stableId, "github:I_kwDOStableNode");
   assert.equal(issue.repository, "acme/widget");
+  assert.equal(Object.hasOwn(issue, "url"), false);
+  assert.equal(Object.hasOwn(issue.metadata, "author_association"), false);
 });
 
 test("GitHub validates and encodes every endpoint segment before spawning", async (t) => {
@@ -53,6 +65,31 @@ test("GitHub validates and encodes every endpoint segment before spawning", asyn
   await assert.rejects(access(cli.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
 });
 
+test("GitHub rejects raw and recursively encoded credential-like target surfaces before spawn", async (t) => {
+  const cli = await scriptedCli(t, [openIssue]);
+  const encodeLayers = (value: string, count: number): string => {
+    let current = value;
+    for (let index = 0; index < count; index += 1) current = encodeURIComponent(current);
+    return current;
+  };
+  const targets = [
+    { ...target, host: "glpat-abcdefghijklmnop.example.com" },
+    { ...target, owner: "github_pat_abcdefghijklmnopqrstuvwxyz123456" },
+    { ...target, repo: "ghp_abcdefghijklmnopqrstuvwxyz123456" },
+    { ...target, repo: "t-A1b2C3d4E5f6G7h8I9j0K1l2" },
+    { ...target, owner: encodeLayers("github_pat_abcdefghijklmnopqrstuvwxyz123456", 2) },
+  ];
+  for (const credentialTarget of targets) {
+    await assert.rejects(readGithubIssue({ executable: cli.executable, target: credentialTarget }), (error: unknown) =>
+      error instanceof IssueProviderError
+      && error.code === "WSSPEC_ISSUE_TARGET_INVALID"
+      && error.message === "WSSPEC_ISSUE_TARGET_INVALID: Issue 目标包含凭据样式内容。");
+  }
+  await assert.rejects(access(cli.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+
+  assert.doesNotThrow(() => validateGithubIssueTarget({ ...target, owner: "github_pat_team", repo: "ghp_docs" }));
+});
+
 test("GitHub rejects token and cross-provider environment fields before spawning", async (t) => {
   const cli = await scriptedCli(t, [openIssue]);
   for (const environment of [{ GH_TOKEN: "secret" }, { GLAB_CONFIG_DIR: "/private/config" }, { HOME: "relative" }]) {
@@ -66,6 +103,28 @@ test("GitHub rejects schema drift instead of confusing number with node_id", asy
   const cli = await scriptedCli(t, [{ ...openIssue, number: "I_kwDOStableNode", node_id: 7 }]);
   await assert.rejects(readGithubIssue({ executable: cli.executable, target }), (error: unknown) =>
     error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_RESPONSE_INVALID");
+});
+
+test("GitHub projects native response fields but still rejects missing, mistyped and oversized required fields", async (t) => {
+  const missing = { ...openIssue } as Record<string, unknown>;
+  delete missing.updated_at;
+  const cases = [
+    missing,
+    { ...openIssue, user: { ...openIssue.user, login: 7201 } },
+    { ...openIssue, labels: Array.from({ length: 101 }, (_, index) => ({ ...openIssue.labels[0], id: 8000 + index, name: `label-${index}` })) },
+    { ...openIssue, assignees: Array.from({ length: 101 }, (_, index) => ({ ...openIssue.assignees[0], id: 9000 + index, login: `owner-${index}` })) },
+    { ...openIssue, labels: [{ ...openIssue.labels[0], name: "alpha\r\nline" }, { ...openIssue.labels[0], id: 7102, name: "alpha\nline" }] },
+  ];
+  for (const response of cases) {
+    const cli = await scriptedCli(t, [response]);
+    await assert.rejects(readGithubIssue({ executable: cli.executable, target }), (error: unknown) =>
+      error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_RESPONSE_INVALID");
+  }
+
+  const marker = "raw-response-marker-ghp_abcdefghijklmnopqrstuvwxyz123456";
+  const cli = await scriptedCli(t, [{ ...openIssue, title: 7, debug: marker }]);
+  await assert.rejects(readGithubIssue({ executable: cli.executable, target }), (error: unknown) =>
+    error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_RESPONSE_INVALID" && !error.message.includes(marker));
 });
 
 test("GitHub normalizes issue title and body before returning NormalizedIssue", async (t) => {
@@ -84,7 +143,19 @@ test("GitHub exposes only fixed comment, body, labels and state write unions", a
   ];
   for (const current of cases) await t.test(current.action.type, async (st) => {
     const writeResponse = current.action.type === "comment"
-      ? { id: 44, node_id: "IC_comment", body: "Approved comment" }
+      ? {
+          url: "https://github.example.com/api/v3/repos/acme/widget/issues/comments/44",
+          html_url: "https://github.example.com/acme/widget/issues/7#issuecomment-44",
+          issue_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7",
+          id: 44,
+          node_id: "IC_comment",
+          user: openIssue.user,
+          created_at: "2026-08-19T01:00:00Z",
+          updated_at: "2026-08-19T01:00:00Z",
+          author_association: "MEMBER",
+          body: "Approved comment",
+          reactions: { url: "https://github.example.com/api/v3/repos/acme/widget/issues/comments/44/reactions", total_count: 0 },
+        }
       : current.action.type === "body" ? { ...openIssue, body: "Approved body" }
         : current.action.type === "labels" ? { ...openIssue, labels: [{ name: "ready" }, { name: "bug" }] }
           : openIssue;
@@ -99,6 +170,58 @@ test("GitHub exposes only fixed comment, body, labels and state write unions", a
   const cli = await scriptedCli(t, []);
   await assert.rejects(writeGithubIssue({ executable: cli.executable, target, action: { type: "raw", method: "DELETE", endpoint: "/user" } as never }),
     (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_ACTION_INVALID");
+});
+
+test("GitHub rejects generic state closed before spawn so closing only uses issue.close", async (t) => {
+  const cli = await scriptedCli(t, []);
+  await assert.rejects(
+    writeGithubIssue({ executable: cli.executable, target, action: { type: "state", state: "closed" } as never }),
+    (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_ACTION_INVALID",
+  );
+  await assert.rejects(access(cli.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("GitHub preserves approved stdin and compares canonical comment, body and labels readback", async (t) => {
+  const approvedText = "Cafe\u0301\r\nSecond\rThird";
+  const canonicalText = "Café\nSecond\nThird";
+  const approvedLabels = ["Cafe\u0301\r\nready", "alpha\rline"];
+  const canonicalLabels = ["alpha\nline", "Café\nready"];
+  const cases = [
+    {
+      name: "comment",
+      action: { type: "comment", body: approvedText } as const,
+      writeResponse: { id: 45, node_id: "IC_canonical", body: canonicalText, user: openIssue.user, created_at: openIssue.updated_at },
+      readback: openIssue,
+      payload: { body: approvedText },
+    },
+    {
+      name: "body",
+      action: { type: "body", body: approvedText } as const,
+      writeResponse: { ...openIssue, body: canonicalText },
+      readback: { ...openIssue, body: canonicalText },
+      payload: { body: approvedText },
+    },
+    {
+      name: "labels",
+      action: { type: "labels", labels: approvedLabels } as const,
+      writeResponse: { ...openIssue, labels: canonicalLabels.map((name, index) => ({ ...openIssue.labels[0], id: 7300 + index, node_id: `LA_canonical_${index}`, name })) },
+      readback: { ...openIssue, labels: canonicalLabels.map((name, index) => ({ ...openIssue.labels[0], id: 7400 + index, node_id: `LA_readback_${index}`, name })) },
+      payload: { labels: approvedLabels },
+    },
+  ];
+  for (const current of cases) await t.test(current.name, async (st) => {
+    const cli = await scriptedCli(st, [current.writeResponse, current.readback]);
+    await writeGithubIssue({ executable: cli.executable, target, action: current.action });
+    const first = JSON.parse((await readFile(cli.log, "utf8")).split("\n")[0]!);
+    assert.deepEqual(first.input, current.payload);
+  });
+
+  const duplicate = await scriptedCli(t, []);
+  await assert.rejects(
+    writeGithubIssue({ executable: duplicate.executable, target, action: { type: "labels", labels: ["Cafe\u0301", "Café"] } }),
+    (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_ACTION_INVALID",
+  );
+  await assert.rejects(access(duplicate.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
 });
 
 test("GitHub issue.close reads open, writes closed, and reads back the same stable identity", async (t) => {
