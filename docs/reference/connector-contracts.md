@@ -16,7 +16,7 @@
 }
 ```
 
-Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日志、Artifact、Evidence 或错误中泄露 Cookie、Token、Keychain 内容或认证文件。Provider metadata 只能使用来源类型允许的字段，并通过统一 secret detector 拒绝 credential-like key/value；detector 覆盖 GitHub、GitLab、Slack 及飞书 `t-`、`u-`、`a-` 高熵访问令牌，同时保留短前缀、低熵占位值和合法飞书文档 token。canonical URL 必须逐项解码并扫描 username、password、hostname、path segment、query key/value 和 fragment；非法 percent encoding、userinfo 或任一凭据样式表面都失败关闭。拒绝消息不得回显攻击者提供的 metadata key/value、token 或 URL 表面。当前不支持的来源类型返回 `WSSPEC_SOURCE_TYPE_UNSUPPORTED`；空来源、越界文件或超限来源分别返回 `WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`。
+Provider 必须使用固定 executable 与 argv，禁止 Shell 拼接和从日志、Artifact、Evidence 或错误中泄露 Cookie、Token、Keychain 内容或认证文件。Provider metadata 只能使用来源类型允许的字段，并通过统一 secret detector 拒绝 credential-like key/value；detector 覆盖 GitHub、GitLab、Slack 及飞书 `t-`、`u-`、`a-` 高熵访问令牌，同时保留短前缀、低熵占位值和合法飞书文档 token。canonical URL 的 raw 字符串与解析后的 username、password、hostname、Unicode domain、path segment、raw query key/value、`URLSearchParams` key/value 和 fragment 必须共用同一个 bounded recursive decoder。每个表面最多严格解码 4 轮且逐轮检查长度、percent 语法和 secret；query 的 raw `+` 与 form-decoded 空格语义都必须扫描。非法 percent encoding、userinfo 或任一层的凭据样式内容以 `WSSPEC_SOURCE_INVALID` 失败；4 轮后仍有合法 percent escape 以 `WSSPEC_SOURCE_METADATA_INVALID` 失败，禁止用双重或任意嵌套编码把凭据传给下游二次解码。拒绝消息不得回显攻击者提供的 metadata key/value、token 或 URL 表面。当前不支持的来源类型返回 `WSSPEC_SOURCE_TYPE_UNSUPPORTED`；空来源、越界文件或超限来源分别返回 `WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`。
 
 Artifact 根目录必须位于当前 repository/worktree 内，根本身不能是 symlink，并且根及按需创建的每个目录组件都必须由当前 UID 拥有且不可由 group/world 写入。Source 与 Artifact 文件在路径检查、打开的 FD、读取后路径复检之间绑定 `dev`、`ino`、`size`、`mtimeNs`、`ctimeNs` 和 `nlink`；只接受单链接普通文件，拒绝预置或读取期间出现的 hardlink。新目录和 no-clobber Artifact 在落盘后还要重新验证身份与最终字节。
 

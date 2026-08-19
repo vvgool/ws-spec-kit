@@ -1,6 +1,7 @@
 import { constants, type BigIntStats } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
+import { domainToUnicode } from "node:url";
 import * as canonicalizeModule from "canonicalize";
 
 import { sha256 } from "../../domain/digests.js";
@@ -94,8 +95,38 @@ export function requirementTitle(body: string): string {
   return [...withoutHeading].slice(0, 512).join("") || "Requirement";
 }
 
+const maximumUrlSurfaceBytes = 8_192;
+const maximumUrlDecodeRounds = 4;
+const invalidPercentEscape = /%(?![A-Fa-f0-9]{2})/u;
+
+function inspectDecodedUrlSurface(surface: string): string {
+  let current = surface;
+  for (let round = 0; round <= maximumUrlDecodeRounds; round += 1) {
+    if (Buffer.byteLength(current, "utf8") > maximumUrlSurfaceBytes) {
+      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 解码表面超过上限。");
+    }
+    if (credentialLikeField(current)) {
+      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含凭据样式内容。");
+    }
+    if (!current.includes("%")) return current;
+    if (invalidPercentEscape.test(current)) {
+      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。");
+    }
+    if (round === maximumUrlDecodeRounds) {
+      return fail("WSSPEC_SOURCE_METADATA_INVALID", "canonicalUrl 编码嵌套超过上限。");
+    }
+    try {
+      current = decodeURIComponent(current);
+    } catch {
+      return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。");
+    }
+  }
+  return fail("WSSPEC_SOURCE_METADATA_INVALID", "canonicalUrl 编码嵌套超过上限。");
+}
+
 function normalizedUrl(value: unknown): string {
   const source = normalizedScalar(value, "canonicalUrl", 2048);
+  inspectDecodedUrlSurface(source);
   let parsed: URL;
   try {
     parsed = new URL(source);
@@ -103,28 +134,25 @@ function normalizedUrl(value: unknown): string {
     return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 必须是合法 URL。");
   }
   if (!["https:", "http:"].includes(parsed.protocol)) return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 只允许 HTTP(S) URL。");
-  const decode = (surface: string): string => {
-    try { return decodeURIComponent(surface.replace(/\+/gu, "%20")); }
-    catch { return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 包含不合法编码。"); }
-  };
-  const querySurfaces = parsed.search.slice(1).split("&").flatMap((entry) => {
+  const rawQuerySurfaces = parsed.search.slice(1).split("&").flatMap((entry) => {
     if (entry === "") return [];
     const separator = entry.indexOf("=");
     return separator < 0
-      ? [decode(entry)]
-      : [decode(entry.slice(0, separator)), decode(entry.slice(separator + 1))];
+      ? [entry]
+      : [entry.slice(0, separator), entry.slice(separator + 1)];
   });
   const surfaces = [
-    decode(parsed.username),
-    decode(parsed.password),
-    decode(parsed.hostname),
-    ...parsed.pathname.split("/").map(decode),
-    ...querySurfaces,
-    decode(parsed.hash.slice(1)),
+    parsed.username,
+    parsed.password,
+    parsed.hostname,
+    domainToUnicode(parsed.hostname),
+    ...parsed.pathname.split("/"),
+    ...rawQuerySurfaces,
+    ...[...parsed.searchParams.entries()].flatMap(([key, item]) => [key, item]),
+    parsed.hash.slice(1),
   ];
-  if (parsed.username !== "" || parsed.password !== "" || surfaces.some(credentialLikeField)) {
-    return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含凭据样式内容。");
-  }
+  for (const surface of surfaces) inspectDecodedUrlSurface(surface);
+  if (parsed.username !== "" || parsed.password !== "") return fail("WSSPEC_SOURCE_INVALID", "canonicalUrl 不能包含凭据样式内容。");
   return parsed.toString();
 }
 

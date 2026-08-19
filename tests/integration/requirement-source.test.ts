@@ -30,6 +30,15 @@ function hasCode(error: unknown, code: string): boolean {
   return error instanceof SourceArtifactError && error.code === code;
 }
 
+function encodeLayers(value: string, layers: number): string {
+  if (layers < 1) return value;
+  let encoded = [...Buffer.from(value, "utf8")]
+    .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+    .join("");
+  for (let index = 1; index < layers; index += 1) encoded = encodeURIComponent(encoded);
+  return encoded;
+}
+
 test("user.prompt canonicalizes Unicode, BOM and all newline forms before deriving identity", async () => {
   const current = await fixture();
   const first = await captureRequirement({
@@ -347,6 +356,101 @@ test("Provider canonical URLs scan every decoded URL surface for Lark tokens", a
       (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
     );
   }
+});
+
+test("Provider canonical URLs reject the reviewed double-encoded credential probes", async () => {
+  const current = await fixture();
+  const cases: Array<{ type: NormalizedRequirementSource["type"]; canonicalUrl: string }> = [
+    {
+      type: "feishu.document",
+      canonicalUrl: `https://example.feishu.cn/docx/${encodeLayers("t-A1b2C3d4E5f6G7h8I9j0K1l2", 2)}`,
+    },
+    {
+      type: "github.issue",
+      canonicalUrl: `https://github.com/org/repo/issues/17?redirect=${encodeLayers("github_pat_abcdefghijklmnopqrstuvwxyz123456", 2)}`,
+    },
+    {
+      type: "gitlab.issue",
+      canonicalUrl: `https://gitlab.com/org/repo/-/issues/17#${encodeLayers("glpat-AbCdEfGhIjKlMnOpQrS", 2)}`,
+    },
+  ];
+  for (const { type, canonicalUrl } of cases) {
+    await assert.rejects(
+      captureRequirement({
+        ...current,
+        workItemId,
+        source: { type, stableId: "external-17", canonicalUrl, title: "Issue", body: "Body", metadata: {} },
+      }),
+      (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
+    );
+  }
+});
+
+test("Provider canonical URL decoding rejects credentials through four layers and fails closed beyond the bound", async () => {
+  const current = await fixture();
+  const token = "u-Z9y8X7w6V5u4T3s2R1q0P9o8";
+  const source = (canonicalUrl: string): NormalizedRequirementSource => ({
+    type: "feishu.document",
+    stableId: "doccnAbCdEfGhIjKlMnOpQrS",
+    canonicalUrl,
+    title: "Document",
+    body: "Body",
+    metadata: {},
+  });
+  for (const layers of [1, 2, 3, 4]) {
+    await assert.rejects(
+      captureRequirement({ ...current, workItemId, source: source(`https://example.feishu.cn/docx/${encodeLayers(token, layers)}`) }),
+      (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
+    );
+  }
+  await assert.rejects(
+    captureRequirement({ ...current, workItemId, source: source(`https://example.feishu.cn/docx/${encodeLayers(token, 5)}`) }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_METADATA_INVALID"),
+  );
+  await assert.rejects(
+    captureRequirement({ ...current, workItemId, source: source("https://example.feishu.cn/docx/legal?literal=%25") }),
+    (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
+  );
+});
+
+test("Provider canonical URL decoding scans split prefixes, query plus semantics and Unicode host surfaces", async () => {
+  const current = await fixture();
+  const base = {
+    type: "feishu.document" as const,
+    stableId: "doccnAbCdEfGhIjKlMnOpQrS",
+    title: "Document",
+    body: "Body",
+    metadata: {},
+  };
+  for (const canonicalUrl of [
+    "https://example.feishu.cn/docx/t%252dA1b2C3d4E5f6G7h8I9j0K1l2",
+    "https://example.feishu.cn/docx/%2574%252DA1b2C3d4E5f6G7h8I9j0K1l2",
+    "https://example.feishu.cn/docx/legal?redirect=Basic+dXNlcjpwYXNz",
+    "https://t%252DA1b2C3d4E5f6G7h8I9j0K1l2-例.example.com/docx/legal",
+  ]) {
+    await assert.rejects(
+      captureRequirement({ ...current, workItemId, source: { ...base, canonicalUrl } }),
+      (error: unknown) => hasCode(error, "WSSPEC_SOURCE_INVALID"),
+    );
+  }
+});
+
+test("Provider canonical URL decoding preserves legal encoded and plus-valued surfaces", async () => {
+  const current = await fixture();
+  const canonicalUrl = "https://example.feishu.cn/docx/doccnAbCdEfGhIjKlMnOpQrS?title=%E4%BE%8B%E5%AD%90&q=a+b#section-1";
+  const artifact = await captureRequirement({
+    ...current,
+    workItemId,
+    source: {
+      type: "feishu.document",
+      stableId: "doccnAbCdEfGhIjKlMnOpQrS",
+      canonicalUrl,
+      title: "Document",
+      body: "Body",
+      metadata: {},
+    },
+  });
+  assert.equal(artifact.canonicalUrl, canonicalUrl);
 });
 
 test("Provider canonical URL decoding fails closed without echoing attacker input", async () => {
