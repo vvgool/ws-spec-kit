@@ -147,11 +147,21 @@ export async function testFileManifest(worktree: string, testPaths: readonly str
 
 type TestingScope = Pick<FixedTestGate, "testAssetPaths" | "testAssetRoots" | "productPaths">;
 
+const testOwnershipMarkers = new Set(["test", "tests", "spec", "__tests__", "__snapshots__", "Tests"]);
+
+function isTestOwnershipMarker(segment: string): boolean {
+  return testOwnershipMarkers.has(segment) || /^[^*?]+\.Tests$/u.test(segment);
+}
+
 function scopeRoot(pattern: string): string {
   const segments = pattern.split("/");
   const firstPattern = segments.findIndex((segment) => /[*?]/u.test(segment));
-  const root = firstPattern < 0 ? segments.slice(0, -1).join("/") : segments.slice(0, firstPattern).join("/");
-  return root === "" ? "." : root;
+  const ownershipMarker = segments.findIndex(isTestOwnershipMarker);
+  if (ownershipMarker >= 0 && (firstPattern < 0 || ownershipMarker < firstPattern)) {
+    return segments.slice(0, ownershipMarker + 1).join("/");
+  }
+  const staticPrefix = firstPattern < 0 ? segments.slice(0, -1) : segments.slice(0, firstPattern);
+  return staticPrefix[0] ?? ".";
 }
 
 export function deriveTestAssetRoots(patterns: readonly string[]): string[] {
@@ -180,7 +190,7 @@ export async function testAssetScopeManifest(worktree: string, scope: TestingSco
   const canonicalRoot = await realpath(worktree);
   const derivedRoots = deriveTestAssetRoots(scope.testAssetPaths);
   if (JSON.stringify(scope.testAssetRoots) !== JSON.stringify(derivedRoots)) {
-    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Test Gate 的 trusted test asset roots 与 pattern 静态前缀不一致。 ");
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Test Gate 的 trusted test asset roots 与引擎 ownership 归一化结果不一致。 ");
   }
   const roots = derivedRoots.includes(".") ? ["."] : derivedRoots
     .filter((candidate) => !derivedRoots.some((other) => other !== candidate && candidate.startsWith(`${other}/`)))

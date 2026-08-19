@@ -9,7 +9,7 @@ import test from "node:test";
 import { computeWorkspaceTreeDigest, sha256 } from "../../src/domain/digests.js";
 import { tddFailureDisposition } from "../../src/application/submit.js";
 import { recordGreenEvidence } from "../../src/engine/tdd/green-gate.js";
-import { isTestPath, isTrustedTestAssetPath, recordRedEvidence, testAssetScopeManifest } from "../../src/engine/tdd/red-gate.js";
+import { deriveTestAssetRoots, isTestPath, isTrustedTestAssetPath, recordRedEvidence, testAssetScopeManifest } from "../../src/engine/tdd/red-gate.js";
 import type { FixedTestGate, TddVerificationCode, TrustedEvidence } from "../../src/engine/tdd/types.js";
 import {
   assertImplementHasTrustedRed,
@@ -609,6 +609,65 @@ test("narrow test asset globs bind the complete trusted parent root", async () =
   );
 });
 
+test("nested Node selectors bind the stack ownership root and sibling support despite product overlap", async () => {
+  const root = await workspace();
+  await mkdir(path.join(root, "tests", "unit"), { recursive: true });
+  await mkdir(path.join(root, "tests", "support"), { recursive: true });
+  await writeFile(path.join(root, "tests", "unit", "feature.test.mjs"), [
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    "import { expected } from '../support/helper.mjs';",
+    "test('nested selector remains red', () => assert.equal(expected, 1));",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 0;\n", "utf8");
+  await rm(path.join(root, "tests", "feature.test.mjs"));
+  await git(root, "add", "-A");
+  await git(root, "commit", "-m", "test: seed nested node ownership");
+  const patterns = ["tests/unit/*.test.mjs"];
+  const gate: FixedTestGate = {
+    ...featureGate(),
+    argv: [process.execPath, "--test", "tests/unit/feature.test.mjs"],
+    testAssetPaths: patterns,
+    testAssetRoots: deriveTestAssetRoots(patterns),
+    productPaths: ["src/**", "tests/**"],
+  };
+
+  const red = await recordRedEvidence(await redInput(root, gate, {
+    modifiedFiles: ["tests/unit/feature.test.mjs"],
+    testPaths: ["tests/unit/feature.test.mjs"],
+  }));
+
+  assert.deepEqual(red.testAssetRoots, ["tests"]);
+  assert.deepEqual(red.testAssets.map(({ path: filename }) => filename), [
+    "tests/support/helper.mjs",
+    "tests/unit/feature.test.mjs",
+  ]);
+  await writeFile(path.join(root, "tests", "support", "helper.mjs"), "export const expected = 1;\n", "utf8");
+  await assert.rejects(
+    assertImplementHasTrustedRed({ taskId: "WSS-TDD", commandId: "test", gate, worktree: root, redEvidence: red }),
+    (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
+  );
+});
+
+test("stack ownership normalization is engine-defined across known and custom layouts", () => {
+  for (const [patterns, expected] of [
+    [["tests/unit/*.test.mjs"], ["tests"]],
+    [["test/unit/**/*_test.rb"], ["test"]],
+    [["src/test/java/**/*Test.java"], ["src/test"]],
+    [["spec/models/**/*_spec.rb"], ["spec"]],
+    [["Tests/Unit/**/*Tests.cs"], ["Tests"]],
+    [["packages/Foo.Tests/Unit/**/*Tests.cs"], ["packages/Foo.Tests"]],
+    [["packages/a/__tests__"], ["packages/a/__tests__"]],
+    [["packages/a/__tests__/**/*.test.ts", "packages/a/__snapshots__/**"], ["packages/a/__snapshots__", "packages/a/__tests__"]],
+    [["qa/unit/*.case.mjs"], ["qa"]],
+    [["qa/unit/case.mjs"], ["qa"]],
+    [["**/*.test.*"], ["."]],
+  ] as const) {
+    assert.deepEqual(deriveTestAssetRoots(patterns), expected, patterns.join(","));
+  }
+});
+
 test("root-level test patterns conservatively bind the repository while allowing product-only digest changes", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-root-scope-"));
   await mkdir(path.join(root, "src"), { recursive: true });
@@ -630,34 +689,87 @@ test("root-level test patterns conservatively bind the repository while allowing
   assert.equal(after.digest, before.digest);
 });
 
-test("cross-stack narrow patterns promote canonical parent directories to trusted roots", async () => {
+test("cross-stack nested selectors bind sibling fixtures and support under normalized ownership roots", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-cross-stack-"));
   for (const filename of [
     "src/test/java/FeatureTest.java",
     "src/test/resources/fixture.json",
-    "spec/feature_spec.rb",
-    "spec/fixtures/value.yml",
-    "Tests/FeatureTests.cs",
-    "Tests/Snapshots/value.snap",
+    "test/unit/feature_test.rb",
+    "test/support/helper.rb",
+    "spec/models/feature_spec.rb",
+    "spec/support/helper.rb",
+    "packages/Foo.Tests/Unit/FeatureTests.cs",
+    "packages/Foo.Tests/Fixtures/value.json",
   ]) {
     await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
     await writeFile(path.join(root, filename), `${filename}\n`, "utf8");
   }
   const scope = {
-    testAssetPaths: ["src/test/**/*.java", "spec/**/*_spec.rb", "Tests/**/*Tests.cs"],
-    testAssetRoots: ["Tests", "spec", "src/test"],
+    testAssetPaths: ["src/test/java/**/*.java", "test/unit/**/*_test.rb", "spec/models/**/*_spec.rb", "packages/Foo.Tests/Unit/**/*Tests.cs"],
+    testAssetRoots: ["packages/Foo.Tests", "spec", "src/test", "test"],
     productPaths: ["src/main/**"],
   };
 
   const manifest = await testAssetScopeManifest(root, scope);
 
   assert.deepEqual(manifest.files.map(({ path: filename }) => filename), [
-    "Tests/FeatureTests.cs",
-    "Tests/Snapshots/value.snap",
-    "spec/feature_spec.rb",
-    "spec/fixtures/value.yml",
+    "packages/Foo.Tests/Fixtures/value.json",
+    "packages/Foo.Tests/Unit/FeatureTests.cs",
+    "spec/models/feature_spec.rb",
+    "spec/support/helper.rb",
     "src/test/java/FeatureTest.java",
     "src/test/resources/fixture.json",
+    "test/support/helper.rb",
+    "test/unit/feature_test.rb",
+  ]);
+});
+
+test("nested marker selectors jointly bind package tests and snapshots", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-marker-scope-"));
+  for (const filename of [
+    "packages/a/__tests__/feature.test.ts",
+    "packages/a/__tests__/fixtures/value.json",
+    "packages/a/__snapshots__/feature.snap",
+  ]) {
+    await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
+    await writeFile(path.join(root, filename), `${filename}\n`, "utf8");
+  }
+  const patterns = ["packages/a/__tests__/**/*.test.ts", "packages/a/__snapshots__/**"];
+  const scope = {
+    testAssetPaths: patterns,
+    testAssetRoots: deriveTestAssetRoots(patterns),
+    productPaths: ["packages/a/src/**"],
+  };
+
+  const manifest = await testAssetScopeManifest(root, scope);
+
+  assert.deepEqual(scope.testAssetRoots, ["packages/a/__snapshots__", "packages/a/__tests__"]);
+  assert.deepEqual(manifest.files.map(({ path: filename }) => filename), [
+    "packages/a/__snapshots__/feature.snap",
+    "packages/a/__tests__/feature.test.ts",
+    "packages/a/__tests__/fixtures/value.json",
+  ]);
+});
+
+test("unknown custom layouts conservatively bind their top-level static directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-custom-scope-"));
+  for (const filename of ["qa/unit/feature.case.mjs", "qa/support/helper.mjs"]) {
+    await mkdir(path.dirname(path.join(root, filename)), { recursive: true });
+    await writeFile(path.join(root, filename), `${filename}\n`, "utf8");
+  }
+  const patterns = ["qa/unit/*.case.mjs"];
+  const scope = {
+    testAssetPaths: patterns,
+    testAssetRoots: deriveTestAssetRoots(patterns),
+    productPaths: ["src/**"],
+  };
+
+  const manifest = await testAssetScopeManifest(root, scope);
+
+  assert.deepEqual(scope.testAssetRoots, ["qa"]);
+  assert.deepEqual(manifest.files.map(({ path: filename }) => filename), [
+    "qa/support/helper.mjs",
+    "qa/unit/feature.case.mjs",
   ]);
 });
 

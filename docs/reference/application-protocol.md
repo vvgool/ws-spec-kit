@@ -86,7 +86,9 @@
 
 首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`；引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
 
-`testing.testAssetPaths` 是测试资产选择器，不是可由项目任意收窄的可信边界。引擎把每个 pattern 在首个 `*` 或 `?` 前的静态前缀提升为 `testAssetRoots`；精确文件 pattern 使用其父目录，根级 pattern 使用仓库根 `.`。例如 `tests/*.test.mjs`、`tests/**/*.ts` 和 `tests/feature.test.ts` 都将 `tests` 作为 trusted root，`*.test.mjs` 则保守绑定整个仓库。Red、Green、Implement、Review-Fix、recovery 与 Close 都扫描这些 root 下的全部 regular file，并将 roots 与测试所有的文件摘要写入 Evidence；root 或子级 symlink、非普通文件、路径逃逸、超过 4096 个文件或总计超过 1 MiB 都 fail closed。
+`testing.testAssetPaths` 是测试入口选择器，不是可由项目任意收窄的可信边界。引擎使用不可配置的 stack ownership marker 将 pattern 归一化为 `testAssetRoots`：遇到最早的 `test`、`tests`、`spec`、`__tests__`、`__snapshots__`、`.NET Tests` 或 `*.Tests` 目录时，trusted root 固定截到该目录。于是 `tests/unit/*.test.mjs` 提升为 `tests`，`src/test/java/**/*Test.java` 提升为 `src/test`，`spec/models/**/*_spec.rb` 提升为 `spec`，`packages/Foo.Tests/Unit/**/*Tests.cs` 提升为 `packages/Foo.Tests`。同一 package 的 `__tests__` 与 `__snapshots__` selector 分别派生并共同绑定两个 ownership root。若 pattern 没有已知 marker，引擎保守使用静态前缀的顶层目录；无静态前缀或根级 pattern 使用仓库根 `.`。这些 marker 与算法不受 `testing.pathRules` 或 selector 深度控制。
+
+Red、Green、Implement、Review-Fix、recovery 与 Close 都扫描归一化 roots 下的全部 regular file，并将 roots 与测试所有的文件摘要写入 Evidence；root 或子级 symlink、非普通文件、路径逃逸、超过 4096 个文件或总计超过 1 MiB 都 fail closed。
 
 只有仓库根 `.` 带来的文件可以应用 product-only 例外：文件匹配 `testing.productPaths` 且不匹配任何 `testAssetPaths` 时，其逐文件摘要仍记录在 `testAssets` 清单中，但不进入 TDD 测试资产聚合摘要，因此正常产品实现可以在 Red 后变化。任何非根 trusted test root 下的文件始终归测试所有，即使 `productPaths` 同时匹配；修改或新增这些文件会使原 Red Evidence 失效并重启 TDD cycle。
 
