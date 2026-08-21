@@ -1,3 +1,6 @@
+import { constants, accessSync, realpathSync } from "node:fs";
+import path from "node:path";
+
 import { readGithubIssue } from "../../adapters/connectors/github-cli.js";
 import { readGitlabIssue } from "../../adapters/connectors/gitlab-cli.js";
 import { readFeishuDocument } from "../../adapters/connectors/lark-cli.js";
@@ -18,6 +21,47 @@ export interface BuiltinConnectorRuntime {
     feishu?: Readonly<Partial<Record<"HOME" | "XDG_CONFIG_HOME" | "LARK_CONFIG_DIR", string | undefined>>>;
   };
   larkIdentity?: LarkIdentity;
+}
+
+function configuredPath(value: string | undefined): string | undefined {
+  return value !== undefined && path.isAbsolute(value) && !value.includes("\0") ? value : undefined;
+}
+
+function locateExecutable(name: "git" | "gh" | "glab" | "lark-cli"): string {
+  const directories = (process.env.PATH ?? "").split(path.delimiter).filter((entry) => path.isAbsolute(entry));
+  for (const directory of directories) {
+    const candidate = path.join(directory, name);
+    try {
+      accessSync(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+      return realpathSync(candidate);
+    } catch {}
+  }
+  return path.join(directories[0] ?? path.parse(process.cwd()).root, name);
+}
+
+export function createDefaultBuiltinConnectorRuntime(home: string): BuiltinConnectorRuntime {
+  const environment = (specific: string | undefined) => ({
+    ...(configuredPath(home) === undefined ? {} : { HOME: configuredPath(home) }),
+    ...(configuredPath(process.env.XDG_CONFIG_HOME) === undefined ? {} : { XDG_CONFIG_HOME: configuredPath(process.env.XDG_CONFIG_HOME) }),
+    specific: configuredPath(specific),
+  });
+  const github = environment(process.env.GH_CONFIG_DIR);
+  const gitlab = environment(process.env.GLAB_CONFIG_DIR);
+  const feishu = environment(process.env.LARK_CONFIG_DIR);
+  return {
+    executables: {
+      git: locateExecutable("git"),
+      gh: locateExecutable("gh"),
+      glab: locateExecutable("glab"),
+      "lark-cli": locateExecutable("lark-cli"),
+    },
+    environments: {
+      github: { HOME: github.HOME, XDG_CONFIG_HOME: github.XDG_CONFIG_HOME, ...(github.specific === undefined ? {} : { GH_CONFIG_DIR: github.specific }) },
+      gitlab: { HOME: gitlab.HOME, XDG_CONFIG_HOME: gitlab.XDG_CONFIG_HOME, ...(gitlab.specific === undefined ? {} : { GLAB_CONFIG_DIR: gitlab.specific }) },
+      feishu: { HOME: feishu.HOME, XDG_CONFIG_HOME: feishu.XDG_CONFIG_HOME, ...(feishu.specific === undefined ? {} : { LARK_CONFIG_DIR: feishu.specific }) },
+    },
+    larkIdentity: "user",
+  };
 }
 
 export class ConnectorRuntimeError extends Error {

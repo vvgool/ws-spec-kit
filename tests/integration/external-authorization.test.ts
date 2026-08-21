@@ -7,7 +7,6 @@ import test from "node:test";
 import {
   approveExternalAction,
   ExternalActionError,
-  externalActionApprovalSummary,
   type ExternalActionGrant,
 } from "../../src/application/external-action.js";
 import { loadApplicationState } from "../../src/application/state.js";
@@ -59,18 +58,15 @@ async function replaceAttemptWhileMutationWaits<T>(input: {
   return operation;
 }
 
-test("external writes stay at zero before a TTY grant and approval summary excludes payload and credentials", async () => {
+test("credential-like payload is rejected before persistence", async () => {
   const fixture = await externalActionFixture();
-  let calls = 0;
-  const prepared = await (await import("../../src/application/external-action.js")).prepareExternalAction(
-    prepareInput(fixture.root, fixture.workPackage, { payload: { body: "Authorization: Bearer fixture-secret" } }),
+  await assert.rejects(
+    (await import("../../src/application/external-action.js")).prepareExternalAction(
+      prepareInput(fixture.root, fixture.workPackage, { payload: { body: "Authorization: Bearer fixture-secret" } }),
+    ),
+    (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_EXTERNAL_PAYLOAD_INVALID",
   );
-
-  assert.equal(calls, 0);
-  const summary = externalActionApprovalSummary(prepared.request);
-  assert.deepEqual(Object.keys(summary).sort(), ["action", "digest", "provider", "sideEffects", "target"]);
-  assert.equal(JSON.stringify(summary).includes("fixture-secret"), false);
-  assert.equal(JSON.stringify(prepared.request).includes("fixture-secret"), false);
+  assert.deepEqual((await readControlPlane(fixture.root, fixture.workItemId)).externalActions, {});
 });
 
 test("grant is bound to request, actor, approval, profile, workspace, config, target, digest, and Attempt", async () => {

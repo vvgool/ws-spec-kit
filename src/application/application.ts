@@ -3,13 +3,14 @@ import os from "node:os";
 import type { WSSpecApplication } from "../protocol/application.js";
 import { createDefaultExecutorRegistry, type ExecutorRegistry } from "../registry/executors/registry.js";
 import type { SkillProvider } from "../registry/skills/types.js";
-import type { BuiltinConnectorRuntime } from "../registry/connectors/runtime.js";
+import { createDefaultBuiltinConnectorRuntime, type BuiltinConnectorRuntime } from "../registry/connectors/runtime.js";
+import { createBuiltinExternalExecutor } from "../registry/connectors/external-executor.js";
 import { acquireApplication } from "./acquire.js";
 import { decideApplication } from "./decide.js";
 import { inspectApplication } from "./inspect.js";
 import { startApplication } from "./start.js";
 import { submitApplication } from "./submit.js";
-import { ExternalActionError, type ExternalActionExecutor } from "./external-action.js";
+import type { ExternalActionExecutor } from "./external-action.js";
 
 export interface ApplicationDependencies {
   provider?: SkillProvider;
@@ -23,16 +24,16 @@ export interface ApplicationDependencies {
 }
 
 export function createApplication(input: ApplicationDependencies = {}): WSSpecApplication {
+  const home = input.home ?? os.homedir();
+  const connectorRuntime = input.connectorRuntime ?? createDefaultBuiltinConnectorRuntime(home);
   const dependencies = {
     provider: input.provider ?? "generic",
-    home: input.home ?? os.homedir(),
+    home,
     terminal: input.terminal ?? process.stdin,
     now: input.now ?? (() => new Date()),
     executors: input.executors ?? createDefaultExecutorRegistry(),
-    externalExecutor: input.externalExecutor ?? ((provider, action) => {
-      throw new ExternalActionError("WSSPEC_EXTERNAL_EXECUTOR_NOT_FOUND", `找不到外部动作 Executor ${provider}/${action}。`);
-    }),
-    ...(input.connectorRuntime === undefined ? {} : { connectorRuntime: input.connectorRuntime }),
+    externalExecutor: input.externalExecutor ?? ((provider, action) => createBuiltinExternalExecutor(connectorRuntime, provider, action)),
+    connectorRuntime,
     ...(input.workflowTrust === undefined ? {} : { workflowTrust: input.workflowTrust }),
   };
   return {

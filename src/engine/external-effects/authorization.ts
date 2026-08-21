@@ -21,6 +21,7 @@ export interface ExternalActionRequest {
   securityClass: "external-write";
   target: ExternalActionTarget;
   payloadDigest: `sha256:${string}`;
+  payloadArtifactDigest: `sha256:${string}`;
   bindingDigest: `sha256:${string}`;
   inputDigest: `sha256:${string}`;
   artifactDigests: `sha256:${string}`[];
@@ -48,6 +49,7 @@ export interface ExternalActionGrant {
   securityClass: "external-write";
   target: ExternalActionTarget;
   payloadDigest: `sha256:${string}`;
+  payloadArtifactDigest: `sha256:${string}`;
   bindingDigest: `sha256:${string}`;
   inputDigest: `sha256:${string}`;
   artifactDigests: `sha256:${string}`[];
@@ -152,6 +154,7 @@ export function createExternalActionRequest(input: Omit<ExternalActionRequest, "
     securityClass: input.securityClass,
     target: { ...input.target },
     payloadDigest,
+    payloadArtifactDigest: input.payloadArtifactDigest,
     bindingDigest: input.bindingDigest,
     inputDigest: input.inputDigest,
     artifactDigests: [...input.artifactDigests].sort(),
@@ -203,6 +206,7 @@ export function createExternalActionGrant(input: {
     securityClass: request.securityClass,
     target: { ...request.target },
     payloadDigest: request.payloadDigest,
+    payloadArtifactDigest: request.payloadArtifactDigest,
     bindingDigest: request.bindingDigest,
     inputDigest: request.inputDigest,
     artifactDigests: [...request.artifactDigests],
@@ -225,7 +229,8 @@ export function assertGrantAuthorizes(request: ExternalActionRequest, grant: Ext
     && grant.workItemId === request.workItemId && grant.stepId === request.stepId && grant.attemptId === request.attemptId
     && grant.provider === request.provider && grant.action === request.action && grant.securityClass === request.securityClass
     && grant.target.kind === request.target.kind && grant.target.stableId === request.target.stableId
-    && grant.payloadDigest === request.payloadDigest && grant.bindingDigest === request.bindingDigest && grant.inputDigest === request.inputDigest
+    && grant.payloadDigest === request.payloadDigest && grant.payloadArtifactDigest === request.payloadArtifactDigest
+    && grant.bindingDigest === request.bindingDigest && grant.inputDigest === request.inputDigest
     && JSON.stringify(grant.artifactDigests) === JSON.stringify(request.artifactDigests)
     && grant.idempotencyKey === request.idempotencyKey && grant.approvalDigest === request.requestDigest
     && grant.profile === request.profile && grant.profileDigest === request.profileDigest

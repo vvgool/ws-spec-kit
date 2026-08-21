@@ -16,13 +16,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readGithubIssue, writeGithubIssue } from "../../src/adapters/connectors/github-cli.js";
 import { commitGitChanges } from "../../src/adapters/connectors/git-native.js";
-import { readGitlabIssue, writeGitlabIssue } from "../../src/adapters/connectors/gitlab-cli.js";
-import { publishKnowledge, readFeishuDocument } from "../../src/adapters/connectors/lark-cli.js";
 import { runCommand } from "../../src/cli/commands/core.js";
 import { createApplication, type ApplicationDependencies } from "../../src/application/application.js";
-import type { ExternalActionExecutor } from "../../src/application/external-action.js";
 import { loadApplicationState } from "../../src/application/state.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { sha256, computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
@@ -44,7 +40,8 @@ const issueTargets = {
   gitlab: { host: "gitlab.example.com", projectPath: "group/service", iid: 9 },
 } as const;
 const issueStableIds = { github: "github:I_fixture_github_7", gitlab: "gitlab:9001" } as const;
-const knowledgeStableId = "feishu-target:folderFixtureToken123";
+const knowledgeDocumentToken = "targetDocumentToken123";
+const knowledgeStableId = `feishu:${knowledgeDocumentToken}`;
 const deliveryMarkdown = "# Fixture delivery\n\nVerified through the Connector Fixture E2E.\n";
 const secretMarkers = [
   "github_pat_fixture_secret_abcdefghijklmnopqrstuvwxyz",
@@ -242,88 +239,6 @@ function issuePayload(provider: IssueProvider, action: "update" | "close") {
   };
 }
 
-async function createExternalExecutor(fixture: Omit<Fixture, "app" | "restart">, scenario: Scenario): Promise<ExternalActionExecutor> {
-  const consumed = new Set<ExternalStage>();
-  const payloads = new Map<string, unknown>();
-  const armReadback = async (stage: ExternalStage, point: FaultPoint): Promise<void> => {
-    const provider = stage === "knowledge.publish" ? "feishu" : scenario.issueProvider;
-    assert.ok(provider);
-    const suffix = point === "readback-always" ? "always" : "once";
-    await writeFile(path.join(fixture.remoteRoot, `${provider}-arm-readback-fail-${suffix}`), "armed\n", "utf8");
-  };
-  const executeProvider = async (stage: ExternalStage, payload: unknown): Promise<void> => {
-    if (stage === "knowledge.publish") {
-      const value = payload as Parameters<typeof publishKnowledge>[0];
-      const receipt = await publishKnowledge({
-        executable: fixture.executables["lark-cli"],
-        target: value.target,
-        binding: value.binding,
-        identity: "user",
-        environment: fixture.environments.feishu,
-      });
-      assert.equal(receipt.status, "confirmed");
-      return;
-    }
-    const value = payload as { target: typeof issueTargets.github; action: { type: "body"; body: string } | { type: "issue.close" } };
-    if (scenario.issueProvider === "github") {
-      await writeGithubIssue({ executable: fixture.executables.gh, target: value.target, action: value.action, environment: fixture.environments.github });
-    } else {
-      await writeGitlabIssue({ executable: fixture.executables.glab, target: value.target as never, action: value.action, environment: fixture.environments.gitlab });
-    }
-  };
-  const reconcileProvider = async (stage: ExternalStage, payload: unknown): Promise<boolean> => {
-    if (stage === "knowledge.publish") {
-      const value = payload as Parameters<typeof publishKnowledge>[0];
-      const actual = await readFeishuDocument({
-        executable: fixture.executables["lark-cli"],
-        document: "https://tenant.feishu.cn/docx/createdDocumentToken123",
-        identity: "user",
-        environment: fixture.environments.feishu,
-      });
-      return actual.body === value.target.markdown && actual.title === value.target.title;
-    }
-    const value = payload as ReturnType<typeof issuePayload>;
-    const actual = scenario.issueProvider === "github"
-      ? await readGithubIssue({ executable: fixture.executables.gh, target: value.target as never, environment: fixture.environments.github })
-      : await readGitlabIssue({ executable: fixture.executables.glab, target: value.target as never, environment: fixture.environments.gitlab });
-    return stage === "issue.close" ? actual.state === "closed" : actual.body === (value.action as { body: string }).body;
-  };
-  return {
-    async execute({ request, payload, markDispatched }) {
-      const stage = request.action;
-      const point = scenario.faults[stage];
-      payloads.set(request.requestId, payload);
-      if (point === "pre-send" && !consumed.has(stage)) {
-        consumed.add(stage);
-        throw new Error("fixture crash before send");
-      }
-      if ((point === "readback-once" || point === "readback-always") && !consumed.has(stage)) {
-        consumed.add(stage);
-        await armReadback(stage, point);
-      }
-      await markDispatched();
-      await executeProvider(stage, payload);
-      if (point === "post-send" && !consumed.has(stage)) {
-        consumed.add(stage);
-        throw new Error("fixture crash after send");
-      }
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-20T08:00:00.000Z" };
-    },
-    async reconcile({ request }) {
-      const payload = payloads.get(request.requestId);
-      if (payload === undefined) return { outcome: "unknown", checkedAt: "2026-08-20T08:00:01.000Z", reason: "fixture payload unavailable" };
-      try {
-        const verified = await reconcileProvider(request.action, payload);
-        return verified
-          ? { outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest, checkedAt: "2026-08-20T08:00:01.000Z" }
-          : { outcome: "failed", checkedAt: "2026-08-20T08:00:01.000Z", reason: "fixture readback mismatch" };
-      } catch {
-        throw new Error("fixture readback unavailable");
-      }
-    },
-  };
-}
-
 async function copyExecutable(source: string, target: string): Promise<void> {
   await copyFile(source, target);
   await chmod(target, 0o700);
@@ -358,6 +273,7 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
     copyFile(path.join(fixtureRoot, "connectors/github/issue.json"), path.join(remoteRoot, "github-state.json")),
     copyFile(path.join(fixtureRoot, "connectors/gitlab/issue.json"), path.join(remoteRoot, "gitlab-state.json")),
     copyFile(path.join(fixtureRoot, "connectors/feishu/document.json"), path.join(remoteRoot, "feishu-source.json")),
+    writeFile(path.join(remoteRoot, "feishu-target.json"), `${JSON.stringify({ title: "Fixture delivery draft", markdown: "Draft.\n" }, null, 2)}\n`),
   ]);
   await Promise.all([
     writeFile(path.join(githubConfig, "hosts.yml"), `oauth_token: ${secretMarkers[0]}\n`, { mode: 0o600 }),
@@ -369,14 +285,12 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
     gitlab: { HOME: remoteRoot, GLAB_CONFIG_DIR: gitlabConfig },
     feishu: { HOME: remoteRoot, LARK_CONFIG_DIR: larkConfig },
   };
-  const externalExecutor = await createExternalExecutor({ root, remoteRoot, executables, environments }, scenario);
   const dependencies = (): ApplicationDependencies => ({
     provider: "codex",
     home: os.homedir(),
     terminal: { isTTY: true },
     now: () => new Date("2026-08-20T08:00:00.000Z"),
     executors: fixtureExecutors(root, scenario),
-    externalExecutor: () => externalExecutor,
     connectorRuntime: {
       executables,
       environments,
@@ -443,7 +357,7 @@ function externalIntent(pkg: WorkPackage, scenario: Scenario): Record<string, un
     };
   }
   if (pkg.stepId === "update-wiki" && scenario.knowledgeBinding) {
-    const target = { folderToken: "folderFixtureToken123", title: "Fixture delivery", markdown: deliveryMarkdown };
+    const target = { documentToken: knowledgeDocumentToken, title: "Fixture delivery", markdown: deliveryMarkdown };
     const binding = createExternalBinding({
       target: "knowledge",
       workPackage: pkg,
@@ -460,6 +374,17 @@ function externalIntent(pkg: WorkPackage, scenario: Scenario): Record<string, un
     };
   }
   return undefined;
+}
+
+async function armStageFault(fixture: Fixture, scenario: Scenario, stage: ExternalStage): Promise<void> {
+  const point = scenario.faults[stage];
+  if (point === undefined) return;
+  const provider = stage === "knowledge.publish" ? "feishu" : scenario.issueProvider;
+  assert.ok(provider);
+  const marker = path.join(fixture.remoteRoot, `${provider}-${stage}-${point}`);
+  const consumed = `${marker}.consumed`;
+  const exists = async (filename: string): Promise<boolean> => stat(filename).then(() => true, () => false);
+  if (!await exists(marker) && !await exists(consumed)) await writeFile(marker, "armed\n", "utf8");
 }
 
 async function approve(fixture: Fixture, started: StartResult, action: Extract<AgentAction, { action: "await_approval" }>): Promise<AgentAction> {
@@ -554,6 +479,7 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
       }
     }
     const intent = externalIntent(pkg, scenario);
+    if (intent !== undefined) await armStageFault(fixture, scenario, intent.action as ExternalStage);
     const result = completed(pkg, artifacts, modifiedFiles, evidence, intent === undefined ? [] : [intent]);
     try {
       action = await fixture.app.submit({
@@ -586,31 +512,53 @@ async function timeline(root: string): Promise<string[]> {
   return text.trim().split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { stage: string }).stage);
 }
 
-async function persistedText(roots: string[]): Promise<string> {
-  const values: string[] = [];
-  const visit = async (target: string): Promise<void> => {
-    let info;
-    try { info = await stat(target); }
-    catch { return; }
+interface PersistedRecord { rootId: string; path: string; content: string }
+
+async function persistedRecords(roots: Array<{ id: string; path: string; boundary: string }>): Promise<PersistedRecord[]> {
+  const values: PersistedRecord[] = [];
+  const visit = async (rootId: string, root: string, target: string): Promise<void> => {
+    const info = await stat(target);
     if (info.isDirectory()) {
-      for (const entry of await readdir(target)) await visit(path.join(target, entry));
+      for (const entry of await readdir(target)) await visit(rootId, root, path.join(target, entry));
     } else if (info.isFile()) {
-      values.push(await readFile(target, "utf8"));
+      values.push({ rootId, path: path.relative(root, target), content: await readFile(target, "utf8") });
     }
   };
-  for (const root of roots) await visit(root);
-  return values.join("\n");
+  for (const root of roots) {
+    const canonicalRoot = await realpath(root.path);
+    const canonicalBoundary = await realpath(root.boundary);
+    assert.ok(canonicalRoot === canonicalBoundary || canonicalRoot.startsWith(`${canonicalBoundary}${path.sep}`));
+    await writeFile(path.join(canonicalRoot, `persistence-canary-${root.id}`), `${root.id}\n`, "utf8");
+    await visit(root.id, canonicalRoot, canonicalRoot);
+  }
+  return values;
 }
 
 async function assertNoPersistenceLeak(fixture: Fixture, worktree: string): Promise<void> {
-  const text = await persistedText([
-    path.join(fixture.root, ".wsspec"),
-    path.join(fixture.root, ".git/wsspec"),
-    path.join(worktree, ".wsspec"),
+  const repositoryRoot = await realpath(fixture.root);
+  const commonGitDir = await realpath(await git(fixture.root, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+  const canonicalWorktree = await realpath(worktree);
+  const records = await persistedRecords([
+    { id: "repository", path: path.join(repositoryRoot, ".wsspec"), boundary: repositoryRoot },
+    { id: "common-git", path: path.join(commonGitDir, "wsspec"), boundary: commonGitDir },
+    { id: "worktree", path: path.join(canonicalWorktree, ".wsspec"), boundary: canonicalWorktree },
   ]);
+  for (const rootId of ["repository", "common-git", "worktree"]) {
+    assert.ok(records.some((record) => record.rootId === rootId), `${rootId} persistence root contributed no files`);
+    assert.ok(records.some((record) => record.rootId === rootId && record.path === `persistence-canary-${rootId}`));
+  }
+  const text = records.map(({ content }) => content).join("\n");
   for (const forbidden of [...secretMarkers, fixture.remoteRoot, os.homedir(), "oauth_token:", "access_token", "token: glpat-"]) {
     assert.equal(text.includes(forbidden), false, `persisted connector output leaked ${forbidden}`);
   }
+  const requestAndEvents = records
+    .filter(({ path: filename }) => filename.endsWith("runtime.json") || filename.endsWith("events.jsonl"))
+    .map(({ content }) => content)
+    .join("\n");
+  for (const payloadText of [deliveryMarkdown, "github fixture delivered", "gitlab fixture delivered"]) {
+    assert.equal(requestAndEvents.includes(payloadText), false, "request/event persistence included external payload");
+  }
+  assert.ok(records.some(({ rootId, path: filename }) => rootId === "common-git" && filename.includes("external-actions/payloads/")));
 }
 
 async function assertDoctorCoversBuiltins(fixture: Fixture): Promise<void> {

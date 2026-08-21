@@ -226,6 +226,7 @@ const externalActionIdentityProperties = {
   securityClass: { const: "external-write" },
   target: externalTargetSchema,
   payloadDigest: strictDigestSchema,
+  payloadArtifactDigest: strictDigestSchema,
   bindingDigest: strictDigestSchema,
   inputDigest: strictDigestSchema,
   artifactDigests: { type: "array", uniqueItems: true, items: strictDigestSchema },
@@ -755,7 +756,7 @@ export const schemas = {
   "builtin.external-action-request.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.external-action-request.v1",
     type: "object", additionalProperties: false,
-    required: ["version", "requestId", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "profile", "profileDigest", "workspaceDigest", "configDigest", "sideEffects", "createdAt", "expiresAt", "requestDigest"],
+    required: ["version", "requestId", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "payloadArtifactDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "profile", "profileDigest", "workspaceDigest", "configDigest", "sideEffects", "createdAt", "expiresAt", "requestDigest"],
     properties: {
       version: { const: 1 }, ...externalActionIdentityProperties,
       sideEffects: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 256 } },
@@ -769,7 +770,7 @@ export const schemas = {
   "builtin.external-action-grant.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.external-action-grant.v1",
     type: "object", additionalProperties: false,
-    required: ["version", "grantId", "requestId", "requestDigest", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "actor", "approvalDigest", "profile", "profileDigest", "workspaceDigest", "configDigest", "decidedAt", "expiresAt", "grantDigest"],
+    required: ["version", "grantId", "requestId", "requestDigest", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "payloadArtifactDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "actor", "approvalDigest", "profile", "profileDigest", "workspaceDigest", "configDigest", "decidedAt", "expiresAt", "grantDigest"],
     properties: {
       version: { const: 1 }, grantId: { type: "string", pattern: "^external-grant-[a-f0-9]{64}$" }, ...externalActionIdentityProperties,
       actor: { type: "string", minLength: 1, maxLength: 256 }, approvalDigest: strictDigestSchema,

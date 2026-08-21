@@ -27,6 +27,7 @@ export interface GithubIssueReadInput {
 
 export interface GithubIssueWriteInput extends GithubIssueReadInput {
   action: IssueWriteAction;
+  markDispatched?(): Promise<void>;
 }
 
 function invalid(): never {
@@ -179,7 +180,11 @@ export async function writeGithubIssue(input: GithubIssueWriteInput): Promise<No
   const action = validateIssueWriteAction(input.action);
   if (action.type === "issue.close") {
     const before = await readValidated(input, target);
-    if (before.state === "closed") return before;
+    if (before.state === "closed") {
+      await input.markDispatched?.();
+      return before;
+    }
+    await input.markDispatched?.();
     const writeResult = mapIssue(await mutateIssue(input, target, "PATCH", target.endpoint, { state: "closed" }), target);
     assertStableIssueIdentity(before, writeResult);
     if (writeResult.state !== "closed") {
@@ -192,14 +197,20 @@ export async function writeGithubIssue(input: GithubIssueWriteInput): Promise<No
     }
     return after;
   }
+  const before = input.markDispatched === undefined ? undefined : await readValidated(input, target);
   if (action.type === "comment") {
+    await input.markDispatched?.();
     mapComment(await mutateIssue(input, target, "POST", `${target.endpoint}/comments`, { body: action.body }), action.body);
-    return readValidated(input, target);
+    const after = await readValidated(input, target);
+    if (before !== undefined) assertStableIssueIdentity(before, after);
+    return after;
   }
   const payload = action.type === "body" ? { body: action.body }
     : action.type === "labels" ? { labels: [...action.labels] }
       : { state: action.state };
+  await input.markDispatched?.();
   const writeResult = mapIssue(await mutateIssue(input, target, "PATCH", target.endpoint, payload), target);
+  if (before !== undefined) assertStableIssueIdentity(before, writeResult);
   const after = await readValidated(input, target);
   assertStableIssueIdentity(writeResult, after);
   assertActionReadback(after, action);

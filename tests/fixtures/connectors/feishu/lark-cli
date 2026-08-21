@@ -10,7 +10,7 @@ JSON.parse(stdin || "{}");
 const root = process.env.HOME;
 if (!root) throw new Error("fixture HOME missing");
 const sourcePath = path.join(root, "feishu-source.json");
-const publishedPath = path.join(root, "feishu-published.json");
+const targetPath = path.join(root, "feishu-target.json");
 const callsPath = path.join(root, "feishu-calls.ndjson");
 const timelinePath = path.join(root, "timeline.ndjson");
 const markdownIndex = argv.indexOf("--markdown");
@@ -25,12 +25,20 @@ const command = argv.slice(0, 2).join(" ");
 const document = flag("--doc");
 const failOnce = path.join(root, "feishu-readback-fail-once");
 const failAlways = path.join(root, "feishu-readback-fail-always");
-const armOnce = path.join(root, "feishu-arm-readback-fail-once");
-const armAlways = path.join(root, "feishu-arm-readback-fail-always");
+function marker(point) {
+  return path.join(root, `feishu-knowledge.publish-${point}`);
+}
+
+function consume(point) {
+  const filename = marker(point);
+  if (!existsSync(filename)) return false;
+  renameSync(filename, `${filename}.consumed`);
+  return true;
+}
 
 function armReadbackFailure() {
-  if (existsSync(armOnce)) renameSync(armOnce, failOnce);
-  if (existsSync(armAlways)) renameSync(armAlways, failAlways);
+  if (consume("readback-once")) writeFileSync(failOnce, "armed\n");
+  if (consume("readback-always")) writeFileSync(failAlways, "armed\n");
 }
 
 function response(token, value) {
@@ -51,8 +59,11 @@ if (argv.length === 1 && argv[0] === "--version") {
   process.stdout.write("lark-cli version 1.0.0\n");
 } else if (command === "docs +fetch" && document === "sourceDocumentToken123") {
   process.stdout.write(JSON.stringify(response(document, JSON.parse(readFileSync(sourcePath, "utf8")))));
-} else if (command === "docs +fetch" && document === "createdDocumentToken123") {
-  if (existsSync(failAlways)) {
+} else if (command === "docs +fetch" && document === "targetDocumentToken123") {
+  if (consume("pre-send")) {
+    process.stderr.write("fixture crashed before mutation\n");
+    process.exitCode = 1;
+  } else if (existsSync(failAlways)) {
     process.stderr.write("fixture readback unavailable\n");
     process.exitCode = 1;
   } else if (existsSync(failOnce)) {
@@ -60,17 +71,17 @@ if (argv.length === 1 && argv[0] === "--version") {
     process.stderr.write("fixture readback crashed\n");
     process.exitCode = 1;
   } else {
-    process.stdout.write(JSON.stringify(response(document, JSON.parse(readFileSync(publishedPath, "utf8")))));
+    process.stdout.write(JSON.stringify(response(document, JSON.parse(readFileSync(targetPath, "utf8")))));
   }
-} else if (command === "docs +create" && flag("--folder-token") === "folderFixtureToken123") {
-  const value = { title: flag("--title"), markdown: flag("--markdown") };
-  writeFileSync(publishedPath, `${JSON.stringify(value, null, 2)}\n`);
+} else if (command === "docs +update" && document === "targetDocumentToken123" && flag("--mode") === "overwrite") {
+  const value = { title: flag("--new-title"), markdown: flag("--markdown") };
+  writeFileSync(targetPath, `${JSON.stringify(value, null, 2)}\n`);
   appendFileSync(timelinePath, `${JSON.stringify({ stage: "knowledge.publish", provider: "feishu" })}\n`);
   armReadbackFailure();
-  process.stdout.write(JSON.stringify({
-    doc_id: "createdDocumentToken123",
-    doc_url: "https://tenant.feishu.cn/docx/createdDocumentToken123",
-  }));
+  if (consume("post-send")) {
+    process.stderr.write("fixture crashed after mutation\n");
+    process.exitCode = 1;
+  } else process.stdout.write(JSON.stringify({ doc_id: document, mode: "overwrite", success: true }));
 } else {
   process.stderr.write("unexpected feishu fixture request\n");
   process.exitCode = 9;

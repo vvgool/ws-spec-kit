@@ -45,6 +45,7 @@ export interface PublishKnowledgeInput {
   binding: unknown;
   identity?: LarkIdentity;
   environment?: LarkEnvironment;
+  markDispatched?(): Promise<void>;
 }
 
 interface FetchPage {
@@ -282,6 +283,15 @@ export async function publishKnowledge(input: PublishKnowledgeInput): Promise<Ex
     : ["docs", "+update", "--doc", target.documentToken, "--mode", "overwrite", "--markdown", target.markdown, "--new-title", target.title, "--as", identity];
   let token: string;
   try {
+    if (target.operation === "update" && input.markDispatched !== undefined) {
+      await fetchDocument({
+        executable: input.executable,
+        document: target.documentToken,
+        identity,
+        ...(input.environment === undefined ? {} : { environment: input.environment }),
+      }, target.documentToken);
+    }
+    await input.markDispatched?.();
     token = mapWriteResponse(await execute({
       executable: input.executable,
       argv,

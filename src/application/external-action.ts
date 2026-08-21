@@ -15,6 +15,7 @@ import {
 import { canonicalDigest, externalIdempotencyKey, ExternalIdempotencyError } from "../engine/external-effects/idempotency.js";
 import { ControlPlaneError, mutateControlPlane } from "../engine/scheduler.js";
 import { readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
+import { persistExternalActionPayload } from "../storage/external-action-payload.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
 import { validate } from "../schemas/index.js";
 
@@ -67,12 +68,13 @@ export type ExternalReadBack =
 
 export interface ExternalActionExecutor {
   execute(input: {
+    root: string;
     request: ExternalActionRequest;
     grant: ExternalActionGrant;
     payload: unknown;
     markDispatched(): Promise<void>;
   }): Promise<{ targetStableId: string; contentDigest: `sha256:${string}`; verifiedAt: string }>;
-  reconcile(input: { request: ExternalActionRequest; grant: ExternalActionGrant }): Promise<ExternalReadBack>;
+  reconcile(input: { root: string; request: ExternalActionRequest; grant: ExternalActionGrant }): Promise<ExternalReadBack>;
 }
 
 function asExternalError(error: unknown): never {
@@ -135,6 +137,16 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
   try {
     const state = await loadApplicationState(input.root, input.workItemId);
     const profile = selectedProfile(state.snapshot);
+    const payloadArtifactDigest = await persistExternalActionPayload({
+      controlPlane: state.projection.controlPlane,
+      workItemId: input.workItemId,
+      stepId: input.stepId,
+      attemptId: input.attemptId,
+      provider: input.provider,
+      action: input.action,
+      target: input.target,
+      payload: input.payload,
+    });
     const request = validate<ExternalActionRequest>("builtin.external-action-request.v1", createExternalActionRequest({
       version: 1,
       workItemId: input.workItemId,
@@ -145,6 +157,7 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
       securityClass: input.securityClass,
       target: input.target,
       payload: input.payload,
+      payloadArtifactDigest,
       bindingDigest: input.bindingDigest,
       inputDigest: input.inputDigest,
       artifactDigests: input.artifactDigests,
@@ -483,7 +496,7 @@ export async function executeExternalAction(input: {
   };
   let readBack: Awaited<ReturnType<ExternalActionExecutor["execute"]>>;
   try {
-    readBack = await input.executor.execute({ request: current.request, grant: current.grant, payload: input.payload, markDispatched });
+    readBack = await input.executor.execute({ root: input.root, request: current.request, grant: current.grant, payload: input.payload, markDispatched });
   } catch (error) {
     const stored = currentAction(await readControlPlane(input.root, input.workItemId), input.requestId);
     if (dispatched || (stored.status === "executing" && stored.dispatch === "sent_or_unknown")) {
@@ -536,7 +549,7 @@ export async function reconcileExternalAction(input: {
   if (current.status !== "reconciliation_required") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "当前外部动作不允许协调回查。");
   let readBack: ExternalReadBack;
   try {
-    readBack = await input.executor.reconcile({ request: current.request, grant: current.grant });
+    readBack = await input.executor.reconcile({ root: input.root, request: current.request, grant: current.grant });
   } catch {
     throw new ExternalAuthorizationError(
       "WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED",

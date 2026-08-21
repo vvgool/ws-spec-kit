@@ -21,12 +21,27 @@ const endpoint = endpointIndex < 0 ? undefined : argv[endpointIndex + 2];
 const issueEndpoint = "repos/acme/widget/issues/7";
 const failOnce = path.join(root, "github-readback-fail-once");
 const failAlways = path.join(root, "github-readback-fail-always");
-const armOnce = path.join(root, "github-arm-readback-fail-once");
-const armAlways = path.join(root, "github-arm-readback-fail-always");
+function marker(stage, point) {
+  return path.join(root, `github-${stage}-${point}`);
+}
 
-function armReadbackFailure() {
-  if (existsSync(armOnce)) renameSync(armOnce, failOnce);
-  if (existsSync(armAlways)) renameSync(armAlways, failAlways);
+function consume(stage, point) {
+  const filename = marker(stage, point);
+  if (!existsSync(filename)) return false;
+  renameSync(filename, `${filename}.consumed`);
+  return true;
+}
+
+function preSendFailure() {
+  for (const stage of ["issue.update", "issue.close"]) {
+    if (consume(stage, "pre-send")) return true;
+  }
+  return false;
+}
+
+function armReadbackFailure(stage) {
+  if (consume(stage, "readback-once")) writeFileSync(failOnce, "armed\n");
+  if (consume(stage, "readback-always")) writeFileSync(failAlways, "armed\n");
 }
 
 function issue() {
@@ -49,7 +64,10 @@ if (argv.length === 1 && argv[0] === "--version") {
 } else if (argv.join("\0") === ["auth", "status", "--active"].join("\0")) {
   process.stdout.write("authenticated\n");
 } else if (method === "GET" && endpoint === issueEndpoint) {
-  if (existsSync(failAlways)) {
+  if (preSendFailure()) {
+    process.stderr.write("fixture crashed before mutation\n");
+    process.exitCode = 1;
+  } else if (existsSync(failAlways)) {
     process.stderr.write("fixture readback unavailable\n");
     process.exitCode = 1;
   } else if (existsSync(failOnce)) {
@@ -63,14 +81,20 @@ if (argv.length === 1 && argv[0] === "--version") {
   state.body = input.body;
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
   appendFileSync(timelinePath, `${JSON.stringify({ stage: "issue.update", provider: "github" })}\n`);
-  armReadbackFailure();
-  process.stdout.write(JSON.stringify(issue()));
+  armReadbackFailure("issue.update");
+  if (consume("issue.update", "post-send")) {
+    process.stderr.write("fixture crashed after mutation\n");
+    process.exitCode = 1;
+  } else process.stdout.write(JSON.stringify(issue()));
 } else if (method === "PATCH" && endpoint === issueEndpoint && input.state === "closed") {
   state.state = "closed";
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
   appendFileSync(timelinePath, `${JSON.stringify({ stage: "issue.close", provider: "github" })}\n`);
-  armReadbackFailure();
-  process.stdout.write(JSON.stringify(issue()));
+  armReadbackFailure("issue.close");
+  if (consume("issue.close", "post-send")) {
+    process.stderr.write("fixture crashed after mutation\n");
+    process.exitCode = 1;
+  } else process.stdout.write(JSON.stringify(issue()));
 } else {
   process.stderr.write("unexpected github fixture request\n");
   process.exitCode = 9;
