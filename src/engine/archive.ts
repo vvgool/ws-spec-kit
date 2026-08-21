@@ -261,6 +261,15 @@ function externalReceiptSatisfied(input: CloseChecklistInput, target: "issue" | 
   });
 }
 
+function authenticatedIssueBindingAbsent(input: CloseChecklistInput): boolean {
+  const bindings = record(input.projection.evidence.bindings);
+  const issue = record(bindings?.issue);
+  if (issue === undefined || issue.exists !== false || Reflect.ownKeys(issue).length !== 1) return false;
+  const issueSteps = flatten(input.profile.steps).filter(({ action }) => action === "issue.update" || action === "issue.close");
+  return issueSteps.length > 0
+    && issueSteps.every(({ id }) => input.projection.stages[id]?.status === "skipped");
+}
+
 function sameValues(left: unknown, right: unknown): boolean {
   const encoded = canonicalize(left);
   return encoded !== undefined && encoded === canonicalize(right);
@@ -351,7 +360,8 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
   }
   for (const target of ["issue", "knowledge"] as const) {
     const required = target === "issue" ? input.profile.publishing.issueRequired : input.profile.publishing.knowledgeRequired;
-    if (required && !externalReceiptSatisfied(input, target)) addMissing("external-receipt", target);
+    const notApplicable = target === "issue" && authenticatedIssueBindingAbsent(input);
+    if (required && !notApplicable && !externalReceiptSatisfied(input, target)) addMissing("external-receipt", target);
   }
   const categoryOrder = new Map<CloseDecision["missing"][number]["category"], number>([
     ["step", 0], ["artifact", 1], ["approval", 2], ["evidence", 3], ["external-receipt", 4],

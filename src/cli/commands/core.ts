@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -6,9 +7,12 @@ import { installDriverSkill, type DriverAgent } from "../../adapters/skills/inst
 import { CliAdapterError } from "../../adapters/cli/output.js";
 import { runWorkflowCommand } from "../../adapters/cli/workflow.js";
 import { createApplication } from "../../application/application.js";
+import { doctorConnectors } from "../../application/doctor-connectors.js";
 import type { DecisionInput, StartInput, SubmitInput } from "../../protocol/application.js";
 import type { SkillProvider } from "../../registry/skills/types.js";
 import { initRepository } from "../../storage/repository.js";
+import { loadBuiltinCatalog } from "../../resources/catalog.js";
+import type { ConnectorExecutable } from "../../registry/connectors/types.js";
 
 function required(value: string | undefined, name: string): string {
   if (value === undefined || value === "" || value.startsWith("--")) throw new CliAdapterError("WSSPEC_ARGUMENT_REQUIRED", `缺少参数 ${name}。`);
@@ -107,6 +111,34 @@ async function agent(argv: string[], home: string): Promise<unknown> {
   return installDriverSkill({ agent: name as DriverAgent, home, ...(target === undefined ? {} : { target }), dryRun: args.flags.has("--dry-run") });
 }
 
+async function locateExecutable(executable: ConnectorExecutable): Promise<string | undefined> {
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter).filter((entry) => path.isAbsolute(entry))) {
+    const candidate = path.join(directory, executable);
+    try {
+      await access(candidate, process.platform === "win32" ? constants.F_OK : constants.X_OK);
+      return await realpath(candidate);
+    } catch {}
+  }
+  return undefined;
+}
+
+async function doctor(argv: string[], home: string): Promise<unknown> {
+  const args = parseArguments(argv, 1, []);
+  if (args.positional[0] !== "connectors") throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "doctor 只支持 connectors。 ");
+  const catalog = await loadBuiltinCatalog();
+  return doctorConnectors({
+    manifests: catalog.connectors,
+    environment: {
+      HOME: home,
+      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+      GLAB_CONFIG_DIR: process.env.GLAB_CONFIG_DIR,
+      LARK_CONFIG_DIR: process.env.LARK_CONFIG_DIR,
+    },
+    locateExecutable,
+  });
+}
+
 export async function runCommand(cwd: string, argv: string[]): Promise<unknown> {
   const [command, ...args] = argv;
   const home = process.env.HOME ?? os.homedir();
@@ -124,6 +156,7 @@ const routes: Readonly<Record<string, (cwd: string, args: string[], home: string
   inspect,
   workflow: (cwd, args, home) => runWorkflowCommand({ root: cwd, argv: args, home, interactive: process.stdin.isTTY === true }),
   agent: async (_cwd, args, home) => agent(args, home),
+  doctor: async (_cwd, args, home) => doctor(args, home),
 });
 
 export const publicRouteCommands = Object.freeze(Object.keys(routes));

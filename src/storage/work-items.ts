@@ -28,18 +28,29 @@ interface FileSource {
   path: string;
 }
 
+interface ExternalSource {
+  type: "issue";
+  provider: string;
+  id: string;
+  url?: string;
+}
+
+type ExternalCapturedSource = Omit<NormalizedRequirementSource, "type"> & {
+  type: "github.issue" | "gitlab.issue" | "feishu.document";
+};
+
 export interface CreateWorkItemInput {
   root: string;
   workItemId: WorkItemId;
   title: string;
-  source: PromptSource | FileSource;
+  source: PromptSource | FileSource | ExternalSource;
   createdAt?: string;
   capturedSource?: {
     type: "prompt" | "file";
     origin: string;
     text: string;
     contentDigest: string;
-  };
+  } | ExternalCapturedSource;
   application?: {
     workflowText: string;
     configText: string;
@@ -133,11 +144,29 @@ async function assertRealPathContained(root: string, target: string): Promise<vo
 function requirementCaptureSource(input: CreateWorkItemInput): CaptureRequirementSource {
   const source = input.source;
   if (input.capturedSource === undefined) {
+    if (source.type === "issue") {
+      throw new WorkItemError("WSSPEC_SOURCE_SNAPSHOT_INVALID", "外部需求来源必须先经过 Connector 捕获。 ");
+    }
     return source.type === "prompt"
       ? { type: "user.prompt", text: source.content }
       : { type: "local.file", path: source.path };
   }
   const captured = input.capturedSource;
+  if (source.type === "issue") {
+    if (captured.type === "prompt" || captured.type === "file") {
+      throw new WorkItemError("WSSPEC_SOURCE_SNAPSHOT_INVALID", "外部预捕获来源与 Work Item 输入不一致。 ");
+    }
+    const expectedProvider = captured.type === "github.issue" ? ["github", "github-cli"]
+      : captured.type === "gitlab.issue" ? ["gitlab", "gitlab-cli"]
+        : ["feishu", "lark-cli"];
+    if (!expectedProvider.includes(source.provider)) {
+      throw new WorkItemError("WSSPEC_SOURCE_SNAPSHOT_INVALID", "外部预捕获来源 Provider 不一致。 ");
+    }
+    return captured as ExternalCapturedSource;
+  }
+  if (captured.type !== "prompt" && captured.type !== "file") {
+    throw new WorkItemError("WSSPEC_SOURCE_SNAPSHOT_INVALID", "本地预捕获来源与 Work Item 输入不一致。 ");
+  }
   if (captured.type !== source.type || captured.origin === "" || captured.text.trim() === "" || sha256(captured.text) !== captured.contentDigest) {
     throw new WorkItemError("WSSPEC_SOURCE_SNAPSHOT_INVALID", "预捕获需求来源与 Work Item 输入不一致。");
   }

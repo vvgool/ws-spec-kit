@@ -1,0 +1,78 @@
+#!/usr/bin/env node
+import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import process from "node:process";
+
+const argv = process.argv.slice(2);
+let stdin = "";
+for await (const chunk of process.stdin) stdin += chunk;
+const input = JSON.parse(stdin || "{}");
+const root = process.env.HOME;
+if (!root) throw new Error("fixture HOME missing");
+const statePath = path.join(root, "gitlab-state.json");
+const callsPath = path.join(root, "gitlab-calls.ndjson");
+const timelinePath = path.join(root, "timeline.ndjson");
+const state = JSON.parse(readFileSync(statePath, "utf8"));
+appendFileSync(callsPath, `${JSON.stringify({ argv, input })}\n`);
+
+const method = argv[2];
+const endpoint = argv[3];
+const issueEndpoint = "projects/group%2Fservice/issues/9";
+const failOnce = path.join(root, "gitlab-readback-fail-once");
+const failAlways = path.join(root, "gitlab-readback-fail-always");
+const armOnce = path.join(root, "gitlab-arm-readback-fail-once");
+const armAlways = path.join(root, "gitlab-arm-readback-fail-always");
+
+function armReadbackFailure() {
+  if (existsSync(armOnce)) renameSync(armOnce, failOnce);
+  if (existsSync(armAlways)) renameSync(armAlways, failAlways);
+}
+
+function issue() {
+  return {
+    iid: 9,
+    id: 9001,
+    web_url: "https://gitlab.example.com/group/service/-/issues/9",
+    title: state.title,
+    description: state.body,
+    state: state.state === "closed" ? "closed" : "opened",
+    labels: [],
+    updated_at: "2026-08-20T02:03:04Z",
+    author: { username: "fixture-author" },
+    assignees: [],
+  };
+}
+
+if (argv.length === 1 && argv[0] === "--version") {
+  process.stdout.write("glab version 1.68.0\n");
+} else if (argv.join("\0") === ["auth", "status"].join("\0")) {
+  process.stdout.write("authenticated\n");
+} else if (argv.join("\0") === ["api", "--help"].join("\0")) {
+  process.stdout.write("Usage: glab api endpoint --hostname host --input -\n");
+} else if (argv[0] === "api" && method === "GET" && endpoint === issueEndpoint) {
+  if (existsSync(failAlways)) {
+    process.stderr.write("fixture readback unavailable\n");
+    process.exitCode = 1;
+  } else if (existsSync(failOnce)) {
+    renameSync(failOnce, `${failOnce}.consumed`);
+    process.stderr.write("fixture readback crashed\n");
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(JSON.stringify(issue()));
+  }
+} else if (argv[0] === "api" && method === "PUT" && endpoint === issueEndpoint && typeof input.description === "string") {
+  state.body = input.description;
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  appendFileSync(timelinePath, `${JSON.stringify({ stage: "issue.update", provider: "gitlab" })}\n`);
+  armReadbackFailure();
+  process.stdout.write(JSON.stringify(issue()));
+} else if (argv[0] === "api" && method === "PUT" && endpoint === issueEndpoint && input.state_event === "close") {
+  state.state = "closed";
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  appendFileSync(timelinePath, `${JSON.stringify({ stage: "issue.close", provider: "gitlab" })}\n`);
+  armReadbackFailure();
+  process.stdout.write(JSON.stringify(issue()));
+} else {
+  process.stderr.write("unexpected gitlab fixture request\n");
+  process.exitCode = 9;
+}

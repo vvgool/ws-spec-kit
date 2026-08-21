@@ -290,6 +290,138 @@ test("Close binds external receipt identity and published/read-back content to t
   );
 });
 
+function externalDeliveryProfile(): SnapshotProfile {
+  const step = (
+    id: string,
+    securityClass: SnapshotProfile["steps"][number]["securityClass"],
+    needs: string[],
+    approval = false,
+  ): SnapshotProfile["steps"][number] => ({
+    id,
+    uses: securityClass === "control" ? "control.close" : "connector.execute",
+    ...(id === "update-issue" ? { action: "issue.update" }
+      : id === "update-wiki" ? { action: "knowledge.publish" }
+        : id === "close-issue" ? { action: "issue.close" }
+          : {}),
+    securityClass,
+    needs,
+    enabled: true,
+    skills: [],
+    inputs: [],
+    outputs: [],
+    gates: [],
+    approval,
+    authorizationRequired: securityClass === "external-write",
+    steps: [],
+  });
+  return {
+    id: "governed",
+    order: ["update-issue", "update-wiki", "close-issue", "close"],
+    steps: [
+      step("update-issue", "external-write", []),
+      step("update-wiki", "external-write", ["update-issue"]),
+      step("close-issue", "external-write", ["update-wiki"], true),
+      step("close", "control", ["close-issue"]),
+    ],
+    publishing: { issueRequired: true, knowledgeRequired: true, readBackRequired: true },
+    audit: { level: "complete" },
+    changePolicy: { kind: "documentation-only", allowedPaths: ["docs/**"], digest: "sha256:policy" },
+  };
+}
+
+function confirmedExternalEvidence(target: "issue" | "knowledge"): Record<string, unknown> {
+  const stableId = `${target}-stable`;
+  const stepId = target === "issue" ? "update-issue" : "update-wiki";
+  const binding = {
+    version: 1,
+    kind: "external-binding",
+    target,
+    exists: true,
+    stableId,
+    externalWorkItemId: "WSS-CLOSE",
+    publishStepId: stepId,
+    publishAttemptId: `attempt-${stepId}`,
+    publishInputDigest: `sha256:${target}-input`,
+    expectedPublishedContentDigest: `sha256:${target}-content`,
+  };
+  return {
+    [`external-binding:${target}`]: binding,
+    [`external-receipt:${target}`]: {
+      version: 1,
+      kind: "external-receipt",
+      target,
+      stableId,
+      externalWorkItemId: "WSS-CLOSE",
+      publishStepId: stepId,
+      publishAttemptId: `attempt-${stepId}`,
+      publishInputDigest: `sha256:${target}-input`,
+      publishedContentDigest: `sha256:${target}-content`,
+      readBackContentDigest: `sha256:${target}-content`,
+      status: "confirmed",
+      readBackStatus: "confirmed",
+    },
+  };
+}
+
+test("Close accepts a governed Feishu-only delivery when authenticated Issue binding is absent and Issue stages are skipped", () => {
+  const decision = closeChecklist({
+    profile: externalDeliveryProfile(),
+    projection: projection({
+      profile: { ...projection().profile, mode: "governed", selected: "governed" },
+      stages: {
+        "update-issue": { status: "skipped" },
+        "update-wiki": { status: "succeeded" },
+        "close-issue": { status: "skipped" },
+        close: { status: "ready" },
+      },
+      evidence: {
+        bindings: { issue: { exists: false }, knowledge: { exists: true, stableId: "knowledge-stable", externalWorkItemId: "WSS-CLOSE" } },
+        ...confirmedExternalEvidence("knowledge"),
+      },
+    }),
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision, { allowed: true, missing: [] });
+});
+
+test("Close blocks a bound Issue until the current issue.close action is verified", () => {
+  const selected = externalDeliveryProfile();
+  const decision = closeChecklist({
+    profile: selected,
+    projection: projection({
+      profile: { ...projection().profile, mode: "governed", selected: "governed" },
+      stages: {
+        "update-issue": { status: "succeeded" },
+        "update-wiki": { status: "succeeded" },
+        "close-issue": { status: "succeeded" },
+        close: { status: "ready" },
+      },
+      contexts: {
+        "close-issue": {
+          workPackage: { attemptId: "attempt-close-issue" },
+          actor: "closer",
+          result: { status: "completed", artifacts: [] },
+        },
+      },
+      evidence: {
+        bindings: { issue: { exists: true, stableId: "issue-stable", externalWorkItemId: "WSS-CLOSE" } },
+        ...confirmedExternalEvidence("issue"),
+        ...confirmedExternalEvidence("knowledge"),
+      },
+    }),
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing, [{ category: "approval", id: "close-issue" }]);
+});
+
 test("ExternalBinding derives stable content and attempt-sensitive input digests from normalized publish artifacts", () => {
   const workPackage = {
     version: 1 as const,

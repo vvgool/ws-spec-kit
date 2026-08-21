@@ -14,6 +14,7 @@
 | `inspect` | `inspect` | `builtin.application-inspect-input.v1` | 读取已快照的 Work Item 状态，不创建新 Attempt。 |
 | `workflow` | workflow management | 无 | 支持 `list`、`show`、`validate`、`eject`、`use`。 |
 | `agent install` | Driver installation | 无 | 安装 `codex`、`claude`、`cursor` 或 `generic` Driver Skill。 |
+| `doctor connectors` | Connector Doctor | 无 | 分别诊断 `git`、`gh`、`glab` 与 `lark-cli`，不执行外部写入。 |
 
 ### `start`
 
@@ -147,7 +148,9 @@ skills:
 | `compiler` | `WSSPEC_CHANGE_POLICY_EXPANSION`、`WSSPEC_CHANGE_POLICY_OVERRIDE_FORBIDDEN`、`WSSPEC_CHANGE_POLICY_PATH_INVALID`、`WSSPEC_COMPILE_CONFIGURED_GATE_MISSING`、`WSSPEC_COMPILE_CYCLE`、`WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED`、`WSSPEC_COMPILE_DOCUMENTATION_GATE_REQUIRED`、`WSSPEC_COMPILE_DOCUMENTATION_TDD_FORBIDDEN`、`WSSPEC_COMPILE_DUPLICATE_GATE`、`WSSPEC_COMPILE_DUPLICATE_STEP`、`WSSPEC_COMPILE_EXPRESSION_INVALID`、`WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN`、`WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE`、`WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN`、`WSSPEC_COMPILE_EXPRESSION_TYPE_MISMATCH`、`WSSPEC_COMPILE_GATE_POLICY_INVALID`、`WSSPEC_COMPILE_GATE_POLICY_UNKNOWN`、`WSSPEC_COMPILE_MANIFEST_CAPABILITY_MISSING`、`WSSPEC_COMPILE_MANIFEST_CONNECTOR_MISSING`、`WSSPEC_COMPILE_MANIFEST_SIDE_EFFECT_MISSING`、`WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER`、`WSSPEC_COMPILE_NESTED_LOOP_UNSUPPORTED`、`WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED`、`WSSPEC_COMPILE_PLAN_REQUIRED`、`WSSPEC_COMPILE_PROFILE_ARTIFACT_UNKNOWN`、`WSSPEC_COMPILE_PROFILE_MISMATCH`、`WSSPEC_COMPILE_PROFILE_NOT_FOUND`、`WSSPEC_COMPILE_PROFILE_OVERRIDE_FORBIDDEN`、`WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE`、`WSSPEC_COMPILE_PROFILE_STEP_UNKNOWN`、`WSSPEC_COMPILE_QUICK_PROFILE_INVALID`、`WSSPEC_COMPILE_REQUIRED_GATE_MISSING`、`WSSPEC_COMPILE_REQUIRED_SKILL_MISSING`、`WSSPEC_COMPILE_SECURITY_OVERRIDE`、`WSSPEC_COMPILE_SKILL_AMBIGUOUS`、`WSSPEC_COMPILE_SKILL_MISMATCH`、`WSSPEC_COMPILE_SKILL_POLICY_OVERRIDE`、`WSSPEC_COMPILE_STEP_INVALID`、`WSSPEC_COMPILE_TDD_REQUIRED`、`WSSPEC_COMPILE_UNKNOWN_DEPENDENCY`、`WSSPEC_COMPILE_UNKNOWN_GATE` |
 | `expression` | `WSSPEC_EXPRESSION_FORBIDDEN`、`WSSPEC_EXPRESSION_INVALID`、`WSSPEC_EXPRESSION_LIMIT_EXCEEDED`、`WSSPEC_EXPRESSION_TYPE_INVALID` |
 | `executor` | `WSSPEC_EXECUTOR_ACTION_NOT_FOUND`、`WSSPEC_EXECUTOR_CONTEXT_INVALID`、`WSSPEC_EXECUTOR_DUPLICATE`、`WSSPEC_EXECUTOR_NOT_FOUND`、`WSSPEC_EXECUTOR_SECURITY_MISMATCH` |
-| `source` | `WSSPEC_SOURCE_ARTIFACT_CONFLICT`、`WSSPEC_SOURCE_BINARY`、`WSSPEC_SOURCE_CHANGED_DURING_READ`、`WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_INVALID`、`WSSPEC_SOURCE_METADATA_INVALID`、`WSSPEC_SOURCE_NOT_REGULAR_FILE`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_SNAPSHOT_CHANGED`、`WSSPEC_SOURCE_SNAPSHOT_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`、`WSSPEC_SOURCE_TYPE_UNSUPPORTED` |
+| `connectorRegistry` | `WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE`、`WSSPEC_CONNECTOR_CAPABILITY_NOT_FOUND`、`WSSPEC_CONNECTOR_MANIFEST_INVALID`、`WSSPEC_CONNECTOR_PROVIDER_DUPLICATE`、`WSSPEC_GIT_PATH_INVALID`、`WSSPEC_GIT_REPOSITORY_MISMATCH`、`WSSPEC_GIT_REQUEST_INVALID` |
+| `connectorProvider` | `WSSPEC_FEISHU_CONFIGURATION_INVALID`、`WSSPEC_FEISHU_FORBIDDEN`、`WSSPEC_FEISHU_MANIFEST_INVALID`、`WSSPEC_FEISHU_MISSING_BINARY`、`WSSPEC_FEISHU_NOT_FOUND`、`WSSPEC_FEISHU_PAGINATION_INVALID`、`WSSPEC_FEISHU_RATE_LIMITED`、`WSSPEC_FEISHU_REQUEST_FAILED`、`WSSPEC_FEISHU_RESPONSE_INVALID`、`WSSPEC_FEISHU_RESPONSE_TOO_LARGE`、`WSSPEC_FEISHU_TARGET_INVALID`、`WSSPEC_FEISHU_UNAUTHENTICATED`、`WSSPEC_ISSUE_ACTION_INVALID`、`WSSPEC_ISSUE_CONFIGURATION_INVALID`、`WSSPEC_ISSUE_FORBIDDEN`、`WSSPEC_ISSUE_IDENTITY_MISMATCH`、`WSSPEC_ISSUE_MANIFEST_INVALID`、`WSSPEC_ISSUE_MISSING_BINARY`、`WSSPEC_ISSUE_NOT_FOUND`、`WSSPEC_ISSUE_RATE_LIMITED`、`WSSPEC_ISSUE_READBACK_MISMATCH`、`WSSPEC_ISSUE_REQUEST_FAILED`、`WSSPEC_ISSUE_RESPONSE_INVALID`、`WSSPEC_ISSUE_TARGET_INVALID`、`WSSPEC_ISSUE_UNAUTHENTICATED`、`WSSPEC_KNOWLEDGE_BINDING_INVALID`、`WSSPEC_KNOWLEDGE_CONTENT_INVALID`、`WSSPEC_KNOWLEDGE_READBACK_FAILED`、`WSSPEC_KNOWLEDGE_READBACK_MISMATCH`、`WSSPEC_KNOWLEDGE_TARGET_INVALID`、`WSSPEC_KNOWLEDGE_WRITE_FAILED`、`WSSPEC_PROCESS_CLEANUP_FAILED`、`WSSPEC_PROCESS_EXECUTABLE_CHANGED`、`WSSPEC_PROCESS_EXECUTABLE_INVALID`、`WSSPEC_PROCESS_EXIT_NONZERO`、`WSSPEC_PROCESS_INVALID_JSON`、`WSSPEC_PROCESS_OUTPUT_LIMIT`、`WSSPEC_PROCESS_REQUEST_INVALID`、`WSSPEC_PROCESS_SPAWN_FAILED`、`WSSPEC_PROCESS_TIMEOUT` |
+| `source` | `WSSPEC_CONNECTOR_PROVIDER_NOT_FOUND`、`WSSPEC_SOURCE_ARTIFACT_CONFLICT`、`WSSPEC_SOURCE_BINARY`、`WSSPEC_SOURCE_CHANGED_DURING_READ`、`WSSPEC_SOURCE_EMPTY`、`WSSPEC_SOURCE_INVALID`、`WSSPEC_SOURCE_METADATA_INVALID`、`WSSPEC_SOURCE_NOT_REGULAR_FILE`、`WSSPEC_SOURCE_PATH_INVALID`、`WSSPEC_SOURCE_SNAPSHOT_CHANGED`、`WSSPEC_SOURCE_SNAPSHOT_INVALID`、`WSSPEC_SOURCE_TOO_LARGE`、`WSSPEC_SOURCE_TYPE_UNSUPPORTED` |
 | `snapshot` | `WSSPEC_APPLICATION_ANCHOR_INVALID`、`WSSPEC_APPLICATION_SNAPSHOT_CHANGED`、`WSSPEC_APPLICATION_SNAPSHOT_INVALID`、`WSSPEC_CONFIG_SNAPSHOT_CHANGED`、`WSSPEC_SCHEMA_SNAPSHOT_CHANGED`、`WSSPEC_SKILL_SNAPSHOT_CHANGED`、`WSSPEC_WORKFLOW_SNAPSHOT_CHANGED`、`WSSPEC_WORK_ITEM_MANIFEST_CHANGED` |
 | `workItem` | `WSSPEC_CONTROL_PLANE_INVALID`、`WSSPEC_WORK_ITEM_ID_CONFLICT`、`WSSPEC_WORK_ITEM_INVALID`、`WSSPEC_WORK_ITEM_LOCATION_INVALID`、`WSSPEC_WORK_ITEM_NOT_FOUND`、`WSSPEC_WORK_ITEM_ROLLBACK_FAILED`、`WSSPEC_WORK_ITEM_ROLLBACK_REFUSED` |
 | `runtime` | `WSSPEC_CONTROL_PLANE_LOCKED`、`WSSPEC_CONTROL_PLANE_READ_ONLY`、`WSSPEC_CONTROL_PLANE_STALE_LOCK`、`WSSPEC_EVENT_CHAIN_INVALID`、`WSSPEC_EVENT_INVALID`、`WSSPEC_IDEMPOTENCY_CONFLICT`、`WSSPEC_INDEPENDENT_REVIEW_REQUIRED`、`WSSPEC_PROFILE_DECISION_STALE`、`WSSPEC_PROFILE_DOWNGRADE_FORBIDDEN`、`WSSPEC_PROJECTION_WRITE_FAILED`、`WSSPEC_RISK_RULE_INVALID`、`WSSPEC_RISK_WORKFLOW_INVALID`、`WSSPEC_RUNTIME_PROJECTION_INCOMPATIBLE`、`WSSPEC_LOOP_PROJECTION_INVALID`、`WSSPEC_RETRY_PROJECTION_INVALID`、`WSSPEC_STAGE_NOT_FOUND`、`WSSPEC_STATE_TRANSITION_FORBIDDEN` |
@@ -171,17 +174,18 @@ skills:
 | `workflow` | `internal`、`dispatch` |
 | `agent` | `internal`、`dispatch` |
 | `init` | `internal`、`arguments`、`repository` |
-| `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`source`、`workItem`、`runtime`、`start` |
+| `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`source`、`workItem`、`runtime`、`start` |
 | `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd`、`externalAction` |
 | `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction` |
 | `decide` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`workflowPackage`、`workflowTrust`、`externalAction` |
 | `inspect` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction` |
-| `workflow list` | `internal`、`arguments`、`builtin` |
-| `workflow show` | `internal`、`arguments`、`builtin`、`workflowPackage` |
-| `workflow eject` | `internal`、`arguments`、`builtin`、`workflowPackage`、`workflowEject` |
-| `workflow validate` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor` |
-| `workflow use` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`workflowTrust` |
+| `workflow list` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider` |
+| `workflow show` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider`、`workflowPackage` |
+| `workflow eject` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider`、`workflowPackage`、`workflowEject` |
+| `workflow validate` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider` |
+| `workflow use` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`workflowTrust` |
 | `agent install` | `internal`、`arguments`、`agentInstall` |
+| `doctor connectors` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider` |
 
 `WSSPEC_INTERNAL_ERROR` 是 CLI 对未建模失败的公开兜底 code，不是允许透传原始内部消息的业务错误。无论异常显式携带该 code，还是来自未知 `WSSPEC_` code、普通 Error、非 Error 抛出值或 JSON parser 等底层组件，CLI 都只返回固定消息 `发生未预期的内部错误。`。其他已注册 public code 保留其中文消息。此规则只约束 CLI 输出适配层，不改变 Application 直接 API 的异常类型、code 或 message。
 

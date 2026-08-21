@@ -13,6 +13,7 @@ import { selectProfile } from "../policy/profile.js";
 import type { StartInput, StartResult, WorkflowProfile } from "../protocol/application.js";
 import type { ResolvedSkillDescriptor } from "../protocol/work-package.js";
 import { captureLocalRequirement } from "../registry/connectors/local-requirement.js";
+import { captureBuiltinConnectorSource, type BuiltinConnectorRuntime } from "../registry/connectors/runtime.js";
 import { createSkillLock } from "../registry/skills/lock.js";
 import { resolveSkill } from "../registry/skills/resolver.js";
 import type { AdditionalGlobalRoot, ResolvedSkill, SkillProvider } from "../registry/skills/types.js";
@@ -34,6 +35,7 @@ export interface StartDependencies {
   home: string;
   now(): Date;
   workflowTrust?: { interactive: boolean; actor: string };
+  connectorRuntime?: BuiltinConnectorRuntime;
 }
 
 export class ApplicationStartError extends Error {
@@ -226,10 +228,11 @@ export async function startApplication(input: StartInput, dependencies: StartDep
   }
   const requestedProfile = input.profile ?? projectWorkflow.profile;
   const selected = requestedProfile === "auto" ? selectProfile({ mode: "auto", phase: "intake", risk: null }).id : requestedProfile;
-  const requirement = await captureLocalRequirement(identity.repositoryRoot, input.source);
-  if (input.source.type === "issue") {
-    throw new ApplicationStartError("WSSPEC_SOURCE_TYPE_UNSUPPORTED", "当前阶段只支持 Prompt 和仓库内 Markdown/TXT 来源。 ");
-  }
+  const requirement = input.source.type === "issue"
+    ? dependencies.connectorRuntime === undefined
+      ? (() => { throw new ApplicationStartError("WSSPEC_SOURCE_TYPE_UNSUPPORTED", "外部需求来源缺少已配置的 Builtin Connector Runtime。 "); })()
+      : await captureBuiltinConnectorSource(input.source, dependencies.connectorRuntime)
+    : await captureLocalRequirement(identity.repositoryRoot, input.source);
   const workItemId = `WSS-${ulid()}` as `WSS-${string}`;
   const createdAt = dependencies.now().toISOString();
   let item: WorkItem | undefined;
@@ -237,8 +240,12 @@ export async function startApplication(input: StartInput, dependencies: StartDep
     item = await createWorkItem({
       root: identity.repositoryRoot,
       workItemId,
-      title: titleFor(requirement.text, requirement.origin),
-      source: input.source.type === "prompt" ? { type: "prompt", content: input.source.text } : { type: "file", path: input.source.path },
+      title: "title" in requirement ? requirement.title : titleFor(requirement.text, requirement.origin),
+      source: input.source.type === "prompt"
+        ? { type: "prompt", content: input.source.text }
+        : input.source.type === "file"
+          ? { type: "file", path: input.source.path }
+          : { ...input.source },
       createdAt,
       capturedSource: requirement,
       application: {
@@ -317,13 +324,25 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       path: sourceReference.path,
       digest: sourceReference.contentHash,
     };
+    const issueBinding = requirement.type === "github.issue" || requirement.type === "gitlab.issue"
+      ? { exists: true as const, stableId: requirement.stableId, externalWorkItemId: workItemId }
+      : { exists: false as const };
     await mutateControlPlane({
       cwd: identity.repositoryRoot,
       workItemId,
       eventType: "source.captured",
       idempotencyKey: `source:captured:${item.source.artifactId}`,
       operationInput: sourceEventReference,
-      mutate: (projection) => ({ projection, value: sourceEventReference }),
+      mutate: (projection) => ({
+        projection: {
+          ...projection,
+          evidence: {
+            ...projection.evidence,
+            bindings: { issue: issueBinding, knowledge: { exists: false } },
+          },
+        },
+        value: sourceEventReference,
+      }),
     });
     if (requestedProfile === "auto") {
       await mutateControlPlane({

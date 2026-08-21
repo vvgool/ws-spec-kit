@@ -19,6 +19,7 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
   { command: "inspect", usage: "wspec inspect <workItemId>" },
   { command: "workflow", usage: "wspec workflow <list|show|eject|validate|use>" },
   { command: "agent", usage: "wspec agent install <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { command: "doctor", usage: "wspec doctor connectors" },
 ]);
 
 export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Object.freeze([
@@ -34,6 +35,7 @@ export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Ob
   { route: "workflow validate", usage: "wspec workflow validate <引用> [--provider <Provider>]" },
   { route: "workflow use", usage: "wspec workflow use <引用> [--profile <档位>] [--provider <Provider>]" },
   { route: "agent install", usage: "wspec agent install <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { route: "doctor connectors", usage: "wspec doctor connectors" },
 ]);
 
 const coreRoutes: ReadonlySet<string> = new Set(["init", "start", "acquire", "submit", "decide", "inspect"]);
@@ -47,5 +49,6 @@ export function publicCliErrorRoute(argv: readonly string[]): PublicCliErrorRout
     return subcommand !== undefined && workflowRoutes.has(subcommand) ? `workflow ${subcommand}` as PublicCliRoute : "workflow";
   }
   if (command === "agent") return argv[1] === "install" ? "agent install" : "agent";
+  if (command === "doctor") return argv[1] === "connectors" ? "doctor connectors" : "dispatch";
   return "dispatch";
 }

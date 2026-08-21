@@ -2,6 +2,11 @@ version: 1
 workflows:
   - feature-delivery
   - documentation-delivery
+connectors:
+  - git-native
+  - github-cli
+  - gitlab-cli
+  - lark-cli
 skills:
   - id: requirement-exploration
     version: 1.0.0

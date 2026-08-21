@@ -1,0 +1,8 @@
+version: 1
+documentation:
+  allowedPaths:
+    - README*.md
+    - CHANGELOG*.md
+    - docs/**/*.md
+    - docs/**/*.mdx
+    - docs/**/*.txt

@@ -6,11 +6,15 @@ import type { ProfileDefinition, WorkflowDefinition } from "../workflow-package/
 import { WorkflowPackageError } from "../workflow-package/types.js";
 import { assertContainedPath } from "../workflow-package/path-boundary.js";
 import { parseProfileV1, parseWorkflowV1 } from "../workflow-package/workflow-v1.js";
+import { gitCommitManifest } from "../registry/connectors/git-commit.js";
+import { loadIssueConnectorManifests } from "../registry/connectors/issue.js";
+import { loadLarkConnectorManifest } from "../registry/connectors/feishu-document.js";
+import type { ConnectorManifest } from "../registry/connectors/types.js";
 
 export interface BuiltinSkill { id: string; version: string; description: string; entry: string }
 export type BuiltinProfile = ProfileDefinition;
 export interface BuiltinWorkflow extends WorkflowDefinition { profiles: BuiltinProfile[] }
-export interface BuiltinCatalog { version: 1; skills: BuiltinSkill[]; workflows: BuiltinWorkflow[] }
+export interface BuiltinCatalog { version: 1; skills: BuiltinSkill[]; workflows: BuiltinWorkflow[]; connectors: ConnectorManifest[] }
 
 export function builtinResourcesRoot(): string {
   return path.resolve(import.meta.dirname, "../../resources");
@@ -37,15 +41,20 @@ function names(value: unknown, label: string): string[] {
   return [...value];
 }
 
-function parseCatalog(value: unknown): { version: 1; skills: Array<Omit<BuiltinSkill, "entry">>; workflows: string[] } {
-  const source = record(value, "catalog.yaml", ["version", "skills", "workflows"]);
+function parseCatalog(value: unknown): { version: 1; skills: Array<Omit<BuiltinSkill, "entry">>; workflows: string[]; connectors: string[] } {
+  const source = record(value, "catalog.yaml", ["version", "skills", "workflows", "connectors"]);
   if (source.version !== 1) catalogError("只支持 Builtin Catalog v1。");
   if (!Array.isArray(source.skills)) catalogError("Catalog skills 必须是数组。");
   const skills = source.skills.map((value) => {
     const skill = record(value, "Catalog skill", ["id", "version", "description"]);
     return { id: string(skill.id, "Catalog skill.id"), version: string(skill.version, "Catalog skill.version"), description: string(skill.description, "Catalog skill.description") };
   });
-  return { version: 1, skills, workflows: names(source.workflows, "Catalog workflows") };
+  return {
+    version: 1,
+    skills,
+    workflows: names(source.workflows, "Catalog workflows"),
+    connectors: source.connectors === undefined ? [] : names(source.connectors, "Catalog connectors"),
+  };
 }
 
 export async function loadBuiltinCatalog(root = builtinResourcesRoot()): Promise<BuiltinCatalog> {
@@ -53,6 +62,7 @@ export async function loadBuiltinCatalog(root = builtinResourcesRoot()): Promise
   const codes = { invalid: "WSSPEC_BUILTIN_RESOURCE_PATH_INVALID", escape: "WSSPEC_BUILTIN_RESOURCE_PATH_ESCAPE" } as const;
   const workflowsRoot = path.join(resourcesRoot, "workflows");
   const skillsRoot = path.join(resourcesRoot, "skills");
+  const connectorsRoot = path.join(resourcesRoot, "connectors");
   await Promise.all([
     assertContainedPath(resourcesRoot, workflowsRoot, codes, "Builtin workflows root"),
     assertContainedPath(resourcesRoot, skillsRoot, codes, "Builtin skills root"),
@@ -88,5 +98,21 @@ export async function loadBuiltinCatalog(root = builtinResourcesRoot()): Promise
     }));
     return { ...workflow, profiles };
   }));
-  return { version: source.version, skills, workflows };
+  const connectorCandidates = source.connectors.length === 0
+    ? []
+    : [
+        gitCommitManifest,
+        ...await loadIssueConnectorManifests(connectorsRoot),
+        await loadLarkConnectorManifest(connectorsRoot),
+      ];
+  const connectorsById = new Map(connectorCandidates.map((manifest) => [manifest.id, manifest]));
+  const connectors = source.connectors.map((id) => {
+    const manifest = connectorsById.get(id);
+    if (manifest === undefined) catalogError(`Catalog Connector ${id} 不存在。`);
+    return manifest;
+  });
+  if (new Set(source.connectors).size !== source.connectors.length || connectorsById.size !== connectors.length) {
+    catalogError("Builtin Connector Catalog 必须精确注册全部受审计 Manifest。 ");
+  }
+  return { version: source.version, skills, workflows, connectors };
 }

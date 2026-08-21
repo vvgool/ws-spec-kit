@@ -61,7 +61,24 @@ export const applicationPublicErrorGroups = {
     "WSSPEC_EXECUTOR_ACTION_NOT_FOUND", "WSSPEC_EXECUTOR_CONTEXT_INVALID", "WSSPEC_EXECUTOR_DUPLICATE", "WSSPEC_EXECUTOR_NOT_FOUND",
     "WSSPEC_EXECUTOR_SECURITY_MISMATCH",
   ],
+  connectorRegistry: [
+    "WSSPEC_CONNECTOR_AUTH_PROBE_UNAVAILABLE", "WSSPEC_CONNECTOR_CAPABILITY_NOT_FOUND", "WSSPEC_CONNECTOR_MANIFEST_INVALID",
+    "WSSPEC_CONNECTOR_PROVIDER_DUPLICATE", "WSSPEC_GIT_PATH_INVALID", "WSSPEC_GIT_REPOSITORY_MISMATCH", "WSSPEC_GIT_REQUEST_INVALID",
+  ],
+  connectorProvider: [
+    "WSSPEC_FEISHU_CONFIGURATION_INVALID", "WSSPEC_FEISHU_FORBIDDEN", "WSSPEC_FEISHU_MANIFEST_INVALID", "WSSPEC_FEISHU_MISSING_BINARY",
+    "WSSPEC_FEISHU_NOT_FOUND", "WSSPEC_FEISHU_PAGINATION_INVALID", "WSSPEC_FEISHU_RATE_LIMITED", "WSSPEC_FEISHU_REQUEST_FAILED",
+    "WSSPEC_FEISHU_RESPONSE_INVALID", "WSSPEC_FEISHU_RESPONSE_TOO_LARGE", "WSSPEC_FEISHU_TARGET_INVALID", "WSSPEC_FEISHU_UNAUTHENTICATED",
+    "WSSPEC_ISSUE_ACTION_INVALID", "WSSPEC_ISSUE_CONFIGURATION_INVALID", "WSSPEC_ISSUE_FORBIDDEN", "WSSPEC_ISSUE_IDENTITY_MISMATCH",
+    "WSSPEC_ISSUE_MANIFEST_INVALID", "WSSPEC_ISSUE_MISSING_BINARY", "WSSPEC_ISSUE_NOT_FOUND", "WSSPEC_ISSUE_RATE_LIMITED",
+    "WSSPEC_ISSUE_READBACK_MISMATCH", "WSSPEC_ISSUE_REQUEST_FAILED", "WSSPEC_ISSUE_RESPONSE_INVALID", "WSSPEC_ISSUE_TARGET_INVALID",
+    "WSSPEC_ISSUE_UNAUTHENTICATED", "WSSPEC_KNOWLEDGE_BINDING_INVALID", "WSSPEC_KNOWLEDGE_CONTENT_INVALID",
+    "WSSPEC_KNOWLEDGE_READBACK_FAILED", "WSSPEC_KNOWLEDGE_READBACK_MISMATCH", "WSSPEC_KNOWLEDGE_TARGET_INVALID", "WSSPEC_KNOWLEDGE_WRITE_FAILED",
+    "WSSPEC_PROCESS_CLEANUP_FAILED", "WSSPEC_PROCESS_EXECUTABLE_CHANGED", "WSSPEC_PROCESS_EXECUTABLE_INVALID", "WSSPEC_PROCESS_EXIT_NONZERO",
+    "WSSPEC_PROCESS_INVALID_JSON", "WSSPEC_PROCESS_OUTPUT_LIMIT", "WSSPEC_PROCESS_REQUEST_INVALID", "WSSPEC_PROCESS_SPAWN_FAILED", "WSSPEC_PROCESS_TIMEOUT",
+  ],
   source: [
+    "WSSPEC_CONNECTOR_PROVIDER_NOT_FOUND",
     "WSSPEC_SOURCE_ARTIFACT_CONFLICT", "WSSPEC_SOURCE_BINARY", "WSSPEC_SOURCE_CHANGED_DURING_READ", "WSSPEC_SOURCE_EMPTY",
     "WSSPEC_SOURCE_INVALID", "WSSPEC_SOURCE_METADATA_INVALID", "WSSPEC_SOURCE_NOT_REGULAR_FILE", "WSSPEC_SOURCE_PATH_INVALID",
     "WSSPEC_SOURCE_SNAPSHOT_CHANGED", "WSSPEC_SOURCE_SNAPSHOT_INVALID", "WSSPEC_SOURCE_TOO_LARGE", "WSSPEC_SOURCE_TYPE_UNSUPPORTED",
@@ -154,6 +171,7 @@ export const applicationFixedPublicErrors = {
 export const publicCliRoutes = [
   "init", "start", "acquire", "submit", "decide", "inspect",
   "workflow list", "workflow show", "workflow eject", "workflow validate", "workflow use", "agent install",
+  "doctor connectors",
 ] as const;
 export type PublicCliRoute = typeof publicCliRoutes[number];
 
@@ -174,7 +192,7 @@ export const applicationPublicErrorGroupNamesByRoute = {
   init: ["internal", "arguments", "repository"],
   start: [
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
-    "compiler", "executor", "source", "workItem", "runtime", "start",
+    "compiler", "executor", "connectorRegistry", "connectorProvider", "source", "workItem", "runtime", "start",
   ],
   acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "close", "tdd", "externalAction"],
   submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "tdd", "externalAction"],
@@ -183,12 +201,13 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "approval", "workflowPackage", "workflowTrust", "externalAction",
   ],
   inspect: ["internal", "arguments", "repository", "schema", "snapshot", "workItem", "externalAction"],
-  "workflow list": ["internal", "arguments", "builtin"],
-  "workflow show": ["internal", "arguments", "builtin", "workflowPackage"],
-  "workflow eject": ["internal", "arguments", "builtin", "workflowPackage", "workflowEject"],
-  "workflow validate": ["internal", "arguments", ...workflowValidationGroups],
-  "workflow use": ["internal", "arguments", ...workflowValidationGroups, "workflowTrust"],
+  "workflow list": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
+  "workflow show": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage"],
+  "workflow eject": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage", "workflowEject"],
+  "workflow validate": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider"],
+  "workflow use": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider", "workflowTrust"],
   "agent install": ["internal", "arguments", "agentInstall"],
+  "doctor connectors": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
 } as const satisfies Readonly<Record<PublicCliErrorRoute, readonly ApplicationPublicErrorGroup[]>>;
 
 function uniqueSorted<T extends string>(values: readonly T[]): T[] {
