@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile, unlink } from "node:fs/promises";
+import { mkdir, readdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -20,6 +20,16 @@ import {
   submitExternalAction,
 } from "./helpers/external-action.js";
 import { completedResult } from "./helpers/control-runtime.js";
+
+async function payloadArtifactNames(root: string, workItemId: string): Promise<string[]> {
+  const projection = await readControlPlane(root, workItemId);
+  try {
+    return (await readdir(path.join(projection.controlPlane, "external-actions", "payloads"))).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
 
 async function replaceAttemptWhileMutationWaits<T>(input: {
   root: string;
@@ -67,6 +77,97 @@ test("credential-like payload is rejected before persistence", async () => {
     (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_EXTERNAL_PAYLOAD_INVALID",
   );
   assert.deepEqual((await readControlPlane(fixture.root, fixture.workItemId)).externalActions, {});
+});
+
+test("stale Attempt rejection leaves no payload artifact", async () => {
+  const fixture = await externalActionFixture();
+  assert.deepEqual(await payloadArtifactNames(fixture.root, fixture.workItemId), []);
+  await assert.rejects(replaceAttemptWhileMutationWaits({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    stepId: fixture.workPackage.stepId,
+    operation: () => import("../../src/application/external-action.js").then(({ prepareExternalAction }) =>
+      prepareExternalAction(prepareInput(fixture.root, fixture.workPackage))),
+  }), (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH");
+  assert.deepEqual(await payloadArtifactNames(fixture.root, fixture.workItemId), []);
+});
+
+test("same-Attempt target conflict does not grow payload artifacts", async () => {
+  const fixture = await preparedAction();
+  const before = await payloadArtifactNames(fixture.root, fixture.workItemId);
+  await assert.rejects(
+    import("../../src/application/external-action.js").then(({ prepareExternalAction }) => prepareExternalAction({
+      ...fixture.input,
+      payload: { body: "conflicting release summary" },
+    })),
+    (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT",
+  );
+  assert.deepEqual(await payloadArtifactNames(fixture.root, fixture.workItemId), before);
+});
+
+test("explicit idempotency conflict does not grow payload artifacts", async () => {
+  const fixture = await preparedAction();
+  const before = await payloadArtifactNames(fixture.root, fixture.workItemId);
+  await assert.rejects(
+    import("../../src/application/external-action.js").then(({ prepareExternalAction }) => prepareExternalAction({
+      ...fixture.input,
+      payload: { body: "conflicting release summary" },
+      idempotencyKey: fixture.prepared.request.idempotencyKey,
+    })),
+    (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT",
+  );
+  assert.deepEqual(await payloadArtifactNames(fixture.root, fixture.workItemId), before);
+});
+
+test("concurrent conflicting prepare persists only the winning payload", async () => {
+  const fixture = await externalActionFixture();
+  const { prepareExternalAction } = await import("../../src/application/external-action.js");
+  const results = await Promise.allSettled([
+    prepareExternalAction(prepareInput(fixture.root, fixture.workPackage, { payload: { body: "candidate one" } })),
+    prepareExternalAction(prepareInput(fixture.root, fixture.workPackage, { payload: { body: "candidate two" } })),
+  ]);
+  assert.equal(results.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(results.filter(({ status }) => status === "rejected").length, 1);
+  assert.equal((await payloadArtifactNames(fixture.root, fixture.workItemId)).length, 1);
+});
+
+test("successful exact prepare retry reuses its payload artifact", async () => {
+  const fixture = await preparedAction();
+  const before = await payloadArtifactNames(fixture.root, fixture.workItemId);
+  const { prepareExternalAction } = await import("../../src/application/external-action.js");
+  const retried = await prepareExternalAction(fixture.input);
+  assert.deepEqual(retried, fixture.prepared);
+  assert.deepEqual(await payloadArtifactNames(fixture.root, fixture.workItemId), before);
+});
+
+test("payload persistence rejects an external-actions symlink before writing through it", async () => {
+  const fixture = await externalActionFixture();
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  const outside = path.join(fixture.root, "outside-external-actions");
+  await mkdir(outside);
+  await symlink(outside, path.join(projection.controlPlane, "external-actions"));
+  const { prepareExternalAction } = await import("../../src/application/external-action.js");
+  await assert.rejects(
+    prepareExternalAction(prepareInput(fixture.root, fixture.workPackage)),
+    (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_EXTERNAL_PAYLOAD_ARTIFACT_INVALID",
+  );
+  assert.deepEqual(await readdir(outside), []);
+});
+
+test("payload persistence rejects a payloads symlink without writing outside", async () => {
+  const fixture = await externalActionFixture();
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  const outside = path.join(fixture.root, "outside-payloads");
+  const externalActions = path.join(projection.controlPlane, "external-actions");
+  await mkdir(outside);
+  await mkdir(externalActions);
+  await symlink(outside, path.join(externalActions, "payloads"));
+  const { prepareExternalAction } = await import("../../src/application/external-action.js");
+  await assert.rejects(
+    prepareExternalAction(prepareInput(fixture.root, fixture.workPackage)),
+    (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_EXTERNAL_PAYLOAD_ARTIFACT_INVALID",
+  );
+  assert.deepEqual(await readdir(outside), []);
 });
 
 test("grant is bound to request, actor, approval, profile, workspace, config, target, digest, and Attempt", async () => {

@@ -15,7 +15,12 @@ import {
 import { canonicalDigest, externalIdempotencyKey, ExternalIdempotencyError } from "../engine/external-effects/idempotency.js";
 import { ControlPlaneError, mutateControlPlane } from "../engine/scheduler.js";
 import { readControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
-import { persistExternalActionPayload } from "../storage/external-action-payload.js";
+import { readEvents, withControlPlaneLock } from "../storage/events.js";
+import {
+  persistExternalActionPayload,
+  prepareExternalActionPayload,
+  removeExternalActionPayload,
+} from "../storage/external-action-payload.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
 import { validate } from "../schemas/index.js";
 
@@ -133,12 +138,38 @@ export function externalActionApprovalSummary(request: ExternalActionRequest): E
   };
 }
 
+function actionsReferencePayload(
+  actions: Readonly<Record<string, ExternalActionState>> | undefined,
+  digest: `sha256:${string}`,
+): boolean {
+  return actions !== undefined && Object.values(actions)
+    .some((action) => action.request.payloadArtifactDigest === digest);
+}
+
+async function removeCreatedPayloadIfUnreferenced(input: {
+  root: string;
+  workItemId: string;
+  controlPlane: string;
+  digest: `sha256:${string}`;
+}): Promise<void> {
+  await withControlPlaneLock(input.controlPlane, async () => {
+    const projection = await readControlPlane(input.root, input.workItemId);
+    if (actionsReferencePayload(projection.externalActions, input.digest)) return;
+    const events = await readEvents(input.controlPlane);
+    const referencedByEvent = events.some((event) => {
+      const result = event.result as { projection?: { externalActions?: Record<string, ExternalActionState> } } | undefined;
+      return actionsReferencePayload(result?.projection?.externalActions, input.digest);
+    });
+    if (!referencedByEvent) await removeExternalActionPayload({ controlPlane: input.controlPlane, digest: input.digest });
+  });
+}
+
 export async function prepareExternalAction(input: ExternalActionPrepareInput): Promise<ExternalActionState> {
+  let createdPayload: { controlPlane: string; digest: `sha256:${string}` } | undefined;
   try {
     const state = await loadApplicationState(input.root, input.workItemId);
     const profile = selectedProfile(state.snapshot);
-    const payloadArtifactDigest = await persistExternalActionPayload({
-      controlPlane: state.projection.controlPlane,
+    const payloadArtifact = prepareExternalActionPayload({
       workItemId: input.workItemId,
       stepId: input.stepId,
       attemptId: input.attemptId,
@@ -157,7 +188,7 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
       securityClass: input.securityClass,
       target: input.target,
       payload: input.payload,
-      payloadArtifactDigest,
+      payloadArtifactDigest: payloadArtifact.digest,
       bindingDigest: input.bindingDigest,
       inputDigest: input.inputDigest,
       artifactDigests: input.artifactDigests,
@@ -171,15 +202,6 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
       expiresAt: input.expiresAt,
     }));
     const derivedKey = externalIdempotencyKey(request);
-    const before = await readControlPlane(input.root, input.workItemId);
-    const existingRequestId = before.externalActionIdempotency[request.idempotencyKey];
-    if (existingRequestId !== undefined) {
-      const existing = currentAction(before, existingRequestId);
-      if (existing.request.requestDigest !== request.requestDigest) {
-        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT", "外部幂等键已绑定不同请求。");
-      }
-      return existing;
-    }
     return await mutateControlPlane({
       cwd: input.root,
       workItemId: input.workItemId,
@@ -189,7 +211,7 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
       stageId: input.stepId,
       attemptId: input.attemptId,
       operationInput: request,
-      mutate: (projection) => {
+      mutate: async (projection) => {
         const existingRequestId = projection.externalActionIdempotency[request.idempotencyKey];
         if (existingRequestId !== undefined) {
           const existing = currentAction(projection, existingRequestId);
@@ -210,9 +232,15 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
           throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT", "同一 Attempt 的外部动作已绑定不同 payload。");
         }
         assertActiveAttempt(projection, request, new Date(input.createdAt));
+        await assertCurrentRequestContext(state, projection, request);
         if (input.idempotencyKey !== undefined && input.idempotencyKey !== derivedKey) {
           throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_IDEMPOTENCY_INVALID", "外部幂等键不符合规范身份生成规则。");
         }
+        const persisted = await persistExternalActionPayload({
+          controlPlane: projection.controlPlane,
+          artifact: payloadArtifact,
+        });
+        if (persisted.created) createdPayload = { controlPlane: projection.controlPlane, digest: persisted.digest };
         const prepared = { status: "prepared" as const, request };
         return {
           projection: {
@@ -225,6 +253,17 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
       },
     });
   } catch (error) {
+    if (createdPayload !== undefined) {
+      try {
+        await removeCreatedPayloadIfUnreferenced({
+          root: input.root,
+          workItemId: input.workItemId,
+          ...createdPayload,
+        });
+      } catch {
+        // Cleanup is conservative: retain the artifact when durable references cannot be ruled out.
+      }
+    }
     return asExternalError(error);
   }
 }

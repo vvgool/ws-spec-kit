@@ -20,6 +20,11 @@ interface ExternalActionPayloadEnvelope {
   payload: unknown;
 }
 
+export interface PreparedExternalActionPayload {
+  digest: `sha256:${string}`;
+  content: string;
+}
+
 export class ExternalActionPayloadError extends Error {
   constructor(readonly code: `WSSPEC_${string}`, message: string) {
     super(`${code}: ${message}`);
@@ -38,16 +43,25 @@ function artifactFilename(directory: string, digest: `sha256:${string}`): string
 
 async function secureArtifactDirectory(controlPlane: string): Promise<string> {
   const canonicalControlPlane = await realpath(controlPlane);
-  const externalActions = path.join(canonicalControlPlane, "external-actions");
-  const payloads = path.join(externalActions, "payloads");
-  await mkdir(payloads, { recursive: true, mode: 0o700 });
-  for (const directory of [externalActions, payloads]) {
+  const secureChildDirectory = async (parent: string, name: string): Promise<string> => {
+    const directory = path.join(parent, name);
+    try {
+      await mkdir(directory, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return invalid();
+    }
     const info = await lstat(directory);
     if (!info.isDirectory() || info.isSymbolicLink()) return invalid();
+    const canonical = await realpath(directory);
+    if (canonical !== directory || path.dirname(canonical) !== parent) return invalid();
+    return canonical;
+  };
+  const externalActions = await secureChildDirectory(canonicalControlPlane, "external-actions");
+  const payloads = await secureChildDirectory(externalActions, "payloads");
+  if (!payloads.startsWith(`${canonicalControlPlane}${path.sep}`)) {
+    return invalid();
   }
-  const canonicalPayloads = await realpath(payloads);
-  if (!canonicalPayloads.startsWith(`${canonicalControlPlane}${path.sep}`)) return invalid();
-  return canonicalPayloads;
+  return payloads;
 }
 
 function envelope(input: {
@@ -119,8 +133,7 @@ async function readArtifact(filename: string, expectedDigest: `sha256:${string}`
   return result;
 }
 
-export async function persistExternalActionPayload(input: {
-  controlPlane: string;
+export function prepareExternalActionPayload(input: {
   workItemId: string;
   stepId: string;
   attemptId: string;
@@ -128,17 +141,33 @@ export async function persistExternalActionPayload(input: {
   action: ExternalActionName;
   target: ExternalActionTarget;
   payload: unknown;
-}): Promise<`sha256:${string}`> {
+}): PreparedExternalActionPayload {
   const value = envelope(input);
   const digest = canonicalDigest(value);
+  const content = `${JSON.stringify(value)}\n`;
+  if (Buffer.byteLength(content, "utf8") > maximumPayloadArtifactBytes) {
+    return invalid("WSSPEC_EXTERNAL_PAYLOAD_INVALID");
+  }
+  return { digest, content };
+}
+
+export async function persistExternalActionPayload(input: {
+  controlPlane: string;
+  artifact: PreparedExternalActionPayload;
+}): Promise<{ digest: `sha256:${string}`; created: boolean }> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(input.artifact.content); }
+  catch { return invalid(); }
+  const value = parseEnvelope(parsed);
+  if (canonicalDigest(value) !== input.artifact.digest) return invalid();
   const directory = await secureArtifactDirectory(input.controlPlane);
-  const filename = artifactFilename(directory, digest);
+  const filename = artifactFilename(directory, input.artifact.digest);
   let handle;
   let created = false;
   try {
     handle = await open(filename, "wx", 0o600);
     created = true;
-    await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+    await handle.writeFile(input.artifact.content, "utf8");
     await handle.sync();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
@@ -151,8 +180,21 @@ export async function persistExternalActionPayload(input: {
   } finally {
     await handle?.close();
   }
-  await readArtifact(filename, digest);
-  return digest;
+  await readArtifact(filename, input.artifact.digest);
+  return { digest: input.artifact.digest, created };
+}
+
+export async function removeExternalActionPayload(input: {
+  controlPlane: string;
+  digest: `sha256:${string}`;
+}): Promise<void> {
+  const directory = await secureArtifactDirectory(input.controlPlane);
+  const filename = artifactFilename(directory, input.digest);
+  try {
+    await unlink(filename);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export async function loadExternalActionPayload(input: {

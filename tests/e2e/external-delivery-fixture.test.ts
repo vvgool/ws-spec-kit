@@ -512,41 +512,68 @@ async function timeline(root: string): Promise<string[]> {
   return text.trim().split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { stage: string }).stage);
 }
 
-interface PersistedRecord { rootId: string; path: string; content: string }
+interface PersistedRecord {
+  rootId: string;
+  canonicalRoot: string;
+  absolutePath: string;
+  path: string;
+  content: string;
+}
 
-async function persistedRecords(roots: Array<{ id: string; path: string; boundary: string }>): Promise<PersistedRecord[]> {
+async function persistedRecords(roots: Array<{ id: string; path: string; boundary: string }>): Promise<{
+  canonicalRoots: Map<string, string>;
+  records: PersistedRecord[];
+}> {
   const values: PersistedRecord[] = [];
   const visit = async (rootId: string, root: string, target: string): Promise<void> => {
     const info = await stat(target);
     if (info.isDirectory()) {
       for (const entry of await readdir(target)) await visit(rootId, root, path.join(target, entry));
     } else if (info.isFile()) {
-      values.push({ rootId, path: path.relative(root, target), content: await readFile(target, "utf8") });
+      values.push({
+        rootId,
+        canonicalRoot: root,
+        absolutePath: target,
+        path: path.relative(root, target),
+        content: await readFile(target, "utf8"),
+      });
     }
   };
+  const canonicalRoots = new Map<string, string>();
   for (const root of roots) {
     const canonicalRoot = await realpath(root.path);
     const canonicalBoundary = await realpath(root.boundary);
     assert.ok(canonicalRoot === canonicalBoundary || canonicalRoot.startsWith(`${canonicalBoundary}${path.sep}`));
+    canonicalRoots.set(root.id, canonicalRoot);
     await writeFile(path.join(canonicalRoot, `persistence-canary-${root.id}`), `${root.id}\n`, "utf8");
     await visit(root.id, canonicalRoot, canonicalRoot);
   }
-  return values;
+  return { canonicalRoots, records: values };
 }
 
 async function assertNoPersistenceLeak(fixture: Fixture, worktree: string): Promise<void> {
   const repositoryRoot = await realpath(fixture.root);
   const commonGitDir = await realpath(await git(fixture.root, "rev-parse", "--path-format=absolute", "--git-common-dir"));
   const canonicalWorktree = await realpath(worktree);
-  const records = await persistedRecords([
+  const { canonicalRoots, records } = await persistedRecords([
     { id: "repository", path: path.join(repositoryRoot, ".wsspec"), boundary: repositoryRoot },
     { id: "common-git", path: path.join(commonGitDir, "wsspec"), boundary: commonGitDir },
     { id: "worktree", path: path.join(canonicalWorktree, ".wsspec"), boundary: canonicalWorktree },
   ]);
+  assert.equal(new Set(canonicalRoots.values()).size, 3, "persistence roots must be canonically distinct");
   for (const rootId of ["repository", "common-git", "worktree"]) {
-    assert.ok(records.some((record) => record.rootId === rootId), `${rootId} persistence root contributed no files`);
+    const canonicalRoot = canonicalRoots.get(rootId);
+    assert.ok(canonicalRoot);
+    assert.ok(records
+      .filter((record) => record.rootId === rootId)
+      .every((record) => record.canonicalRoot === canonicalRoot
+        && record.absolutePath.startsWith(`${canonicalRoot}${path.sep}`)), `${rootId} record escaped its canonical root`);
     assert.ok(records.some((record) => record.rootId === rootId && record.path === `persistence-canary-${rootId}`));
   }
+  assert.ok(records.some(({ rootId, path: filename }) => rootId === "repository" && filename === "config.yaml"));
+  assert.ok(records.some(({ rootId, path: filename }) => rootId === "common-git" && filename === "repository.json"));
+  assert.ok(records.some(({ rootId, path: filename }) => rootId === "worktree"
+    && /^work-items[/\\][^/\\]+[/\\]work-item\.yaml$/u.test(filename)));
   const text = records.map(({ content }) => content).join("\n");
   for (const forbidden of [...secretMarkers, fixture.remoteRoot, os.homedir(), "oauth_token:", "access_token", "token: glpat-"]) {
     assert.equal(text.includes(forbidden), false, `persisted connector output leaked ${forbidden}`);
