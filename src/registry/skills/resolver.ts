@@ -360,7 +360,7 @@ export async function revalidateGlobalSkillLock(input: {
       provider: input.provider,
       projectRoot: input.projectRoot,
       home: input.home,
-      stepStatus: "not_started",
+      stepStatus: "started",
       lock,
       ...(input.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: input.additionalGlobalRoots }),
     });

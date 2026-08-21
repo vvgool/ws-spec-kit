@@ -1,0 +1,9 @@
+version: 1
+id: custom-delivery
+description: 项目自定义安全交付工作流
+profiles: [quick, standard, governed]
+entry: workflow.yaml
+skills: [security-review]
+capabilities: [agent-execution, command-execution, connector-execution, control-flow]
+externalSideEffects: [git-commit, issue-update, knowledge-publish, issue-close]
+connectors: [requirement, git, issue, knowledge]

@@ -1,0 +1,27 @@
+version: 1
+profile:
+  id: governed
+  workflow: custom-delivery
+steps:
+  clarify:
+    approval: true
+    artifacts:
+      specification: { required: true, contentLevel: complete }
+  design:
+    approval: true
+    artifacts:
+      design: { required: true, contentLevel: complete }
+  plan:
+    approval: true
+    artifacts:
+      tasks: { required: true, contentLevel: complete }
+  review-fix: { maxIterations: 5, independentReviewActor: true }
+  verify-green: { gates: [test] }
+publishing: { issueRequired: true, knowledgeRequired: true, readBackRequired: true }
+audit:
+  level: complete
+  retention: extended
+  recordDecisions: true
+  recordApprovals: true
+  recordActors: true
+  recordPublishing: true
