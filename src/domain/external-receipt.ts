@@ -24,6 +24,8 @@ export interface ExternalReceipt {
   kind: "external-receipt";
   target: ExternalTarget;
   stableId: string;
+  externalEffectKind?: "issue.comment";
+  externalEffectId?: string;
   externalWorkItemId: string;
   publishStepId: string;
   publishAttemptId: string;

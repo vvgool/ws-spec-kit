@@ -28,6 +28,10 @@ function unique<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort();
 }
 
+function hasExternalProviderWrite(result: SubmitResult): boolean {
+  return result.externalWrites.some((value) => record(value)?.action !== "git.commit");
+}
+
 function mergeRiskSignals(previous: RuntimeRiskSignals, result: SubmitResult): RuntimeRiskSignals {
   const signals = [...result.remainingRisks, ...result.evidence].map(record).filter((value): value is Record<string, unknown> => value !== undefined);
   const affectedPaths = unique(signals.flatMap((signal) => strings(signal.affectedPaths)));
@@ -56,7 +60,7 @@ function mergeRiskSignals(previous: RuntimeRiskSignals, result: SubmitResult): R
     plannedActions: unique([
       ...previous.plannedActions,
       ...signals.flatMap((signal) => strings(signal.plannedActions)),
-      ...(result.externalWrites.length === 0 ? [] : ["external-write"]),
+      ...(hasExternalProviderWrite(result) ? ["external-write"] : []),
     ]),
   };
 }

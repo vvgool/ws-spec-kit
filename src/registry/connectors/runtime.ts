@@ -75,6 +75,17 @@ export type ExternalNormalizedRequirementSource = Omit<NormalizedRequirementSour
   type: "github.issue" | "gitlab.issue" | "feishu.document";
 };
 
+export interface BuiltinKnowledgeTargetInput {
+  provider: "feishu";
+  document: string;
+}
+
+export interface NormalizedBuiltinKnowledgeTarget {
+  provider: "feishu";
+  stableId: string;
+  canonicalUrl: string;
+}
+
 function invalid(message: string): never {
   throw new ConnectorRuntimeError("WSSPEC_SOURCE_INVALID", message);
 }
@@ -138,4 +149,20 @@ export async function captureBuiltinConnectorSource(
     });
   }
   throw new ConnectorRuntimeError("WSSPEC_CONNECTOR_PROVIDER_NOT_FOUND", `找不到需求来源 Provider ${source.provider}。`);
+}
+
+export async function normalizeBuiltinKnowledgeTarget(
+  target: BuiltinKnowledgeTargetInput,
+  runtime: BuiltinConnectorRuntime,
+): Promise<NormalizedBuiltinKnowledgeTarget> {
+  if (target.provider !== "feishu") {
+    throw new ConnectorRuntimeError("WSSPEC_CONNECTOR_PROVIDER_NOT_FOUND", `找不到 Knowledge 目标 Provider ${target.provider as string}。`);
+  }
+  const document = await readFeishuDocument({
+    executable: runtime.executables["lark-cli"],
+    document: target.document,
+    identity: runtime.larkIdentity ?? "user",
+    ...(runtime.environments?.feishu === undefined ? {} : { environment: runtime.environments.feishu }),
+  });
+  return { provider: "feishu", stableId: document.stableId, canonicalUrl: document.canonicalUrl! };
 }

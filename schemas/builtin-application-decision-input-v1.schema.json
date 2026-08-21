@@ -142,6 +142,8 @@
         "root",
         "workItemId",
         "requestId",
+        "decision",
+        "expectedDigest",
         "actor"
       ],
       "properties": {
@@ -159,6 +161,118 @@
         "requestId": {
           "type": "string",
           "minLength": 1
+        },
+        "decision": {
+          "const": "reconcile"
+        },
+        "expectedDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "root",
+        "workItemId",
+        "requestId",
+        "decision",
+        "expectedDigest",
+        "evidence",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "external_reconciliation"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workItemId": {
+          "type": "string",
+          "pattern": "^WSS-[A-Za-z0-9-]+$"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "const": "mark_failed"
+        },
+        "expectedDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "actor": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "root",
+        "workItemId",
+        "requestId",
+        "decision",
+        "expectedDigest",
+        "externalStableId",
+        "contentDigest",
+        "evidence",
+        "actor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "external_reconciliation"
+        },
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workItemId": {
+          "type": "string",
+          "pattern": "^WSS-[A-Za-z0-9-]+$"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "decision": {
+          "const": "adopt_verified"
+        },
+        "expectedDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "externalStableId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "contentDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
         },
         "actor": {
           "type": "string",

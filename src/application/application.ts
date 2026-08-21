@@ -18,7 +18,7 @@ export interface ApplicationDependencies {
   terminal?: { isTTY?: boolean };
   now?: () => Date;
   executors?: ExecutorRegistry;
-  externalExecutor?: (provider: string, action: "issue.update" | "knowledge.publish" | "issue.close") => ExternalActionExecutor;
+  externalExecutor?: (provider: string, action: import("../engine/external-effects/authorization.js").ExternalActionName) => ExternalActionExecutor;
   workflowTrust?: { interactive: boolean; actor: string };
   connectorRuntime?: BuiltinConnectorRuntime;
 }

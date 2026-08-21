@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readGithubIssue, writeGithubIssue } from "../../src/adapters/connectors/github-cli.js";
+import { readGithubComment, readGithubIssue, writeGithubIssue } from "../../src/adapters/connectors/github-cli.js";
 import { IssueProviderError, validateGithubIssueTarget, type IssueWriteAction } from "../../src/registry/connectors/issue.js";
 
 const target = { host: "github.example.com", owner: "acme", repo: "widget", number: 7 } as const;
@@ -134,6 +134,44 @@ test("GitHub normalizes issue title and body before returning NormalizedIssue", 
   assert.equal(issue.body, "First\nSecond\nThird");
 });
 
+test("GitHub adoption reads one exact comment ID and verifies its approved body and Issue", async (t) => {
+  const response = {
+    id: 44,
+    node_id: "IC_comment",
+    body: "Café\nSecond",
+    issue_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7",
+  };
+  const cli = await scriptedCli(t, [response]);
+  const comment = await readGithubComment({
+    executable: cli.executable,
+    target,
+    externalStableId: "github-comment:44",
+    expectedBody: "Cafe\u0301\r\nSecond",
+  });
+  assert.deepEqual(comment, { stableId: "github-comment:44", body: "Café\nSecond" });
+  const call = JSON.parse((await readFile(cli.log, "utf8")).trim());
+  assert.deepEqual(call, {
+    argv: ["api", "--method", "GET", "repos/acme/widget/issues/comments/44", "--hostname", "github.example.com"],
+    input: {},
+  });
+
+  const mismatched = await scriptedCli(t, [{ ...response, id: 45 }]);
+  await assert.rejects(readGithubComment({
+    executable: mismatched.executable,
+    target,
+    externalStableId: "github-comment:44",
+    expectedBody: response.body,
+  }), (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_READBACK_MISMATCH");
+
+  const wrongIssue = await scriptedCli(t, [{ ...response, issue_url: "https://github.example.com/api/v3/repos/acme/widget/issues/8" }]);
+  await assert.rejects(readGithubComment({
+    executable: wrongIssue.executable,
+    target,
+    externalStableId: "github-comment:44",
+    expectedBody: response.body,
+  }), (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_READBACK_MISMATCH");
+});
+
 test("GitHub exposes only fixed comment, body, labels and state write unions", async (t) => {
   const cases: Array<{ action: IssueWriteAction; method: string; endpoint: string; payload: unknown }> = [
     { action: { type: "comment", body: "Approved comment" }, method: "POST", endpoint: "repos/acme/widget/issues/7/comments", payload: { body: "Approved comment" } },
@@ -159,12 +197,23 @@ test("GitHub exposes only fixed comment, body, labels and state write unions", a
       : current.action.type === "body" ? { ...openIssue, body: "Approved body" }
         : current.action.type === "labels" ? { ...openIssue, labels: [{ name: "ready" }, { name: "bug" }] }
           : openIssue;
-    const readback = current.action.type === "comment" ? openIssue : writeResponse;
-    const cli = await scriptedCli(st, [writeResponse, readback]);
-    await writeGithubIssue({ executable: cli.executable, target, action: current.action });
+    const responses = current.action.type === "comment"
+      ? [writeResponse, writeResponse, openIssue]
+      : [writeResponse, writeResponse];
+    const cli = await scriptedCli(st, responses);
+    const result = await writeGithubIssue({ executable: cli.executable, target, action: current.action });
     const calls = (await readFile(cli.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(calls[0], { argv: ["api", "--method", current.method, current.endpoint, "--hostname", "github.example.com", "--input", "-"], input: current.payload });
-    assert.deepEqual(calls[1]?.argv, ["api", "--method", "GET", "repos/acme/widget/issues/7", "--hostname", "github.example.com"]);
+    if (current.action.type === "comment") {
+      assert.equal((result as unknown as Record<string, unknown>).externalEffectId, "github-comment:44");
+      assert.deepEqual(calls.slice(1).map(({ argv }) => argv), [
+        ["api", "--method", "GET", "repos/acme/widget/issues/comments/44", "--hostname", "github.example.com"],
+        ["api", "--method", "GET", "repos/acme/widget/issues/7", "--hostname", "github.example.com"],
+      ]);
+    } else {
+      assert.equal((result as unknown as Record<string, unknown>).externalEffectId, undefined);
+      assert.deepEqual(calls[1]?.argv, ["api", "--method", "GET", "repos/acme/widget/issues/7", "--hostname", "github.example.com"]);
+    }
   });
 
   const cli = await scriptedCli(t, []);
@@ -190,7 +239,14 @@ test("GitHub preserves approved stdin and compares canonical comment, body and l
     {
       name: "comment",
       action: { type: "comment", body: approvedText } as const,
-      writeResponse: { id: 45, node_id: "IC_canonical", body: canonicalText, user: openIssue.user, created_at: openIssue.updated_at },
+      writeResponse: {
+        id: 45,
+        node_id: "IC_canonical",
+        body: canonicalText,
+        issue_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7",
+        user: openIssue.user,
+        created_at: openIssue.updated_at,
+      },
       readback: openIssue,
       payload: { body: approvedText },
     },
@@ -210,7 +266,9 @@ test("GitHub preserves approved stdin and compares canonical comment, body and l
     },
   ];
   for (const current of cases) await t.test(current.name, async (st) => {
-    const cli = await scriptedCli(st, [current.writeResponse, current.readback]);
+    const cli = await scriptedCli(st, current.action.type === "comment"
+      ? [current.writeResponse, current.writeResponse, current.readback]
+      : [current.writeResponse, current.readback]);
     await writeGithubIssue({ executable: cli.executable, target, action: current.action });
     const first = JSON.parse((await readFile(cli.log, "utf8")).split("\n")[0]!);
     assert.deepEqual(first.input, current.payload);
@@ -222,6 +280,30 @@ test("GitHub preserves approved stdin and compares canonical comment, body and l
     (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_ACTION_INVALID",
   );
   await assert.rejects(access(duplicate.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("GitHub comment write fails when the authoritative comment is missing or has different content", async (t) => {
+  const posted = {
+    id: 44,
+    node_id: "IC_comment",
+    body: "Approved comment",
+    issue_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7",
+  };
+  for (const scenario of [
+    { name: "missing comment", readback: openIssue, code: "WSSPEC_ISSUE_RESPONSE_INVALID" },
+    { name: "different body", readback: { ...posted, body: "Different" }, code: "WSSPEC_ISSUE_READBACK_MISMATCH" },
+  ]) await t.test(scenario.name, async (st) => {
+    const cli = await scriptedCli(st, [posted, scenario.readback, openIssue]);
+    await assert.rejects(
+      writeGithubIssue({ executable: cli.executable, target, action: { type: "comment", body: posted.body } }),
+      (error: unknown) => error instanceof IssueProviderError && error.code === scenario.code,
+    );
+    const calls = (await readFile(cli.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(calls.map(({ argv }) => argv), [
+      ["api", "--method", "POST", "repos/acme/widget/issues/7/comments", "--hostname", "github.example.com", "--input", "-"],
+      ["api", "--method", "GET", "repos/acme/widget/issues/comments/44", "--hostname", "github.example.com"],
+    ]);
+  });
 });
 
 test("GitHub issue.close reads open, writes closed, and reads back the same stable identity", async (t) => {

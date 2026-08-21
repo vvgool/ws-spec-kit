@@ -103,12 +103,12 @@ function parseEnvelope(value: unknown): ExternalActionPayloadEnvelope {
     || source.version !== 1 || source.kind !== "external-action-payload"
     || typeof source.workItemId !== "string" || typeof source.stepId !== "string"
     || typeof source.attemptId !== "string" || typeof source.provider !== "string"
-    || !["issue.update", "knowledge.publish", "issue.close"].includes(source.action as string)
+    || !["git.commit", "issue.update", "knowledge.publish", "issue.close"].includes(source.action as string)
     || source.target === null || typeof source.target !== "object" || Array.isArray(source.target)
     || typeof source.payloadDigest !== "string") return invalid();
   const target = source.target as Record<string, unknown>;
   if (Object.keys(target).sort().join("\0") !== "kind\0stableId"
-    || !["issue", "knowledge"].includes(target.kind as string) || typeof target.stableId !== "string") return invalid();
+    || !["repository", "issue", "knowledge"].includes(target.kind as string) || typeof target.stableId !== "string") return invalid();
   const result = source as unknown as ExternalActionPayloadEnvelope;
   if (canonicalDigest(result.payload) !== result.payloadDigest) return invalid();
   return result;

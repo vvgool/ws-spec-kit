@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  adoptVerifiedExternalAction,
   approveExternalAction,
   executeExternalAction,
   ExternalActionError,
@@ -12,9 +13,10 @@ import {
   type ExternalActionExecutor,
 } from "../../src/application/external-action.js";
 import { loadApplicationState } from "../../src/application/state.js";
-import { computeWorkspaceSnapshot } from "../../src/domain/digests.js";
+import { computeWorkspaceSnapshot, sha256 } from "../../src/domain/digests.js";
 import { evaluateExternalDelivery } from "../../src/engine/external-effects/reconciliation.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
+import { createBuiltinExternalExecutor } from "../../src/registry/connectors/external-executor.js";
 import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
 import { applicationExternalActionFixture, externalActionFixture, prepareInput, submitExternalAction } from "./helpers/external-action.js";
 import { controlRuntimeFixture, requireExecute, rewriteSelectedSnapshot } from "./helpers/control-runtime.js";
@@ -37,6 +39,22 @@ async function approvedAction(action: "issue.update" | "knowledge.publish" | "is
     expiresAt: "2026-08-18T04:00:50.000Z", terminal: { isTTY: true },
   });
   return { ...fixture, input, requestId: prepared.request.requestId };
+}
+
+async function unknownActionForAdoption(executor: ExternalActionExecutor) {
+  const fixture = await approvedAction();
+  await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: fixture.requestId,
+    payload: fixture.input.payload,
+    executor,
+    now: "2026-08-18T04:00:20.000Z",
+  });
+  const unknown = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId];
+  assert.equal(unknown?.status, "reconciliation_required");
+  if (unknown?.status !== "reconciliation_required") throw new Error("expected unknown action");
+  return { ...fixture, unknown };
 }
 
 test("a proven pre-send crash may continue, while a post-dispatch crash requires read-only reconciliation", async () => {
@@ -187,12 +205,14 @@ test("delivery ordering blocks close on required knowledge/issue-close but makes
 
 test("Governed issue.close rejects a custom Workflow that omits required knowledge.publish", async () => {
   const fixture = await controlRuntimeFixture({
+    knowledgeTarget: true,
     externalExecutor: {
       async execute({ request, markDispatched }) {
         await markDispatched();
         return {
           targetStableId: request.target.stableId,
-          contentDigest: request.payloadDigest,
+          publishedContentDigest: request.expectedContentDigest,
+          readBackContentDigest: request.expectedContentDigest,
           verifiedAt: "2026-08-18T04:01:00.000Z",
         };
       },
@@ -243,7 +263,12 @@ test("Governed issue.close rejects a custom Workflow that omits required knowled
     modifiedFiles: [], artifacts: [], commands: [], evidence: [], remainingRisks: [],
     externalWrites: [{
       kind: "external-action", provider: "github", action,
-      target: { kind: "issue", stableId }, payload: { body: action }, sideEffects: [action],
+      target: { kind: "issue", stableId },
+      payload: {
+        target: { host: "github.example.com", owner: "example", repo: "project", number: 42 },
+        action: action === "issue.update" ? { type: "body", body: action } : { type: "issue.close" },
+      },
+      sideEffects: [action],
     }],
   });
   const submit = (workPackage: typeof update, action: "issue.update" | "issue.close") => fixture.app.submit({
@@ -335,6 +360,8 @@ test("decide exposes read-only reconciliation through the five-operation Applica
     root: fixture.root,
     workItemId: fixture.workItemId,
     requestId: pending.approval.requestId,
+    decision: "reconcile",
+    expectedDigest: pending.approval.digest,
     actor: "codex",
   });
   assert.equal(resumed.action, "execute");
@@ -342,6 +369,465 @@ test("decide exposes read-only reconciliation through the five-operation Applica
   assert.equal(completed.action, "completed");
   assert.equal(writes, 1);
   assert.equal(reads, 1);
+});
+
+test("public reconciliation can auditably mark an unverifiable sent-or-unknown action failed after restart", async () => {
+  const fixture = await applicationExternalActionFixture({
+    async execute({ markDispatched }) {
+      await markDispatched();
+      throw new Error("response lost");
+    },
+    async reconcile() {
+      return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" };
+    },
+  });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "approved", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+  assert.equal((await submitExternalAction(fixture)).action, "blocked");
+  fixture.restart();
+
+  const resolved = await fixture.app.decide({
+    kind: "external_reconciliation",
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "mark_failed",
+    expectedDigest: pending.approval.digest,
+    evidence: "操作者已在平台审计记录中确认无法证明该写入成功。",
+    actor: "maintainer",
+  });
+
+  assert.equal(resolved.action, "blocked");
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  const action = projection.externalActions[pending.approval.requestId];
+  assert.equal(action?.status, "failed");
+  if (action?.status !== "failed") throw new Error("expected failed action");
+  assert.equal(action.reason, "操作者经审计决定将未知写入标记为失败");
+});
+
+test("repeating the same mark_failed decision after a lost response preserves the first result", async () => {
+  let currentTime = "2026-08-18T04:00:01.000Z";
+  const fixture = await applicationExternalActionFixture({
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("response lost"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: currentTime }; },
+  }, { now: () => new Date(currentTime) });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "approved", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+  assert.equal((await submitExternalAction(fixture)).action, "blocked");
+  const decision = {
+    kind: "external_reconciliation" as const,
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "mark_failed" as const,
+    expectedDigest: pending.approval.digest,
+    evidence: "操作者已确认平台无法证明写入成功。",
+    actor: "maintainer",
+  };
+
+  const first = await fixture.app.decide(decision);
+  const firstAction = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  currentTime = "2026-08-18T04:00:02.000Z";
+  const repeated = await fixture.app.decide(decision);
+
+  assert.deepEqual(repeated, first);
+  assert.deepEqual((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId], firstAction);
+});
+
+test("public adopt_verified authoritatively adopts an unknown comment after restart without redispatch", async () => {
+  let writes = 0;
+  let adoptionReads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) {
+      await markDispatched();
+      writes += 1;
+      throw new Error("response lost");
+    },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+    async adopt({ externalStableId, contentDigest }) {
+      adoptionReads += 1;
+      return {
+        outcome: "verified",
+        targetStableId: externalStableId,
+        contentDigest,
+        checkedAt: "2026-08-18T04:02:00.000Z",
+      };
+    },
+  };
+  const fixture = await applicationExternalActionFixture(executor);
+  const result = structuredClone(fixture.result);
+  (result.externalWrites[0] as { payload: unknown }).payload = {
+    target: { host: "github.example.com", owner: "acme", repo: "widget", number: 42 },
+    action: { type: "comment", body: "Approved release summary" },
+  };
+  const pending = await submitExternalAction(fixture, result);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  const prepared = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(prepared?.request.externalEffectKind, "issue.comment");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "approved", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+  assert.equal((await submitExternalAction(fixture, result)).action, "blocked");
+  fixture.restart();
+  const before = await readControlPlane(fixture.root, fixture.workItemId);
+  const unknown = before.externalActions[pending.approval.requestId];
+  assert.equal(unknown?.status, "reconciliation_required");
+  if (unknown?.status !== "reconciliation_required") throw new Error("expected unknown action");
+
+  const resumed = await fixture.app.decide({
+    kind: "external_reconciliation",
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "adopt_verified",
+    expectedDigest: pending.approval.digest,
+    externalStableId: "github-comment:4242",
+    contentDigest: unknown.request.expectedContentDigest,
+    evidence: "已通过 GitHub 审计页确认 comment 4242 正文与批准内容一致。",
+    actor: "maintainer",
+  });
+
+  assert.equal(resumed.action, "execute");
+  assert.equal(writes, 1);
+  assert.equal(adoptionReads, 1);
+  const adopted = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(adopted?.status, "verified");
+  if (adopted?.status !== "verified") throw new Error("expected adopted receipt");
+  assert.equal(adopted.receipt.readBackContentDigest, unknown.request.expectedContentDigest);
+  assert.equal(adopted.receipt.externalEffectKind, "issue.comment");
+  assert.equal(adopted.receipt.externalEffectId, "github-comment:4242");
+  assert.equal(
+    (await fixture.app.inspect({ root: fixture.root, workItemId: fixture.workItemId }))
+      .externalActions?.find(({ requestId }) => requestId === pending.approval.requestId)?.externalEffectId,
+    "github-comment:4242",
+  );
+  await assert.rejects(mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:remove-comment-effect-id:${pending.approval.requestId}`,
+    operationInput: { requestId: pending.approval.requestId },
+    mutate: (projection) => {
+      const action = structuredClone(projection.externalActions[pending.approval.requestId]);
+      assert.equal(action?.status, "verified");
+      if (action?.status !== "verified") throw new Error("expected verified action");
+      delete action.receipt.externalEffectId;
+      return {
+        projection: {
+          ...projection,
+          externalActions: { ...projection.externalActions, [pending.approval.requestId]: action },
+        },
+        value: null,
+      };
+    },
+  }), (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_SCHEMA_REQUIRED_FIELD");
+  const beforeReplay = await readControlPlane(fixture.root, fixture.workItemId);
+  await writeFile(path.join(beforeReplay.controlPlane, "runtime.json"), "crashed before receipt projection flush\n", "utf8");
+  const replayed = await recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId });
+  const replayedAction = replayed.externalActions[pending.approval.requestId];
+  assert.equal(replayedAction?.status, "verified");
+  if (replayedAction?.status !== "verified") throw new Error("expected replayed verified action");
+  assert.equal(replayedAction.receipt.externalEffectId, "github-comment:4242");
+
+  const completed = await submitExternalAction({ ...fixture, workPackage: resumed.workPackage, result }, result);
+  assert.equal(completed.action, "completed");
+  assert.equal(writes, 1);
+});
+
+test("repeating the same adopt_verified decision after a lost response reuses the first readback", async () => {
+  let currentTime = "2026-08-18T04:00:01.000Z";
+  let adoptionReads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("response lost"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: currentTime }; },
+    async adopt({ externalStableId, contentDigest }) {
+      adoptionReads += 1;
+      return { outcome: "verified", targetStableId: externalStableId, contentDigest, checkedAt: currentTime };
+    },
+  };
+  const fixture = await applicationExternalActionFixture(executor);
+  const result = structuredClone(fixture.result);
+  (result.externalWrites[0] as { payload: unknown }).payload = {
+    target: { host: "github.example.com", owner: "acme", repo: "widget", number: 42 },
+    action: { type: "comment", body: "Approved release summary" },
+  };
+  const pending = await submitExternalAction(fixture, result);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "approved", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+  assert.equal((await submitExternalAction(fixture, result)).action, "blocked");
+  const unknown = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(unknown?.status, "reconciliation_required");
+  if (unknown?.status !== "reconciliation_required") throw new Error("expected unknown action");
+  const decision = {
+    kind: "external_reconciliation" as const,
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "adopt_verified" as const,
+    expectedDigest: pending.approval.digest,
+    externalStableId: "github-comment:4242",
+    contentDigest: unknown.request.expectedContentDigest,
+    evidence: "已通过平台权威回读确认正文。",
+    actor: "maintainer",
+  };
+
+  const first = await fixture.app.decide(decision);
+  const firstAction = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  currentTime = "2026-08-18T04:00:02.000Z";
+  const repeated = await fixture.app.decide(decision);
+
+  assert.deepEqual(repeated, first);
+  assert.deepEqual((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId], firstAction);
+  assert.equal(adoptionReads, 1);
+});
+
+test("adopt_verified rejects non-TTY, invalid evidence/digest, and non-authoritative readback without changing unknown state", async (t) => {
+  const fixture = await approvedAction();
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("response lost"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" }; },
+    async adopt({ externalStableId, contentDigest }) {
+      return { outcome: "verified", targetStableId: externalStableId, contentDigest, checkedAt: "2026-08-18T04:00:30.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+  const unknown = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId];
+  assert.equal(unknown?.status, "reconciliation_required");
+  if (unknown?.status !== "reconciliation_required") throw new Error("expected unknown action");
+
+  const base = {
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: fixture.requestId,
+    expectedRequestDigest: unknown.request.requestDigest,
+    externalStableId: "github-comment:4242",
+    contentDigest: unknown.request.expectedContentDigest,
+    evidence: "平台只读回查证据",
+    actor: "maintainer",
+    now: "2026-08-18T04:00:30.000Z",
+    terminal: { isTTY: true },
+    executor,
+  } as const;
+  for (const scenario of [
+    { name: "non tty", input: { ...base, terminal: { isTTY: false } }, code: "WSSPEC_INTERACTIVE_TTY_REQUIRED" },
+    { name: "empty evidence", input: { ...base, evidence: "  " }, code: "WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID" },
+    { name: "wrong request digest", input: { ...base, expectedRequestDigest: `sha256:${"a".repeat(64)}` }, code: "WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH" },
+    { name: "wrong content digest", input: { ...base, contentDigest: `sha256:${"b".repeat(64)}` }, code: "WSSPEC_EXTERNAL_READBACK_MISMATCH" },
+  ]) {
+    await t.test(scenario.name, async () => {
+      await assert.rejects(adoptVerifiedExternalAction(scenario.input),
+        (error: unknown) => error instanceof ExternalActionError && error.code === scenario.code);
+      assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId]?.status, "reconciliation_required");
+    });
+  }
+
+  await t.test("provider mismatch", async () => {
+    await assert.rejects(adoptVerifiedExternalAction({
+      ...base,
+      executor: {
+        ...executor,
+        async adopt({ contentDigest }) {
+          return { outcome: "verified", targetStableId: "github-comment:other", contentDigest, checkedAt: base.now };
+        },
+      },
+    }), (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_READBACK_MISMATCH");
+    assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId]?.status, "reconciliation_required");
+  });
+});
+
+test("direct adopt_verified rejects empty or oversized operator input before Provider readback", async (t) => {
+  for (const scenario of [
+    { name: "empty external stable ID", override: { externalStableId: "" } },
+    { name: "external stable ID over 2048 UTF-8 bytes", override: { externalStableId: "界".repeat(683) } },
+    { name: "evidence over 2048 UTF-8 bytes", override: { evidence: "证".repeat(683) } },
+  ]) {
+    await t.test(scenario.name, async () => {
+      let adoptionReads = 0;
+      const executor: ExternalActionExecutor = {
+        async execute({ markDispatched }) { await markDispatched(); throw new Error("response lost"); },
+        async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" }; },
+        async adopt({ externalStableId, contentDigest }) {
+          adoptionReads += 1;
+          return { outcome: "verified", targetStableId: externalStableId, contentDigest, checkedAt: "2026-08-18T04:00:30.000Z" };
+        },
+      };
+      const fixture = await unknownActionForAdoption(executor);
+      await assert.rejects(adoptVerifiedExternalAction({
+        root: fixture.root,
+        workItemId: fixture.workItemId,
+        requestId: fixture.requestId,
+        expectedRequestDigest: fixture.unknown.request.requestDigest,
+        externalStableId: "github-comment:4242",
+        contentDigest: fixture.unknown.request.expectedContentDigest,
+        evidence: "平台只读回查证据",
+        actor: "maintainer",
+        now: "2026-08-18T04:00:30.000Z",
+        terminal: { isTTY: true },
+        executor,
+        ...scenario.override,
+      }), (error: unknown) => error instanceof ExternalActionError
+        && error.code === "WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID");
+      assert.equal(adoptionReads, 0);
+      assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId]?.status, "reconciliation_required");
+    });
+  }
+});
+
+test("adopt_verified rejects workspace drift before Provider readback", async () => {
+  let adoptionReads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("response lost"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" }; },
+    async adopt({ externalStableId, contentDigest }) {
+      adoptionReads += 1;
+      return { outcome: "verified", targetStableId: externalStableId, contentDigest, checkedAt: "2026-08-18T04:00:30.000Z" };
+    },
+  };
+  const fixture = await unknownActionForAdoption(executor);
+  const state = await loadApplicationState(fixture.root, fixture.workItemId);
+  await writeFile(path.join(state.worktree, "adoption-workspace-drift.txt"), "changed after approval\n", "utf8");
+
+  await assert.rejects(adoptVerifiedExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: fixture.requestId,
+    expectedRequestDigest: fixture.unknown.request.requestDigest,
+    externalStableId: "github-comment:4242",
+    contentDigest: fixture.unknown.request.expectedContentDigest,
+    evidence: "平台只读回查证据",
+    actor: "maintainer",
+    now: "2026-08-18T04:00:30.000Z",
+    terminal: { isTTY: true },
+    executor,
+  }), (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_GRANT_MISMATCH");
+  assert.equal(adoptionReads, 0);
+  assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId]?.status, "reconciliation_required");
+});
+
+test("adopt_verified rejects a replaced active Attempt before Provider readback", async () => {
+  let adoptionReads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("response lost"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" }; },
+    async adopt({ externalStableId, contentDigest }) {
+      adoptionReads += 1;
+      return { outcome: "verified", targetStableId: externalStableId, contentDigest, checkedAt: "2026-08-18T04:00:30.000Z" };
+    },
+  };
+  const fixture = await unknownActionForAdoption(executor);
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:replace-adoption-attempt:${fixture.requestId}`,
+    operationInput: { requestId: fixture.requestId },
+    mutate: (projection) => {
+      const stepId = fixture.unknown.request.stepId;
+      const claim = projection.claims[stepId];
+      const context = projection.contexts[stepId] as { workPackage?: { attemptId: string } } | undefined;
+      assert.ok(claim);
+      assert.ok(context?.workPackage);
+      const attemptId = `${claim.attemptId}-replacement`;
+      return {
+        projection: {
+          ...projection,
+          claims: { ...projection.claims, [stepId]: { ...claim, attemptId } },
+          contexts: {
+            ...projection.contexts,
+            [stepId]: { ...context, workPackage: { ...context.workPackage, attemptId } },
+          },
+        },
+        value: null,
+      };
+    },
+  });
+
+  await assert.rejects(adoptVerifiedExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: fixture.requestId,
+    expectedRequestDigest: fixture.unknown.request.requestDigest,
+    externalStableId: "github-comment:4242",
+    contentDigest: fixture.unknown.request.expectedContentDigest,
+    evidence: "平台只读回查证据",
+    actor: "maintainer",
+    now: "2026-08-18T04:00:30.000Z",
+    terminal: { isTTY: true },
+    executor,
+  }), (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH");
+  assert.equal(adoptionReads, 0);
+  assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId]?.status, "reconciliation_required");
+});
+
+test("builtin Feishu adoption authoritatively fetches a created document by supplied stable token", async () => {
+  const fixture = await externalActionFixture();
+  const markdown = "Published body\n";
+  const input = prepareInput(fixture.root, fixture.workPackage, {
+    provider: "feishu",
+    action: "knowledge.publish",
+    target: { kind: "knowledge", stableId: "feishu-target:folderToken123456" },
+    payload: {
+      target: { folderToken: "folderToken123456", title: "Published title", markdown },
+      binding: {},
+    },
+    expectedContentDigest: sha256(markdown) as `sha256:${string}`,
+  });
+  const prepared = await prepareExternalAction(input);
+  assert.equal(prepared.status, "prepared");
+  if (prepared.status !== "prepared") throw new Error("expected prepared action");
+  const approved = await approveExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: prepared.request.requestId,
+    expectedRequestDigest: prepared.request.requestDigest,
+    actor: "maintainer",
+    approvalDigest: prepared.request.requestDigest,
+    profile: prepared.request.profile,
+    profileDigest: prepared.request.profileDigest,
+    workspaceDigest: prepared.request.workspaceDigest,
+    configDigest: prepared.request.configDigest,
+    decidedAt: "2026-08-18T04:00:10.000Z",
+    expiresAt: "2026-08-18T04:00:50.000Z",
+    terminal: { isTTY: true },
+  });
+  const lark = await realpath(path.resolve(import.meta.dirname, "../fixtures/bin/lark-cli"));
+  const executor = createBuiltinExternalExecutor({
+    executables: { git: "/usr/bin/git", gh: "/usr/bin/gh", glab: "/usr/bin/glab", "lark-cli": lark },
+    larkIdentity: "user",
+  }, "feishu", "knowledge.publish");
+  assert.ok(executor.adopt);
+  const readBack = await executor.adopt({
+    root: fixture.root,
+    request: approved.request,
+    grant: approved.grant,
+    externalStableId: "feishu:createdDocumentToken123",
+    contentDigest: approved.request.expectedContentDigest,
+  });
+  assert.deepEqual(readBack, {
+    outcome: "verified",
+    targetStableId: "feishu:createdDocumentToken123",
+    contentDigest: approved.request.expectedContentDigest,
+    checkedAt: (readBack as { checkedAt: string }).checkedAt,
+  });
 });
 
 test("Provider errors and reconciliation reasons never expose credentials in errors, events, or projection", async (t) => {
@@ -430,6 +916,46 @@ test("expired-Lease recovery discards a proven not-sent action before creating a
   assert.equal(replacementApproval.action, "await_approval");
 });
 
+test("expired-Lease recovery permits rejecting a replacement request with the stable request ID", async () => {
+  const fixture = await applicationExternalActionFixture({
+    async execute() { throw new Error("must not execute"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "rejected", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+
+  await recoverControlPlane({ cwd: fixture.root, workItemId: fixture.workItemId });
+  const replacement = await fixture.app.acquire({ root: fixture.root, workItemId: fixture.workItemId, actor: "codex" });
+  assert.equal(replacement.action, "execute");
+  if (replacement.action !== "execute") throw new Error("expected replacement Attempt");
+  const replacementApproval = await fixture.app.submit({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    stepId: replacement.workPackage.stepId,
+    attemptId: replacement.workPackage.attemptId,
+    leaseToken: replacement.workPackage.lease.token,
+    result: fixture.result,
+  });
+  assert.equal(replacementApproval.action, "await_approval");
+  if (replacementApproval.action !== "await_approval") throw new Error("expected replacement approval");
+  assert.equal(replacementApproval.approval.requestId, pending.approval.requestId);
+  assert.notEqual(replacementApproval.approval.digest, pending.approval.digest);
+
+  const rejected = await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: replacementApproval.approval.requestId, decision: "rejected",
+    expectedDigest: replacementApproval.approval.digest, actor: "maintainer",
+  });
+  assert.equal(rejected.action, "blocked");
+  if (rejected.action !== "blocked") throw new Error("expected durable rejection");
+  assert.equal(rejected.problems[0]?.code, "WSSPEC_EXTERNAL_ACTION_REJECTED");
+});
+
 test("expired-Lease recovery renews the original post-dispatch Attempt for reconciliation receipt adoption", async () => {
   let writes = 0;
   const fixture = await applicationExternalActionFixture({
@@ -455,7 +981,7 @@ test("expired-Lease recovery renews the original post-dispatch Attempt for recon
   assert.ok(new Date(recovered.claims[fixture.workPackage.stepId]!.expiresAt) > new Date());
   const resumed = await fixture.app.decide({
     kind: "external_reconciliation", root: fixture.root, workItemId: fixture.workItemId,
-    requestId: pending.approval.requestId, actor: "codex",
+    requestId: pending.approval.requestId, decision: "reconcile", expectedDigest: pending.approval.digest, actor: "codex",
   });
   assert.equal(resumed.action, "execute");
   if (resumed.action !== "execute") throw new Error("expected original Attempt receipt adoption");

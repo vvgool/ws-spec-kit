@@ -234,7 +234,7 @@ test("application submit exposes a payload-free external approval and decide res
     async execute({ request, markDispatched }) {
       await markDispatched();
       writes += 1;
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
+      return { targetStableId: request.target.stableId, publishedContentDigest: request.expectedContentDigest, readBackContentDigest: request.expectedContentDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
     },
     async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
   });
@@ -299,7 +299,7 @@ test("an approved external action cannot execute after the workspace changes", a
   const fixture = await applicationExternalActionFixture({
     async execute({ request }) {
       writes += 1;
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
+      return { targetStableId: request.target.stableId, publishedContentDigest: request.expectedContentDigest, readBackContentDigest: request.expectedContentDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
     },
     async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
   });

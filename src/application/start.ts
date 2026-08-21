@@ -13,7 +13,12 @@ import { selectProfile } from "../policy/profile.js";
 import type { StartInput, StartResult, WorkflowProfile } from "../protocol/application.js";
 import type { ResolvedSkillDescriptor } from "../protocol/work-package.js";
 import { captureLocalRequirement } from "../registry/connectors/local-requirement.js";
-import { captureBuiltinConnectorSource, type BuiltinConnectorRuntime } from "../registry/connectors/runtime.js";
+import {
+  captureBuiltinConnectorSource,
+  normalizeBuiltinKnowledgeTarget,
+  type BuiltinConnectorRuntime,
+  type BuiltinKnowledgeTargetInput,
+} from "../registry/connectors/runtime.js";
 import { createSkillLock } from "../registry/skills/lock.js";
 import { resolveSkill } from "../registry/skills/resolver.js";
 import type { AdditionalGlobalRoot, ResolvedSkill, SkillProvider } from "../registry/skills/types.js";
@@ -53,6 +58,7 @@ export interface ProjectConfiguration {
   additionalGlobalRoots?: AdditionalGlobalRoot[];
   worktreeRoot: string;
   branchPrefix: string;
+  knowledgeTarget?: BuiltinKnowledgeTargetInput;
 }
 
 function allWorkflowSteps(steps: readonly WorkflowStep[]): WorkflowStep[] {
@@ -88,6 +94,9 @@ export function projectConfiguration(raw: unknown, pkg: WorkflowPackage): Projec
   const git = record(source.git);
   const worktrees = record(git?.worktrees);
   const documentation = record(source.documentation);
+  const publishing = record(source.publishing);
+  const targets = record(publishing?.targets);
+  const knowledge = record(targets?.knowledge);
   const skills = record(source.skills);
   return {
     leaseTtlSeconds: typeof claimTtlSeconds === "number" && Number.isInteger(claimTtlSeconds) && claimTtlSeconds >= 60 ? claimTtlSeconds : 60,
@@ -97,6 +106,9 @@ export function projectConfiguration(raw: unknown, pkg: WorkflowPackage): Projec
     ...(skills?.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: additionalGlobalRootsFromConfig(source) }),
     worktreeRoot: typeof worktrees?.root === "string" ? worktrees.root : ".worktrees",
     branchPrefix: typeof worktrees?.branchPrefix === "string" ? worktrees.branchPrefix : "wspec/",
+    ...(knowledge === undefined ? {} : {
+      knowledgeTarget: { provider: knowledge.provider as "feishu", document: knowledge.document as string },
+    }),
   };
 }
 
@@ -228,6 +240,14 @@ export async function startApplication(input: StartInput, dependencies: StartDep
   }
   const requestedProfile = input.profile ?? projectWorkflow.profile;
   const selected = requestedProfile === "auto" ? selectProfile({ mode: "auto", phase: "intake", risk: null }).id : requestedProfile;
+  if (profiles[selected].publishing.knowledgeRequired && configuration.knowledgeTarget === undefined) {
+    throw new ApplicationStartError("WSSPEC_KNOWLEDGE_TARGET_REQUIRED", "当前 Profile 要求配置并验证 Knowledge 发布目标。 ");
+  }
+  const knowledgeTarget = configuration.knowledgeTarget === undefined
+    ? undefined
+    : dependencies.connectorRuntime === undefined
+      ? (() => { throw new ApplicationStartError("WSSPEC_KNOWLEDGE_TARGET_UNAVAILABLE", "Knowledge 目标缺少已配置的 Builtin Connector Runtime。 "); })()
+      : await normalizeBuiltinKnowledgeTarget(configuration.knowledgeTarget, dependencies.connectorRuntime);
   const requirement = input.source.type === "issue"
     ? dependencies.connectorRuntime === undefined
       ? (() => { throw new ApplicationStartError("WSSPEC_SOURCE_TYPE_UNSUPPORTED", "外部需求来源缺少已配置的 Builtin Connector Runtime。 "); })()
@@ -325,8 +345,16 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       digest: sourceReference.contentHash,
     };
     const issueBinding = requirement.type === "github.issue" || requirement.type === "gitlab.issue"
-      ? { exists: true as const, stableId: requirement.stableId, externalWorkItemId: workItemId }
+      ? {
+          exists: true as const,
+          provider: requirement.type === "github.issue" ? "github" as const : "gitlab" as const,
+          stableId: requirement.stableId,
+          externalWorkItemId: workItemId,
+        }
       : { exists: false as const };
+    const knowledgeBinding = knowledgeTarget === undefined
+      ? { exists: false as const }
+      : { exists: true as const, ...knowledgeTarget, externalWorkItemId: workItemId };
     await mutateControlPlane({
       cwd: identity.repositoryRoot,
       workItemId,
@@ -338,7 +366,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
           ...projection,
           evidence: {
             ...projection.evidence,
-            bindings: { issue: issueBinding, knowledge: { exists: false } },
+            bindings: { issue: issueBinding, knowledge: knowledgeBinding },
           },
         },
         value: sourceEventReference,

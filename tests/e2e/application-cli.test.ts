@@ -13,10 +13,16 @@ interface RunningCli { result: Promise<CliResult> }
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 
-function startCli(cwd: string, args: string[], home: string, entrypoint = path.join(repositoryRoot, "src/cli/main.ts")): RunningCli {
+function startCli(
+  cwd: string,
+  args: string[],
+  home: string,
+  entrypoint = path.join(repositoryRoot, "src/cli/main.ts"),
+  environment: Record<string, string> = {},
+): RunningCli {
   const child = spawn(process.execPath, ["--import", path.join(repositoryRoot, "node_modules/tsx/dist/loader.mjs"), entrypoint, ...args], {
     cwd,
-    env: { ...process.env, HOME: home },
+    env: { ...process.env, HOME: home, ...environment },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const result = new Promise<CliResult>((resolve, reject) => {
@@ -30,8 +36,14 @@ function startCli(cwd: string, args: string[], home: string, entrypoint = path.j
   return { result };
 }
 
-async function runCli(cwd: string, args: string[], home: string, entrypoint = path.join(repositoryRoot, "src/cli/main.ts")): Promise<CliResult> {
-  return startCli(cwd, args, home, entrypoint).result;
+async function runCli(
+  cwd: string,
+  args: string[],
+  home: string,
+  entrypoint = path.join(repositoryRoot, "src/cli/main.ts"),
+  environment: Record<string, string> = {},
+): Promise<CliResult> {
+  return startCli(cwd, args, home, entrypoint, environment).result;
 }
 
 async function waitForWorktree(root: string): Promise<{ workItemId: string; worktree: string }> {
@@ -97,6 +109,75 @@ test("核心 CLI 的 value option 拒绝缺值、相邻 option 与重复项，�
     assert.match(`${result.stdout}${result.stderr}`, new RegExp(current.code), current.args.join(" "));
   }
   await assert.rejects(access(path.join(root, "--dry-run", "SKILL.md")), /ENOENT/);
+});
+
+test("CLI start 暴露明确的外部 Source 合同并拒绝歧义组合", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-cli-home-"));
+  const accepted = [
+    ["start", "--source-provider", "github", "--source-id", "https://github.example.com/acme/widget/issues/7"],
+    ["start", "--source-id", "https://gitlab.example.com/group/service/-/issues/9", "--source-provider", "gitlab", "--source-url", "https://gitlab.example.com/group/service/-/issues/9"],
+    ["start", "--source-provider", "feishu", "--source-id", "https://tenant.feishu.cn/docx/sourceDocumentToken123"],
+  ];
+  for (const args of accepted) {
+    const result = await runCli(root, args, home);
+    assert.equal(result.code, 1, args.join(" "));
+    assert.match(result.stdout, /WSSPEC_REPOSITORY_NOT_INITIALIZED/u, args.join(" "));
+    assert.doesNotMatch(result.stdout, /WSSPEC_ARGUMENT_INVALID/u, args.join(" "));
+  }
+
+  const rejected = [
+    ["start", "--source-provider", "github"],
+    ["start", "--source-id", "https://github.example.com/acme/widget/issues/7"],
+    ["start", "--source-provider", "unknown", "--source-id", "https://example.com/item/1"],
+    ["start", "--prompt", "歧义", "--source-provider", "github", "--source-id", "https://github.example.com/acme/widget/issues/7"],
+    ["start", "--source-provider", "github", "--source-id", "https://github.example.com/acme/widget/issues/7", "--source-url", "https://github.example.com/acme/widget/issues/8"],
+  ];
+  for (const args of rejected) {
+    const result = await runCli(root, args, home);
+    assert.equal(result.code, 1, args.join(" "));
+    const output = JSON.parse(result.stdout) as { error: { code: string; message: string } };
+    assert.equal(output.error.code, "WSSPEC_ARGUMENT_INVALID", args.join(" "));
+    assert.match(output.error.message, /外部来源|start|Source|Provider/u, args.join(" "));
+  }
+});
+
+test("CLI start reaches the default GitHub/GitLab runtime and exposes fixed authentication failures", async (t) => {
+  for (const scenario of [
+    {
+      provider: "github",
+      executable: "gh",
+      source: "https://github.example.com/unauthorized/widget/issues/7",
+    },
+    {
+      provider: "gitlab",
+      executable: "glab",
+      source: "https://gitlab.example.com/unauthorized/service/-/issues/9",
+    },
+  ]) {
+    await t.test(scenario.provider, async () => {
+      const root = await createGitRepository();
+      await initRepository(root);
+      const home = await mkdtemp(path.join(os.tmpdir(), "wspec-cli-home-"));
+      const bin = path.join(home, "bin");
+      await mkdir(bin, { recursive: true });
+      await cp(path.join(repositoryRoot, "tests/fixtures/bin", scenario.executable), path.join(bin, scenario.executable));
+      const result = await runCli(root, [
+        "start",
+        "--source-provider", scenario.provider,
+        "--source-id", scenario.source,
+        "--profile", "standard",
+      ], home, path.join(repositoryRoot, "src/cli/main.ts"), {
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      });
+      assert.equal(result.code, 1);
+      assert.equal(result.stderr, "");
+      const output = JSON.parse(result.stdout) as { ok: boolean; error: { code: string; message: string } };
+      assert.equal(output.ok, false);
+      assert.equal(output.error.code, "WSSPEC_ISSUE_UNAUTHENTICATED");
+      assert.match(output.error.message, /未认证/u);
+    });
+  }
 });
 
 test("CLI 对 malformed result JSON 只输出固定 internal 错误且不泄露 parser 详情", async () => {

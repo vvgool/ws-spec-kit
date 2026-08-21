@@ -34,6 +34,13 @@
       "type": "string",
       "minLength": 1
     },
+    "externalEffectKind": {
+      "const": "issue.comment"
+    },
+    "externalEffectId": {
+      "type": "string",
+      "pattern": "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$"
+    },
     "externalWorkItemId": {
       "type": "string",
       "minLength": 1
@@ -68,5 +75,35 @@
         "failed"
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "externalEffectKind": {
+            "const": "issue.comment"
+          }
+        },
+        "required": [
+          "externalEffectKind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "externalEffectId": {
+            "type": "string",
+            "pattern": "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$"
+          }
+        },
+        "required": [
+          "externalEffectId"
+        ]
+      },
+      "else": {
+        "properties": {
+          "externalEffectId": false
+        }
+      }
+    }
+  ]
 }

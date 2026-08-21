@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
 import { loadApplicationState } from "../../../src/application/state.js";
 import { runWorkflowCommand } from "../../../src/adapters/cli/workflow.js";
-import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
-import { computeWorkspaceTreeDigest } from "../../../src/domain/digests.js";
+import { computeArtifactContentHash, readArtifact } from "../../../src/domain/artifacts.js";
+import { computeWorkspaceTreeDigest, sha256 } from "../../../src/domain/digests.js";
+import { createExternalBinding } from "../../../src/domain/external-receipt.js";
 import { checkDocumentationIntegrity } from "../../../src/engine/docs-integrity.js";
 import { parseTrustedEvidence } from "../../../src/engine/tdd/red-gate.js";
 import { evidenceProjectionKey, evidenceRecordHash } from "../../../src/engine/verification.js";
@@ -15,6 +17,9 @@ import type { AgentAction, StartResult, SubmitResult } from "../../../src/protoc
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
 import { ExecutorRegistry, type StepExecutor } from "../../../src/registry/executors/registry.js";
 import type { ExternalActionExecutor } from "../../../src/application/external-action.js";
+import { createBuiltinExternalExecutor } from "../../../src/registry/connectors/external-executor.js";
+import { canonicalRequirementText } from "../../../src/registry/connectors/local-requirement.js";
+import type { BuiltinConnectorRuntime } from "../../../src/registry/connectors/runtime.js";
 import { readControlPlane, type RuntimeProjection } from "../../../src/storage/control-plane.js";
 import { readEvents, type StoredEvent } from "../../../src/storage/events.js";
 import { initRepository } from "../../../src/storage/repository.js";
@@ -22,6 +27,9 @@ import { createGitRepository, git } from "../../integration/helpers/git.js";
 
 type App = ReturnType<typeof createApplication>;
 type ProfileId = "quick" | "standard" | "governed";
+const fixtureRoot = path.resolve(import.meta.dirname, "../../fixtures");
+const knowledgeDocumentToken = "targetDocumentToken123";
+const knowledgeStableId = `feishu:${knowledgeDocumentToken}`;
 
 export interface WorkflowFixture {
   root: string;
@@ -143,11 +151,12 @@ function fixtureExecutors(input: { root: string; externalTargets: boolean; docum
     }
     registry.register(executor(id, securityClass, async (_result, runtime) => {
       if (id === "connector.execute/requirement.capture" && input.externalTargets) {
+        const currentBindings = runtime.evidence.bindings as Record<string, unknown> | undefined;
         runtime.evidence = {
           ...runtime.evidence,
           bindings: {
+            ...currentBindings,
             issue: { exists: true, stableId: "local:issue", externalWorkItemId: runtime.workItemId },
-            knowledge: { exists: true, stableId: "local:knowledge", externalWorkItemId: runtime.workItemId },
           },
         };
       }
@@ -182,7 +191,8 @@ function fixtureExternalExecutor(externalRoot: string, now: () => Date): Externa
       assert.deepEqual(stored, expected);
       return {
         targetStableId: request.target.stableId,
-        contentDigest: request.payloadDigest,
+        publishedContentDigest: request.expectedContentDigest,
+        readBackContentDigest: request.expectedContentDigest,
         verifiedAt: now().toISOString(),
       };
     },
@@ -205,7 +215,7 @@ function fixtureExternalExecutor(externalRoot: string, now: () => Date): Externa
   };
 }
 
-function projectConfig(documentation: boolean): Record<string, unknown> {
+function projectConfig(documentation: boolean, externalTargets: boolean): Record<string, unknown> {
   const gate = {
     test: {
       command: [process.execPath, "--test", "tests/workflow-feature.test.mjs"],
@@ -223,6 +233,9 @@ function projectConfig(documentation: boolean): Record<string, unknown> {
     testing: { pathRules: ["node", "java", "ruby", "dotnet"], testAssetPaths: ["tests/**"], productPaths: ["src/**"] },
     ...(documentation ? {} : { quality: { gates: gate } }),
     ...(documentation ? { documentation: { allowedPaths: ["README*.md", "CHANGELOG*.md", "docs/**/*.md", "docs/**/*.mdx", "docs/**/*.txt"] } } : {}),
+    ...(externalTargets ? {
+      publishing: { targets: { knowledge: { provider: "feishu", document: knowledgeDocumentToken } } },
+    } : {}),
   };
 }
 
@@ -265,14 +278,32 @@ export async function createWorkflowFixture(options: { externalTargets?: boolean
   const root = await createGitRepository();
   const externalRoot = path.join(os.tmpdir(), `wspec-external-${crypto.randomUUID()}`);
   await mkdir(externalRoot, { recursive: true });
+  const bin = path.join(externalRoot, "bin");
+  await mkdir(bin, { recursive: true });
+  const larkExecutable = path.join(bin, "lark-cli");
+  await copyFile(path.join(fixtureRoot, "connectors/feishu/lark-cli"), larkExecutable);
+  await chmod(larkExecutable, 0o700);
+  await writeFile(path.join(externalRoot, "feishu-target.json"), `${JSON.stringify({
+    title: "Local workflow publication",
+    markdown: "Initial local workflow publication.\n",
+  }, null, 2)}\n`, "utf8");
+  const gitExecutable = await realpath(execFileSync("/usr/bin/env", ["which", "git"], { encoding: "utf8" }).trim());
+  const connectorRuntime: BuiltinConnectorRuntime = {
+    executables: { git: gitExecutable, gh: gitExecutable, glab: gitExecutable, "lark-cli": larkExecutable },
+    environments: { feishu: { HOME: externalRoot } },
+    larkIdentity: "user",
+  };
   await initRepository(root);
   await mkdir(path.join(root, "src"), { recursive: true });
   await writeFile(path.join(root, "src", "feature.mjs"), "export const value = 0;\n", "utf8");
   await writeFile(path.join(root, "package.json"), "{\"name\":\"fixture\",\"version\":\"1.0.0\"}\n", "utf8");
   await writeFile(path.join(root, "tsconfig.json"), "{\"compilerOptions\":{\"strict\":true}}\n", "utf8");
-  await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify(projectConfig(options.documentation === true), null, 2)}\n`, "utf8");
+  await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify(projectConfig(
+    options.documentation === true,
+    options.externalTargets === true,
+  ), null, 2)}\n`, "utf8");
   const ignored = await readFile(path.join(root, ".gitignore"), "utf8");
-  await writeFile(path.join(root, ".gitignore"), `${ignored}tests/ignored-late.json\n`, "utf8");
+  await writeFile(path.join(root, ".gitignore"), `${ignored}tests/ignored-late.json\n.wsspec/work-items/\n`, "utf8");
   await git(root, "add", ".wsspec", "src/feature.mjs", "package.json", "tsconfig.json", ".gitignore");
   await git(root, "commit", "-m", "test: seed local workflow fixture");
 
@@ -283,7 +314,10 @@ export async function createWorkflowFixture(options: { externalTargets?: boolean
     terminal: { isTTY: true },
     now: () => new Date(now),
     executors: fixtureExecutors({ root, externalTargets: options.externalTargets === true, documentation: options.documentation === true }),
-    externalExecutor: () => fixtureExternalExecutor(externalRoot, () => new Date(now)),
+    connectorRuntime,
+    externalExecutor: (provider, action) => action === "git.commit"
+      ? createBuiltinExternalExecutor(connectorRuntime, provider, action)
+      : fixtureExternalExecutor(externalRoot, () => new Date(now)),
   });
   const fixture: WorkflowFixture = {
     root,
@@ -396,6 +430,81 @@ async function submit(fixture: WorkflowFixture, pkg: WorkPackage, result: Submit
   });
 }
 
+async function gitCommitIntent(input: {
+  worktree: string;
+  files: string[];
+  message: string;
+}): Promise<Record<string, unknown>> {
+  const baselineRevision = await git(input.worktree, "rev-parse", "HEAD");
+  const repositoryCommonDir = await realpath(await git(input.worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+  const gitExecutable = await realpath(execFileSync("/usr/bin/env", ["which", "git"], { encoding: "utf8" }).trim());
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "wspec-workflow-approval-"));
+  const index = path.join(temporary, "index");
+  const pathspec = path.join(temporary, "pathspec");
+  const environment = { PATH: "/usr/bin:/bin", GIT_INDEX_FILE: index };
+  let diffDigest: string;
+  try {
+    await writeFile(pathspec, Buffer.from(`${input.files.join("\0")}\0`, "utf8"));
+    execFileSync(gitExecutable, ["read-tree", baselineRevision], { cwd: input.worktree, env: environment });
+    execFileSync(gitExecutable, [
+      "--literal-pathspecs", "add", "--all", `--pathspec-from-file=${pathspec}`, "--pathspec-file-nul",
+    ], { cwd: input.worktree, env: environment });
+    diffDigest = sha256(execFileSync(gitExecutable, [
+      "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames",
+      "--src-prefix=a/", "--dst-prefix=b/", baselineRevision, "--",
+    ], { cwd: input.worktree, env: environment }));
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+  const approval = {
+    repositoryRoot: await realpath(input.worktree),
+    repositoryCommonDir,
+    baselineRevision,
+    files: input.files,
+    message: input.message,
+    diffDigest,
+  };
+  return {
+    kind: "external-action",
+    provider: "git-native",
+    action: "git.commit",
+    target: { kind: "repository", stableId: repositoryCommonDir },
+    payload: approval,
+    sideEffects: ["提交批准文件并移动当前 Work Item worktree HEAD"],
+  };
+}
+
+async function knowledgePublishIntent(pkg: WorkPackage, worktree: string): Promise<Record<string, unknown>> {
+  const publicationArtifacts = pkg.artifacts.filter(({ artifactType }) => artifactType !== "requirement-source");
+  assert.equal(publicationArtifacts.length, 1);
+  const publication = publicationArtifacts[0];
+  assert.ok(publication?.path);
+  const markdown = canonicalRequirementText((await readArtifact(path.join(worktree, publication.path))).body);
+  const discoveryBinding = {
+    exists: true,
+    provider: "feishu",
+    stableId: knowledgeStableId,
+    externalWorkItemId: pkg.workItemId,
+  };
+  const binding = createExternalBinding({
+    target: "knowledge",
+    workPackage: pkg,
+    discoveryBinding,
+    expectedPublishedContentDigest: sha256(markdown),
+  });
+  return {
+    kind: "external-action",
+    provider: "feishu",
+    action: "knowledge.publish",
+    target: { kind: "knowledge", stableId: knowledgeStableId },
+    payload: {
+      target: { documentToken: knowledgeDocumentToken, title: "Local workflow publication", markdown },
+      binding,
+    },
+    sideEffects: ["更新本地知识目标"],
+  };
+}
+
 export async function interruptAfterAcquire(
   fixture: WorkflowFixture,
   started: StartResult,
@@ -460,9 +569,12 @@ export async function executeFeatureWorkflow(
     if (action.action === "await_approval") {
       const beforeDecision = await readControlPlane(fixture.root, started.workItemId);
       const approval = beforeDecision.approvals[action.approval.requestId];
+      const approvalStepId = action.approval.kind === "external_action"
+        ? beforeDecision.externalActions[action.approval.requestId]?.request.stepId
+        : approval?.stageId;
       action = await approve(fixture, started.workItemId, action);
       if (!approvalInterrupted && options.interruptAfterApprovalStep !== undefined
-        && approval?.stageId === options.interruptAfterApprovalStep) {
+        && approvalStepId === options.interruptAfterApprovalStep) {
         assert.equal(action.action, "execute");
         if (action.action !== "execute") throw new Error("expected active Attempt after governed approval");
         const interrupted = action.workPackage;
@@ -533,26 +645,37 @@ export async function executeFeatureWorkflow(
       }
       modifiedFiles = ["src/feature.mjs"];
     } else if (pkg.stepId === "commit") {
-      await git(worktree, "add", "src/feature.mjs", "tests/workflow-feature.test.mjs");
-      await git(worktree, "commit", "-m", "fixture: complete local feature");
+      externalWrites = [await gitCommitIntent({
+        worktree,
+        files: ["src/feature.mjs", "tests/workflow-feature.test.mjs"],
+        message: "fixture: complete local feature",
+      })];
     } else if (options.externalTargets === true && ["update-issue", "update-wiki"].includes(pkg.stepId)) {
       const target = pkg.stepId === "update-wiki" ? "knowledge" : "issue";
       const actionName = target === "knowledge" ? "knowledge.publish" : "issue.update";
-      externalWrites = [{
-        kind: "external-action",
-        provider: "local-fixture",
-        action: actionName,
-        target: { kind: target, stableId: `local:${target}` },
-        payload: { summary: `${pkg.stepId} local publication`, artifactDigests: pkg.artifacts.map(({ contentHash }) => contentHash) },
-        sideEffects: [target === "knowledge" ? "更新本地知识目标" : "更新本地 Issue 目标"],
-      }];
+      externalWrites = target === "knowledge"
+        ? [await knowledgePublishIntent(pkg, worktree)]
+        : [{
+            kind: "external-action",
+            provider: "local-fixture",
+            action: actionName,
+            target: { kind: target, stableId: `local:${target}` },
+            payload: {
+              target: { stableId: "local:issue" },
+              action: { type: "body", body: `${pkg.stepId} local publication` },
+            },
+            sideEffects: ["更新本地 Issue 目标"],
+          }];
     } else if (options.externalTargets === true && pkg.stepId === "close-issue") {
       externalWrites = [{
         kind: "external-action",
         provider: "local-fixture",
         action: "issue.close",
         target: { kind: "issue", stableId: "local:issue" },
-        payload: { summary: "close local issue after verified delivery" },
+        payload: {
+          target: { stableId: "local:issue" },
+          action: { type: "issue.close" },
+        },
         sideEffects: ["关闭本地 Issue 目标"],
       }];
     }
@@ -716,7 +839,7 @@ export async function executeDocumentationWorkflow(
     let modifiedFiles: string[] = [];
     if (pkg.stepId === "edit-document") {
       assert.ok(pkg.constraints.allowedPaths.every((allowed) => allowed.includes("README") || allowed.includes("CHANGELOG") || allowed.startsWith("docs/")));
-      await writeFile(path.join(fixture.root, ".wsspec", "config.yaml"), `${JSON.stringify(projectConfig(false), null, 2)}\n`, "utf8");
+      await writeFile(path.join(fixture.root, ".wsspec", "config.yaml"), `${JSON.stringify(projectConfig(false, false), null, 2)}\n`, "utf8");
       await runWorkflowCommand({
         root: fixture.root,
         argv: ["use", "builtin://workflows/feature-delivery", "--profile", "quick"],
@@ -740,9 +863,6 @@ export async function executeDocumentationWorkflow(
       await mkdir(path.join(worktree, "docs"), { recursive: true });
       await writeFile(path.join(worktree, "docs", "local-guide.md"), "# Local Guide\n\nUse the local fixture.\n", "utf8");
       modifiedFiles = ["docs/local-guide.md"];
-    } else if (pkg.stepId === "commit") {
-      await git(worktree, "add", "docs/local-guide.md");
-      await git(worktree, "commit", "-m", "docs: add local guide");
     }
     for (const { artifactType } of pkg.requiredOutputs) {
       if (artifactType === "requirement-source") {
@@ -753,7 +873,10 @@ export async function executeDocumentationWorkflow(
         refs.push(await writeArtifact(worktree, pkg, artifactType, true));
       }
     }
-    action = await submit(fixture, pkg, completed(pkg, refs, modifiedFiles));
+    const externalWrites = pkg.stepId === "commit"
+      ? [await gitCommitIntent({ worktree, files: ["docs/local-guide.md"], message: "docs: add local guide" })]
+      : [];
+    action = await submit(fixture, pkg, completed(pkg, refs, modifiedFiles, externalWrites));
     if (options.interruptAfterLoopSubmit === true && !loopInterrupted && pkg.stepId.endsWith(":review")) {
       assert.equal(action.action, "execute");
       if (action.action !== "execute") throw new Error("expected commit after approved documentation review");

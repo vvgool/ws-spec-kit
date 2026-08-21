@@ -216,7 +216,27 @@
       "properties": {
         "targets": {
           "type": "object",
-          "additionalProperties": false
+          "additionalProperties": false,
+          "properties": {
+            "knowledge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "provider",
+                "document"
+              ],
+              "properties": {
+                "provider": {
+                  "const": "feishu"
+                },
+                "document": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              }
+            }
+          }
         }
       }
     },

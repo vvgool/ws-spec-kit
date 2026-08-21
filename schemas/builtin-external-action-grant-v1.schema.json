@@ -16,6 +16,7 @@
     "securityClass",
     "target",
     "payloadDigest",
+    "expectedContentDigest",
     "payloadArtifactDigest",
     "bindingDigest",
     "inputDigest",
@@ -65,13 +66,17 @@
     },
     "action": {
       "enum": [
+        "git.commit",
         "issue.update",
         "knowledge.publish",
         "issue.close"
       ]
     },
     "securityClass": {
-      "const": "external-write"
+      "enum": [
+        "local-write",
+        "external-write"
+      ]
     },
     "target": {
       "type": "object",
@@ -83,6 +88,7 @@
       "properties": {
         "kind": {
           "enum": [
+            "repository",
             "issue",
             "knowledge"
           ]
@@ -90,11 +96,18 @@
         "stableId": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 512
+          "maxLength": 4096
         }
       }
     },
+    "externalEffectKind": {
+      "const": "issue.comment"
+    },
     "payloadDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "expectedContentDigest": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     },
@@ -162,5 +175,124 @@
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "externalEffectKind": {
+            "const": "issue.comment"
+          }
+        },
+        "required": [
+          "externalEffectKind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "action": {
+            "const": "issue.update"
+          },
+          "securityClass": {
+            "const": "external-write"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "issue"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "knowledge.publish"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "securityClass": {
+            "const": "external-write"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "knowledge"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "issue.update",
+              "issue.close"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "securityClass": {
+            "const": "external-write"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "issue"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "git.commit"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "git-native"
+          },
+          "securityClass": {
+            "const": "local-write"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "repository"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

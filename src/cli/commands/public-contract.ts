@@ -12,7 +12,7 @@ export interface PublicCliRouteDescriptor {
 
 export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Object.freeze([
   { command: "init", usage: "wspec init" },
-  { command: "start", usage: "wspec start --prompt <需求> [--workflow <引用>] [--profile <档位>]" },
+  { command: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { command: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
   { command: "submit", usage: "wspec submit <workItemId> --step <步骤> --attempt <尝试> --lease <令牌> --result <结果文件>" },
   { command: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },
@@ -24,7 +24,7 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
 
 export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Object.freeze([
   { route: "init", usage: "wspec init" },
-  { route: "start", usage: "wspec start --prompt <需求> [--workflow <引用>] [--profile <档位>]" },
+  { route: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { route: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
   { route: "submit", usage: "wspec submit <workItemId> --step <步骤> --attempt <尝试> --lease <令牌> --result <结果文件>" },
   { route: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },

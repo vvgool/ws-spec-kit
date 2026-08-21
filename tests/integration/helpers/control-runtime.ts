@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -29,6 +29,7 @@ type TestFailureCode =
 interface ControlRuntimeFixtureOptions {
   validatedFailureCode?: TestFailureCode;
   externalExecutor?: ExternalActionExecutor;
+  knowledgeTarget?: boolean;
   now?: () => Date;
 }
 
@@ -56,6 +57,17 @@ function runtimeExecutors(options: ControlRuntimeFixtureOptions) {
 export async function controlRuntimeFixture(options: ControlRuntimeFixtureOptions = {}): Promise<ControlRuntimeFixture> {
   const root = await createGitRepository();
   await initRepository(root);
+  if (options.knowledgeTarget === true) {
+    await writeFile(path.join(root, ".wsspec", "config.yaml"), [
+      "version: 1",
+      "publishing:",
+      "  targets:",
+      "    knowledge:",
+      "      provider: feishu",
+      "      document: existingDocumentToken123",
+      "",
+    ].join("\n"), "utf8");
+  }
   await git(root, "add", ".wsspec", ".gitignore");
   await git(root, "commit", "-m", "test: initialize control runtime");
   const dependencies = {
@@ -64,6 +76,17 @@ export async function controlRuntimeFixture(options: ControlRuntimeFixtureOption
     terminal: { isTTY: true },
     now: options.now ?? (() => new Date("2026-08-18T04:00:00.000Z")),
     executors: runtimeExecutors(options),
+    ...(options.knowledgeTarget !== true ? {} : {
+      connectorRuntime: {
+        executables: {
+          git: "/usr/bin/git",
+          gh: "/usr/bin/gh",
+          glab: "/usr/bin/glab",
+          "lark-cli": await realpath(path.resolve(import.meta.dirname, "../../fixtures/bin/lark-cli")),
+        },
+        larkIdentity: "user" as const,
+      },
+    }),
     ...(options.externalExecutor === undefined ? {} : { externalExecutor: () => options.externalExecutor! }),
   } as ApplicationDependencies;
   const fixture: ControlRuntimeFixture = {

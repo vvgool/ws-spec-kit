@@ -12,6 +12,7 @@ import {
   type GithubIssueTarget,
   type IssueWriteAction,
   type NormalizedIssue,
+  type NormalizedIssueWriteResult,
   type ValidatedGithubTarget,
 } from "../../registry/connectors/issue.js";
 
@@ -28,6 +29,16 @@ export interface GithubIssueReadInput {
 export interface GithubIssueWriteInput extends GithubIssueReadInput {
   action: IssueWriteAction;
   markDispatched?(): Promise<void>;
+}
+
+export interface GithubCommentReadInput extends GithubIssueReadInput {
+  externalStableId: string;
+  expectedBody: string;
+}
+
+export interface NormalizedIssueComment {
+  stableId: string;
+  body: string;
 }
 
 function invalid(): never {
@@ -140,13 +151,37 @@ export async function readGithubIssue(input: GithubIssueReadInput): Promise<Norm
   return readValidated(input, target);
 }
 
-function mapComment(value: unknown, expectedBody: string): void {
+function mapComment(value: unknown, expectedBody: string, expectedId?: number): NormalizedIssueComment {
   const source = requiredRecord(value, ["body", "id", "node_id"]);
-  positiveInteger(source.id);
+  const id = positiveInteger(source.id);
   stableId("github", source.node_id);
-  if (canonicalIssueText(text(source.body, 1024 * 1024)) !== canonicalIssueText(expectedBody)) {
+  const body = canonicalIssueText(text(source.body, 1024 * 1024));
+  if ((expectedId !== undefined && id !== expectedId) || body !== canonicalIssueText(expectedBody)) {
     throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitHub comment 响应与批准内容不一致。");
   }
+  return { stableId: `github-comment:${id}`, body };
+}
+
+export async function readGithubComment(input: GithubCommentReadInput): Promise<NormalizedIssueComment> {
+  const target = validateGithubIssueTarget(input.target);
+  const match = /^github-comment:([1-9][0-9]{0,15})$/u.exec(input.externalStableId);
+  const id = match === null ? Number.NaN : Number(match[1]);
+  if (!Number.isSafeInteger(id)) {
+    throw new IssueProviderError("WSSPEC_ISSUE_TARGET_INVALID", "GitHub comment 稳定标识无效。");
+  }
+  const value = await execute(input, ["api", "--method", "GET", `repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(target.repo)}/issues/comments/${id}`, "--hostname", target.host], {});
+  const source = requiredRecord(value, ["issue_url"]);
+  let issueUrl: URL;
+  try { issueUrl = new URL(text(source.issue_url, 2_048)); }
+  catch { return invalid(); }
+  const expectedPaths = new Set([`/${target.endpoint}`, `/api/v3/${target.endpoint}`]);
+  const expectedHost = issueUrl.hostname === target.host || (target.host === "github.com" && issueUrl.hostname === "api.github.com");
+  if (issueUrl.protocol !== "https:" || !expectedHost || issueUrl.port !== ""
+    || issueUrl.username !== "" || issueUrl.password !== "" || issueUrl.search !== "" || issueUrl.hash !== ""
+    || !expectedPaths.has(issueUrl.pathname)) {
+    throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitHub comment 不属于批准的 Issue。");
+  }
+  return mapComment(value, input.expectedBody, id);
 }
 
 function sameLabels(actual: readonly string[], expected: readonly string[]): boolean {
@@ -175,7 +210,7 @@ async function mutateIssue(
   return execute(input, ["api", "--method", method, endpoint, "--hostname", target.host, "--input", "-"], payload);
 }
 
-export async function writeGithubIssue(input: GithubIssueWriteInput): Promise<NormalizedIssue> {
+export async function writeGithubIssue(input: GithubIssueWriteInput): Promise<NormalizedIssueWriteResult> {
   const target = validateGithubIssueTarget(input.target);
   const action = validateIssueWriteAction(input.action);
   if (action.type === "issue.close") {
@@ -197,14 +232,21 @@ export async function writeGithubIssue(input: GithubIssueWriteInput): Promise<No
     }
     return after;
   }
-  const before = input.markDispatched === undefined ? undefined : await readValidated(input, target);
   if (action.type === "comment") {
     await input.markDispatched?.();
-    mapComment(await mutateIssue(input, target, "POST", `${target.endpoint}/comments`, { body: action.body }), action.body);
+    const posted = mapComment(
+      await mutateIssue(input, target, "POST", `${target.endpoint}/comments`, { body: action.body }),
+      action.body,
+    );
+    const confirmed = await readGithubComment({
+      ...input,
+      externalStableId: posted.stableId,
+      expectedBody: action.body,
+    });
     const after = await readValidated(input, target);
-    if (before !== undefined) assertStableIssueIdentity(before, after);
-    return after;
+    return { ...after, externalEffectId: confirmed.stableId };
   }
+  const before = input.markDispatched === undefined ? undefined : await readValidated(input, target);
   const payload = action.type === "body" ? { body: action.body }
     : action.type === "labels" ? { labels: [...action.labels] }
       : { state: action.state };

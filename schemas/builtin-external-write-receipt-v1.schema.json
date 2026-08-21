@@ -16,10 +16,12 @@
     "action",
     "target",
     "payloadDigest",
+    "expectedContentDigest",
     "bindingDigest",
     "inputDigest",
     "artifactDigests",
     "idempotencyKey",
+    "publishedContentDigest",
     "readBackContentDigest",
     "status",
     "verifiedAt"
@@ -61,6 +63,7 @@
     },
     "action": {
       "enum": [
+        "git.commit",
         "issue.update",
         "knowledge.publish",
         "issue.close"
@@ -76,6 +79,7 @@
       "properties": {
         "kind": {
           "enum": [
+            "repository",
             "issue",
             "knowledge"
           ]
@@ -83,11 +87,22 @@
         "stableId": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 512
+          "maxLength": 4096
         }
       }
     },
     "payloadDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "externalEffectKind": {
+      "const": "issue.comment"
+    },
+    "externalEffectId": {
+      "type": "string",
+      "pattern": "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$"
+    },
+    "expectedContentDigest": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     },
@@ -111,6 +126,10 @@
       "type": "string",
       "pattern": "^external:[a-f0-9]{64}$"
     },
+    "publishedContentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
     "readBackContentDigest": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
@@ -122,5 +141,113 @@
       "type": "string",
       "format": "date-time"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "externalEffectKind": {
+            "const": "issue.comment"
+          }
+        },
+        "required": [
+          "externalEffectKind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "externalEffectId": {
+            "type": "string",
+            "pattern": "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$"
+          }
+        },
+        "required": [
+          "externalEffectId"
+        ]
+      },
+      "else": {
+        "properties": {
+          "externalEffectId": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "knowledge.publish"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "knowledge"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "enum": [
+              "issue.update",
+              "issue.close"
+            ]
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "issue"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "action": {
+            "const": "git.commit"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "const": "git-native"
+          },
+          "target": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "repository"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

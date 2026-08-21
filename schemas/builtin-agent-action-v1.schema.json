@@ -348,6 +348,7 @@
                 },
                 "action": {
                   "enum": [
+                    "git.commit",
                     "issue.update",
                     "knowledge.publish",
                     "issue.close"
@@ -363,6 +364,7 @@
                   "properties": {
                     "kind": {
                       "enum": [
+                        "repository",
                         "issue",
                         "knowledge"
                       ]
@@ -370,7 +372,7 @@
                     "stableId": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 512
+                      "maxLength": 4096
                     }
                   }
                 },

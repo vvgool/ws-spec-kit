@@ -8,6 +8,7 @@ test("the public execution registry exposes Application executors with compiler-
 
   assert.equal(registry.require("agent.execute").securityClass, "agent");
   assert.equal(registry.require("connector.execute/requirement.capture").securityClass, "external-read");
+  assert.equal(registry.require("connector.execute/git.commit").securityClass, "local-write");
   assert.equal(registry.require("control.close").securityClass, "control");
   assert.throws(
     () => registry.assertStep({ uses: "agent.execute", securityClass: "external-write" }),

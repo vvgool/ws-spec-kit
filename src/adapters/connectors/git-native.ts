@@ -20,7 +20,22 @@ export interface GitCommitInput {
   executable: string;
   approval: GitCommitApproval;
   environment?: Readonly<Partial<Record<"HOME" | "XDG_CONFIG_HOME", string | undefined>>>;
+  markDispatched?(): Promise<void>;
 }
+
+export type GitCommitReconciliation =
+  | { outcome: "unknown" }
+  | { outcome: "failed" }
+  | {
+      outcome: "verified";
+      repositoryCommonDir: string;
+      diffDigest: `sha256:${string}`;
+      commitOid: string;
+      parentOid: string;
+      treeOid: string;
+      files: string[];
+      messageDigest: `sha256:${string}`;
+    };
 
 interface GitResult {
   stdout: Buffer;
@@ -355,11 +370,67 @@ async function stagedProposal(input: {
   return { files, diffDigest, treeOid };
 }
 
-export async function commitGitChanges(input: GitCommitInput): Promise<GitCommitReceipt> {
+export async function reconcileGitCommit(input: Omit<GitCommitInput, "markDispatched">): Promise<GitCommitReconciliation> {
   if (input === null || typeof input !== "object" || Array.isArray(input)
     || (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)
     || Reflect.ownKeys(input).some((key) => typeof key !== "string" || !["approval", "environment", "executable"].includes(key))
     || !Object.hasOwn(input, "approval") || !Object.hasOwn(input, "executable")
+    || Object.values(Object.getOwnPropertyDescriptors(input)).some((descriptor) => !descriptor.enumerable || !("value" in descriptor))) {
+    return failGitCommit("WSSPEC_GIT_REQUEST_INVALID", "Git commit 协调回查输入无效。");
+  }
+  const approval = validateGitCommitApproval(input.approval);
+  const executable = await canonicalExecutable(input.executable);
+  const root = await canonicalRepositoryPath(approval.repositoryRoot);
+  const commonDir = await canonicalRepositoryPath(approval.repositoryCommonDir);
+  const environment = strictEnvironment(input.environment);
+  const git = (argv: readonly string[], stdin?: Buffer | string): Promise<GitResult> => runGit({
+    executable,
+    cwd: root,
+    argv,
+    environment,
+    ...(stdin === undefined ? {} : { stdin }),
+  });
+  const actualRoot = await canonicalRepositoryPath(text(await git(["rev-parse", "--path-format=absolute", "--show-toplevel"])));
+  const actualCommonDir = await canonicalRepositoryPath(text(await git(["rev-parse", "--path-format=absolute", "--git-common-dir"])));
+  if (actualRoot !== root || actualCommonDir !== commonDir) {
+    return failGitCommit("WSSPEC_GIT_REPOSITORY_MISMATCH", "当前仓库与批准的 root/common-dir 不一致。");
+  }
+
+  const commitOid = text(await git(["rev-parse", "--verify", "HEAD^{commit}"]));
+  if (commitOid === approval.baselineRevision) return { outcome: "unknown" };
+
+  const ancestry = text(await git(["rev-list", "--parents", "-n", "1", commitOid])).split(/\s+/u);
+  if (ancestry.length !== 2 || ancestry[0] !== commitOid || ancestry[1] !== approval.baselineRevision) {
+    return { outcome: "failed" };
+  }
+  const parentOid = ancestry[1];
+  const treeOid = text(await git(["rev-parse", "--verify", `${commitOid}^{tree}`]));
+  const files = byteSort(nulPaths((await git([
+    "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", parentOid, commitOid, "--",
+  ])).stdout));
+  const diffDigest = sha256((await git(diffArgv(parentOid, commitOid))).stdout);
+  const message = (await git(["show", "-s", "--format=%B", commitOid])).stdout.toString("utf8").replace(/\n+$/u, "");
+  if (!sameFiles(files, approval.files) || diffDigest !== approval.diffDigest || message !== approval.message) {
+    return { outcome: "failed" };
+  }
+  return {
+    outcome: "verified",
+    repositoryCommonDir: commonDir,
+    diffDigest,
+    commitOid,
+    parentOid,
+    treeOid,
+    files: Object.freeze(files) as unknown as string[],
+    messageDigest: sha256(message),
+  };
+}
+
+export async function commitGitChanges(input: GitCommitInput): Promise<GitCommitReceipt> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)
+    || (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)
+    || Reflect.ownKeys(input).some((key) => typeof key !== "string" || !["approval", "environment", "executable", "markDispatched"].includes(key))
+    || !Object.hasOwn(input, "approval") || !Object.hasOwn(input, "executable")
+    || (input.markDispatched !== undefined && typeof input.markDispatched !== "function")
     || Object.values(Object.getOwnPropertyDescriptors(input)).some((descriptor) => !descriptor.enumerable || !("value" in descriptor))) {
     return failGitCommit("WSSPEC_GIT_REQUEST_INVALID", "Git commit 执行输入无效。");
   }
@@ -431,6 +502,7 @@ export async function commitGitChanges(input: GitCommitInput): Promise<GitCommit
     }
 
     try {
+      await input.markDispatched?.();
       await gitWithIndex(["-c", "commit.gpgSign=false", "commit", "--file=-", "--cleanup=verbatim"], `${approval.message}\n`);
     } catch (error) {
       let hookChangedContent = false;

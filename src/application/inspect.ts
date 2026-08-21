@@ -16,6 +16,10 @@ export async function inspectApplication(input: InspectInput): Promise<WorkItemV
       provider: external.request.provider,
       action: external.request.action,
       target: { ...external.request.target },
+      ...(external.request.externalEffectKind === undefined ? {} : { externalEffectKind: external.request.externalEffectKind }),
+      ...(external.status !== "verified" || external.receipt.externalEffectId === undefined
+        ? {}
+        : { externalEffectId: external.receipt.externalEffectId }),
       status: external.status,
     }));
   return {

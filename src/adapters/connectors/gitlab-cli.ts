@@ -12,6 +12,7 @@ import {
   type GitlabIssueTarget,
   type IssueWriteAction,
   type NormalizedIssue,
+  type NormalizedIssueWriteResult,
   type ValidatedGitlabTarget,
 } from "../../registry/connectors/issue.js";
 
@@ -28,6 +29,16 @@ export interface GitlabIssueReadInput {
 export interface GitlabIssueWriteInput extends GitlabIssueReadInput {
   action: IssueWriteAction;
   markDispatched?(): Promise<void>;
+}
+
+export interface GitlabNoteReadInput extends GitlabIssueReadInput {
+  externalStableId: string;
+  expectedBody: string;
+}
+
+export interface NormalizedIssueNote {
+  stableId: string;
+  body: string;
 }
 
 function invalid(): never {
@@ -138,12 +149,29 @@ export async function readGitlabIssue(input: GitlabIssueReadInput): Promise<Norm
   return readValidated(input, validateGitlabIssueTarget(input.target));
 }
 
-function mapComment(value: unknown, expectedBody: string): void {
+function mapComment(value: unknown, expectedBody: string, expectedId?: number): NormalizedIssueNote {
   const source = requiredRecord(value, ["body", "id"]);
-  positiveInteger(source.id);
-  if (canonicalIssueText(text(source.body, 1024 * 1024)) !== canonicalIssueText(expectedBody)) {
+  const id = positiveInteger(source.id);
+  const body = canonicalIssueText(text(source.body, 1024 * 1024));
+  if ((expectedId !== undefined && id !== expectedId) || body !== canonicalIssueText(expectedBody)) {
     throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitLab note 响应与批准内容不一致。");
   }
+  return { stableId: `gitlab-note:${id}`, body };
+}
+
+export async function readGitlabNote(input: GitlabNoteReadInput): Promise<NormalizedIssueNote> {
+  const target = validateGitlabIssueTarget(input.target);
+  const match = /^gitlab-note:([1-9][0-9]{0,15})$/u.exec(input.externalStableId);
+  const id = match === null ? Number.NaN : Number(match[1]);
+  if (!Number.isSafeInteger(id)) {
+    throw new IssueProviderError("WSSPEC_ISSUE_TARGET_INVALID", "GitLab note 稳定标识无效。");
+  }
+  const value = await execute(input, ["api", "--method", "GET", `${target.endpoint}/notes/${id}`, "--hostname", target.host], {});
+  const source = requiredRecord(value, ["noteable_iid", "noteable_type"]);
+  if (source.noteable_type !== "Issue" || positiveInteger(source.noteable_iid) !== target.iid) {
+    throw new IssueProviderError("WSSPEC_ISSUE_READBACK_MISMATCH", "GitLab note 不属于批准的 Issue。");
+  }
+  return mapComment(value, input.expectedBody, id);
 }
 
 function sameLabels(actual: readonly string[], expected: readonly string[]): boolean {
@@ -172,7 +200,7 @@ async function mutateIssue(
   return execute(input, ["api", "--method", method, endpoint, "--hostname", target.host, "--input", "-"], payload);
 }
 
-export async function writeGitlabIssue(input: GitlabIssueWriteInput): Promise<NormalizedIssue> {
+export async function writeGitlabIssue(input: GitlabIssueWriteInput): Promise<NormalizedIssueWriteResult> {
   const target = validateGitlabIssueTarget(input.target);
   const action = validateIssueWriteAction(input.action);
   if (action.type === "issue.close") {
@@ -194,14 +222,21 @@ export async function writeGitlabIssue(input: GitlabIssueWriteInput): Promise<No
     }
     return after;
   }
-  const before = input.markDispatched === undefined ? undefined : await readValidated(input, target);
   if (action.type === "comment") {
     await input.markDispatched?.();
-    mapComment(await mutateIssue(input, target, "POST", `${target.endpoint}/notes`, { body: action.body }), action.body);
+    const posted = mapComment(
+      await mutateIssue(input, target, "POST", `${target.endpoint}/notes`, { body: action.body }),
+      action.body,
+    );
+    const confirmed = await readGitlabNote({
+      ...input,
+      externalStableId: posted.stableId,
+      expectedBody: action.body,
+    });
     const after = await readValidated(input, target);
-    if (before !== undefined) assertStableIssueIdentity(before, after);
-    return after;
+    return { ...after, externalEffectId: confirmed.stableId };
   }
+  const before = input.markDispatched === undefined ? undefined : await readValidated(input, target);
   const payload = action.type === "body" ? { description: action.body }
     : action.type === "labels" ? { labels: [...action.labels] }
       : { state_event: "reopen" };

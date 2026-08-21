@@ -56,16 +56,45 @@ function application(home: string, actor: string | undefined, selectedProvider: 
 }
 
 async function start(root: string, argv: string[], home: string): Promise<unknown> {
-  const args = parseArguments(argv, 0, ["--prompt", "--file", "--workflow", "--profile", "--actor", "--provider"]);
+  const args = parseArguments(argv, 0, [
+    "--prompt", "--file", "--source-provider", "--source-id", "--source-url",
+    "--workflow", "--profile", "--actor", "--provider",
+  ]);
   const prompt = args.values["--prompt"];
   const file = args.values["--file"];
-  if ((prompt === undefined) === (file === undefined)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "start 必须且只能提供 --prompt 或 --file。 ");
+  const sourceProvider = args.values["--source-provider"];
+  const sourceId = args.values["--source-id"];
+  const sourceUrl = args.values["--source-url"];
+  const hasExternalSource = sourceProvider !== undefined || sourceId !== undefined || sourceUrl !== undefined;
+  const sourceKinds = Number(prompt !== undefined) + Number(file !== undefined) + Number(hasExternalSource);
+  if (sourceKinds !== 1) {
+    throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "start 必须且只能提供 --prompt、--file 或一组外部来源参数。 ");
+  }
+  if (hasExternalSource) {
+    if (sourceProvider === undefined || sourceId === undefined
+      || !["github", "gitlab", "feishu"].includes(sourceProvider)
+      || (sourceUrl !== undefined && sourceUrl !== sourceId)) {
+      throw new CliAdapterError(
+        "WSSPEC_ARGUMENT_INVALID",
+        "外部来源必须提供有效的 --source-provider github|gitlab|feishu 和 --source-id；--source-url 必须与 Source ID 相同。",
+      );
+    }
+  }
   const workflowRef = args.values["--workflow"];
   const profile = args.values["--profile"];
   if (profile !== undefined && !["auto", "quick", "standard", "governed"].includes(profile)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "Profile 必须是 auto、quick、standard 或 governed。");
   const input: StartInput = {
     root,
-    source: prompt === undefined ? { type: "file", path: file! } : { type: "prompt", text: prompt },
+    source: prompt !== undefined
+      ? { type: "prompt", text: prompt }
+      : file !== undefined
+        ? { type: "file", path: file }
+        : {
+            type: "issue",
+            provider: sourceProvider!,
+            id: sourceId!,
+            ...(sourceUrl === undefined ? {} : { url: sourceUrl }),
+          },
     ...(workflowRef === undefined ? {} : { workflowRef }),
     ...(profile === undefined ? {} : { profile: profile as NonNullable<StartInput["profile"]> }),
   };

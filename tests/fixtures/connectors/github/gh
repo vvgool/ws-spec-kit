@@ -19,6 +19,9 @@ const endpointIndex = argv.indexOf("--method");
 const method = endpointIndex < 0 ? undefined : argv[endpointIndex + 1];
 const endpoint = endpointIndex < 0 ? undefined : argv[endpointIndex + 2];
 const issueEndpoint = "repos/acme/widget/issues/7";
+const commentEndpoint = `${issueEndpoint}/comments`;
+const commentId = 4401;
+const commentReadEndpoint = "repos/acme/widget/issues/comments/4401";
 const failOnce = path.join(root, "github-readback-fail-once");
 const failAlways = path.join(root, "github-readback-fail-always");
 function marker(stage, point) {
@@ -59,6 +62,17 @@ function issue() {
   };
 }
 
+function comment() {
+  const stored = state.comments?.find(({ id }) => id === commentId);
+  if (!stored) throw new Error("fixture comment missing");
+  return {
+    id: stored.id,
+    node_id: "IC_fixture_github_4401",
+    body: stored.body,
+    issue_url: "https://github.example.com/api/v3/repos/acme/widget/issues/7",
+  };
+}
+
 if (argv.length === 1 && argv[0] === "--version") {
   process.stdout.write("gh version 2.80.0\n");
 } else if (argv.join("\0") === ["auth", "status", "--active"].join("\0")) {
@@ -77,6 +91,24 @@ if (argv.length === 1 && argv[0] === "--version") {
   } else {
     process.stdout.write(JSON.stringify(issue()));
   }
+} else if (method === "POST" && endpoint === commentEndpoint && typeof input.body === "string") {
+  state.comments = [{ id: commentId, body: input.body }];
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  appendFileSync(timelinePath, `${JSON.stringify({ stage: "issue.update", provider: "github" })}\n`);
+  armReadbackFailure("issue.update");
+  if (consume("issue.update", "post-send")) {
+    process.stderr.write("fixture crashed after mutation\n");
+    process.exitCode = 1;
+  } else process.stdout.write(JSON.stringify(comment()));
+} else if (method === "GET" && endpoint === commentReadEndpoint) {
+  if (existsSync(failAlways)) {
+    process.stderr.write("fixture readback unavailable\n");
+    process.exitCode = 1;
+  } else if (existsSync(failOnce)) {
+    renameSync(failOnce, `${failOnce}.consumed`);
+    process.stderr.write("fixture readback crashed\n");
+    process.exitCode = 1;
+  } else process.stdout.write(JSON.stringify(comment()));
 } else if (method === "PATCH" && endpoint === issueEndpoint && typeof input.body === "string") {
   state.body = input.body;
   writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);

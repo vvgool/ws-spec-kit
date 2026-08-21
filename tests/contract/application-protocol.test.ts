@@ -175,7 +175,7 @@ test("StartInput 支持显式 Workflow，也允许交给项目 activeWorkflow", 
   assert.deepEqual(validate("builtin.application-start-input.v1" as SchemaId, explicit), explicit);
 });
 
-test("DecisionInput 只接受执行审批、Workflow Package 信任决定或外部只读协调", () => {
+test("DecisionInput 只接受执行审批、Workflow Package 信任决定或受控外部协调", () => {
   const approval = {
     kind: "approval",
     root: "/workspace",
@@ -199,12 +199,33 @@ test("DecisionInput 只接受执行审批、Workflow Package 信任决定或外�
     root: "/workspace",
     workItemId: "WSS-20260817-001",
     requestId: "external-request-01",
+    decision: "reconcile",
+    expectedDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    actor: "user@example.com",
+  };
+  const externalAdoption = {
+    kind: "external_reconciliation",
+    root: "/workspace",
+    workItemId: "WSS-20260817-001",
+    requestId: "external-request-01",
+    decision: "adopt_verified",
+    expectedDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    externalStableId: "github-comment:44",
+    contentDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    evidence: "已通过平台审计页确认评论 44 的正文和作者。",
     actor: "user@example.com",
   };
 
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, approval), approval);
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, workflowTrust), workflowTrust);
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, externalReconciliation), externalReconciliation);
+  assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, externalAdoption), externalAdoption);
+  for (const missing of ["externalStableId", "contentDigest", "evidence"] as const) {
+    const invalid = { ...externalAdoption } as Record<string, unknown>;
+    delete invalid[missing];
+    assert.throws(() => validate("builtin.application-decision-input.v1" as SchemaId, invalid),
+      (error: unknown) => error instanceof SchemaValidationError);
+  }
   assertSchemaError(
     () => validate("builtin.application-decision-input.v1" as SchemaId, { ...approval, kind: "profile_override" }),
     "WSSPEC_SCHEMA_INVALID_VALUE",

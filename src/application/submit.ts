@@ -16,12 +16,15 @@ import {
   retryFailureProblem,
   stepFailureProblem,
 } from "../engine/control/retry.js";
-import { mutateControlPlane } from "../engine/scheduler.js";
+import { mutateControlPlane, readIdempotentControlPlaneResult } from "../engine/scheduler.js";
 import { evaluateSubmitProfileDecision } from "../engine/results.js";
 import type { AgentAction, SubmitInput, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
+import { validateGitCommitApproval, type GitCommitApproval } from "../registry/connectors/git-commit.js";
 import { canonicalRequirementText } from "../registry/connectors/local-requirement.js";
+import { validateKnowledgePublishTarget } from "../registry/connectors/knowledge-publish.js";
+import { validateIssueWriteAction } from "../registry/connectors/issue.js";
 import { validate } from "../schemas/index.js";
 import { recoverControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
 import { recordGreenEvidenceDetails } from "../engine/tdd/green-gate.js";
@@ -41,6 +44,7 @@ import {
 import { acquireNextLocked, type AcquireDependencies, type ApplicationAttemptRecord, type ApplicationStepResult } from "./acquire.js";
 import { loadApplicationState, selectedProfile, type ApplicationState, type SnapshotStep } from "./state.js";
 import {
+  assertCurrentExternalActionContext,
   executeExternalAction,
   ExternalActionError,
   externalActionApprovalSummary,
@@ -76,7 +80,7 @@ interface ExternalWriteIntent {
   kind: "external-action";
   provider: string;
   action: ExternalActionName;
-  target: { kind: "issue" | "knowledge"; stableId: string };
+  target: { kind: "repository" | "issue" | "knowledge"; stableId: string };
   payload: unknown;
   sideEffects: string[];
 }
@@ -98,9 +102,9 @@ function externalWriteIntent(result: SubmitResult): ExternalWriteIntent {
   const allowed = ["kind", "provider", "action", "target", "payload", "sideEffects"];
   if (value?.kind !== "external-action" || Object.keys(value).some((key) => !allowed.includes(key))
     || typeof value.provider !== "string" || !/^[a-z][a-z0-9-]{0,62}$/u.test(value.provider)
-    || !["issue.update", "knowledge.publish", "issue.close"].includes(value.action as string)
+    || !["git.commit", "issue.update", "knowledge.publish", "issue.close"].includes(value.action as string)
     || target === undefined || Object.keys(target).some((key) => !["kind", "stableId"].includes(key))
-    || (target.kind !== "issue" && target.kind !== "knowledge") || typeof target.stableId !== "string" || target.stableId === ""
+    || !["repository", "issue", "knowledge"].includes(target.kind as string) || typeof target.stableId !== "string" || target.stableId === ""
     || !Array.isArray(value.sideEffects) || value.sideEffects.length === 0
     || value.sideEffects.some((item) => typeof item !== "string" || item === "") || value.payload === undefined) {
     throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "外部动作意图字段不完整或包含未知字段。 ");
@@ -109,10 +113,29 @@ function externalWriteIntent(result: SubmitResult): ExternalWriteIntent {
     kind: "external-action",
     provider: value.provider,
     action: value.action as ExternalActionName,
-    target: { kind: target.kind, stableId: target.stableId },
+    target: { kind: target.kind as ExternalWriteIntent["target"]["kind"], stableId: target.stableId },
     payload: value.payload,
     sideEffects: [...value.sideEffects] as string[],
   };
+}
+
+function governedActionStep(step: SnapshotStep): boolean {
+  return step.securityClass === "external-write"
+    || (step.securityClass === "local-write" && step.action === "git.commit");
+}
+
+function validatedGitApproval(intent: ExternalWriteIntent, worktree: string): Readonly<GitCommitApproval> {
+  let approval: Readonly<GitCommitApproval>;
+  try { approval = validateGitCommitApproval(intent.payload); }
+  catch {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "Git commit approval 无效。");
+  }
+  if (intent.provider !== "git-native" || intent.action !== "git.commit" || intent.target.kind !== "repository"
+    || intent.target.stableId !== approval.repositoryCommonDir || approval.repositoryRoot !== worktree
+    || canonicalDigest(approval) !== canonicalDigest(intent.payload)) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "Git commit approval 未精确绑定当前 Work Item 仓库。");
+  }
+  return approval;
 }
 
 function externalBlocked(code: `WSSPEC_${string}`, message: string, retryable = false): AgentAction {
@@ -458,7 +481,38 @@ function discoveryTarget(projection: RuntimeProjection, kind: "issue" | "knowled
     || binding.externalWorkItemId !== workItemId) {
     throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", `外部 ${kind} 目标缺少当前 Work Item 的稳定发现绑定。 `);
   }
-  return { exists: true as const, stableId: binding.stableId, externalWorkItemId: workItemId };
+  return {
+    exists: true as const,
+    stableId: binding.stableId,
+    externalWorkItemId: workItemId,
+    ...(typeof binding.provider === "string" ? { provider: binding.provider } : {}),
+  };
+}
+
+function normalizedProvider(value: string): string {
+  return ({ github: "github-cli", gitlab: "gitlab-cli", feishu: "lark-cli" } as Record<string, string>)[value] ?? value;
+}
+
+function assertKnowledgePayloadContract(input: {
+  payload: unknown;
+  applicationBinding: unknown;
+  stableId: string;
+  contentDigest: `sha256:${string}`;
+}): void {
+  const payload = record(input.payload);
+  if (payload === undefined || Object.keys(payload).sort().join("\0") !== "binding\0target") {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "Knowledge payload 必须精确携带目标和 Application binding。 ");
+  }
+  let target;
+  try { target = validateKnowledgePublishTarget(payload.target); }
+  catch {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "Knowledge payload 目标无法规范化。 ");
+  }
+  if (target.stableId !== input.stableId || sha256(target.markdown) !== input.contentDigest
+    || canonicalDigest(payload.binding, "WSSPEC_EXTERNAL_BINDING_INVALID")
+      !== canonicalDigest(input.applicationBinding, "WSSPEC_EXTERNAL_BINDING_INVALID")) {
+    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "Knowledge payload、Application binding 与已验证 Artifact 正文不一致。 ");
+  }
 }
 
 function previousVerifiedIssueUpdate(projection: RuntimeProjection, stableId: string): ExternalWriteReceipt | undefined {
@@ -498,9 +552,9 @@ async function governExternalSubmit(
   if (input.result.externalWrites.length === 0) return { input };
   const profile = selectedProfile(state.snapshot);
   const target = executionTarget(profile, state.projection, input.stepId);
-  if (target.step.securityClass !== "external-write") {
+  if (!governedActionStep(target.step)) {
     if (input.result.externalWrites.length !== 0) {
-      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "非 external-write Step 不能携带外部写入记录。");
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "非受治理写入 Step 不能携带外部写入记录。");
     }
     return { input };
   }
@@ -510,8 +564,20 @@ async function governExternalSubmit(
     return { input };
   }
   const intent = externalWriteIntent(input.result);
-  if (intent.action !== target.step.action || (intent.action === "knowledge.publish") !== (intent.target.kind === "knowledge")) {
+  const gitCommit = intent.action === "git.commit";
+  if (intent.action !== target.step.action
+    || (gitCommit && intent.target.kind !== "repository")
+    || (!gitCommit && (intent.action === "knowledge.publish") !== (intent.target.kind === "knowledge"))
+    || (!gitCommit && intent.target.kind === "repository")) {
     throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "外部动作意图与编译后的 Step 动作或目标类别不一致。 ");
+  }
+  let externalEffectKind: "issue.comment" | undefined;
+  if (intent.action === "issue.update" || intent.action === "issue.close") {
+    const issueAction = validateIssueWriteAction(record(intent.payload)?.action as never);
+    if ((intent.action === "issue.close") !== (issueAction.type === "issue.close")) {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "Issue payload 动作与编译后的 Step 动作不一致。 ");
+    }
+    if (issueAction.type === "comment") externalEffectKind = "issue.comment";
   }
   const payloadDigest = canonicalDigest(intent.payload);
   const prior = Object.values(state.projection.externalActions).find((candidate) =>
@@ -522,18 +588,55 @@ async function governExternalSubmit(
     && candidate.request.action === intent.action
     && candidate.request.target.kind === intent.target.kind
     && candidate.request.target.stableId === intent.target.stableId);
-  const active = state.projection.contexts[target.stageId] as ApplicationAttemptRecord;
-  await verifyPublicationArtifacts(
-    state,
-    active.workPackage.artifacts.filter(({ artifactType }) => artifactType !== "requirement-source"),
-  );
-  const discovered = discoveryTarget(state.projection, intent.target.kind, state.item.workItemId);
-  if (discovered.stableId !== intent.target.stableId) {
-    throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "外部动作意图的稳定目标与发现绑定不一致。 ");
+  if (prior !== undefined) {
+    const rejection = state.projection.evidence[externalActionRejectionKey(prior.request.requestId)] as ExternalActionRejection | undefined;
+    if (rejection !== undefined) {
+      if (rejection.requestId !== prior.request.requestId || rejection.requestDigest !== prior.request.requestDigest
+        || rejection.actor === "" || !Number.isFinite(Date.parse(rejection.rejectedAt))) {
+        throw new ApplicationSubmitError("WSSPEC_EXTERNAL_REJECTION_INVALID", "外部动作拒绝证据未绑定当前请求。");
+      }
+      return { input, action: externalBlocked("WSSPEC_EXTERNAL_ACTION_REJECTED", "外部动作未获授权。") };
+    }
+    if (prior.request.payloadDigest !== payloadDigest
+      || JSON.stringify(prior.request.sideEffects) !== JSON.stringify(intent.sideEffects)) {
+      throw new ExternalActionError("WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT", "同一 Attempt 的外部动作已绑定不同请求内容。");
+    }
   }
+  const active = state.projection.contexts[target.stageId] as ApplicationAttemptRecord;
   let bindingDigest: `sha256:${string}`;
   let inputDigest: `sha256:${string}`;
-  if (intent.action === "issue.close") {
+  let expectedContentDigest = payloadDigest;
+  if (gitCommit) {
+    const approval = validatedGitApproval(intent, state.worktree);
+    expectedContentDigest = approval.diffDigest;
+    bindingDigest = canonicalDigest({
+      kind: "repository",
+      repositoryRoot: approval.repositoryRoot,
+      repositoryCommonDir: approval.repositoryCommonDir,
+      baselineRevision: approval.baselineRevision,
+    }, "WSSPEC_EXTERNAL_BINDING_INVALID");
+    inputDigest = canonicalDigest({
+      baselineRevision: approval.baselineRevision,
+      files: approval.files,
+      message: approval.message,
+      diffDigest: approval.diffDigest,
+    }, "WSSPEC_EXTERNAL_BINDING_INVALID");
+  } else {
+    if (intent.target.kind === "repository") {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "外部动作意图与目标类别不一致。 ");
+    }
+    const publicationBodies = await verifyPublicationArtifacts(
+      state,
+      active.workPackage.artifacts.filter(({ artifactType }) => artifactType !== "requirement-source"),
+    );
+    const discovered = discoveryTarget(state.projection, intent.target.kind, state.item.workItemId);
+    if (discovered.stableId !== intent.target.stableId) {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "外部动作意图的稳定目标与发现绑定不一致。 ");
+    }
+    if (discovered.provider !== undefined && normalizedProvider(discovered.provider) !== normalizedProvider(intent.provider)) {
+      throw new ApplicationSubmitError("WSSPEC_EXTERNAL_BINDING_INVALID", "外部动作 Provider 与生产发现绑定不一致。 ");
+    }
+    if (intent.action === "issue.close") {
     const previous = previousVerifiedIssueUpdate(state.projection, discovered.stableId);
     if (previous === undefined) {
       throw new ApplicationSubmitError("WSSPEC_EXTERNAL_ORDER_INVALID", "Issue Close 前缺少已验证的 Issue Update Receipt。 ");
@@ -549,38 +652,42 @@ async function governExternalSubmit(
     }
     bindingDigest = canonicalDigest({ kind: "issue", ...discovered }, "WSSPEC_EXTERNAL_BINDING_INVALID");
     inputDigest = previous.readBackContentDigest;
-  } else {
-    const publishTarget = intent.action === "knowledge.publish" ? "knowledge" : "issue";
-    const binding = createExternalBinding({
-      target: publishTarget,
-      workPackage: active.workPackage,
-      discoveryBinding: discovered,
-      ...(publishTarget === "knowledge" ? { expectedPublishedContentDigest: payloadDigest } : {}),
-    });
-    bindingDigest = canonicalDigest(binding, "WSSPEC_EXTERNAL_BINDING_INVALID");
-    inputDigest = binding.publishInputDigest as `sha256:${string}`;
+    } else {
+      const publishTarget = intent.action === "knowledge.publish" ? "knowledge" : "issue";
+      if (publishTarget === "knowledge") expectedContentDigest = knowledgePublishedContentDigest(publicationBodies) as `sha256:${string}`;
+      const binding = createExternalBinding({
+        target: publishTarget,
+        workPackage: active.workPackage,
+        discoveryBinding: discovered,
+        ...(publishTarget === "knowledge" ? { expectedPublishedContentDigest: expectedContentDigest } : {}),
+      });
+      if (publishTarget === "knowledge") {
+        assertKnowledgePayloadContract({
+          payload: intent.payload,
+          applicationBinding: binding,
+          stableId: discovered.stableId,
+          contentDigest: expectedContentDigest,
+        });
+      }
+      bindingDigest = canonicalDigest(binding, "WSSPEC_EXTERNAL_BINDING_INVALID");
+      inputDigest = binding.publishInputDigest as `sha256:${string}`;
+    }
   }
   const artifactDigests = active.workPackage.artifacts.map((artifact) =>
     (artifact.contentHash ?? canonicalDigest(artifact)) as `sha256:${string}`).sort();
   if (prior !== undefined) {
-    const rejection = state.projection.evidence[externalActionRejectionKey(prior.request.requestId)] as ExternalActionRejection | undefined;
-    if (rejection !== undefined) {
-      if (rejection.requestId !== prior.request.requestId || rejection.requestDigest !== prior.request.requestDigest
-        || rejection.actor === "" || !Number.isFinite(Date.parse(rejection.rejectedAt))) {
-        throw new ApplicationSubmitError("WSSPEC_EXTERNAL_REJECTION_INVALID", "外部动作拒绝证据未绑定当前请求。");
-      }
-      return { input, action: externalBlocked("WSSPEC_EXTERNAL_ACTION_REJECTED", "外部动作未获授权。") };
-    }
     const sameLogicalRequest = prior.request.payloadDigest === payloadDigest
+      && prior.request.expectedContentDigest === expectedContentDigest
       && prior.request.bindingDigest === bindingDigest
       && prior.request.inputDigest === inputDigest
+      && prior.request.externalEffectKind === externalEffectKind
       && JSON.stringify(prior.request.artifactDigests) === JSON.stringify(artifactDigests)
       && JSON.stringify(prior.request.sideEffects) === JSON.stringify(intent.sideEffects);
     if (!sameLogicalRequest) {
       throw new ExternalActionError("WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT", "同一 Attempt 的外部动作已绑定不同请求内容。");
     }
     if (prior.status === "verified") {
-      return { input: { ...input, result: { ...input.result, externalWrites: [{ ...prior.receipt }] } } };
+      await assertCurrentExternalActionContext(state, state.projection, prior.request);
     }
   }
   await validateResult(input, state, target, state.projection, dependencies.now());
@@ -600,9 +707,11 @@ async function governExternalSubmit(
       attemptId: input.attemptId,
       provider: intent.provider,
       action: intent.action,
-      securityClass: "external-write",
+      securityClass: gitCommit ? "local-write" : "external-write",
       target: intent.target,
+      ...(externalEffectKind === undefined ? {} : { externalEffectKind }),
       payload: intent.payload,
+      expectedContentDigest,
       bindingDigest,
       inputDigest,
       artifactDigests,
@@ -648,7 +757,7 @@ function governedExternalReceipt(result: SubmitResult): ExternalWriteReceipt | u
 }
 
 function withLegacyExternalEvidence(projection: RuntimeProjection, receipt: ExternalWriteReceipt): RuntimeProjection {
-  if (receipt.action === "issue.close") return projection;
+  if (receipt.action === "git.commit" || receipt.action === "issue.close") return projection;
   const target = receipt.target.kind;
   const binding = {
     version: 1 as const,
@@ -660,18 +769,20 @@ function withLegacyExternalEvidence(projection: RuntimeProjection, receipt: Exte
     publishStepId: receipt.stepId,
     publishAttemptId: receipt.attemptId,
     publishInputDigest: receipt.inputDigest,
-    expectedPublishedContentDigest: receipt.payloadDigest,
+    expectedPublishedContentDigest: receipt.expectedContentDigest,
   };
   const legacyReceipt = {
     version: 1 as const,
     kind: "external-receipt" as const,
     target,
     stableId: receipt.target.stableId,
+    ...(receipt.externalEffectKind === undefined ? {} : { externalEffectKind: receipt.externalEffectKind }),
+    ...(receipt.externalEffectId === undefined ? {} : { externalEffectId: receipt.externalEffectId }),
     externalWorkItemId: receipt.workItemId,
     publishStepId: receipt.stepId,
     publishAttemptId: receipt.attemptId,
     publishInputDigest: receipt.inputDigest,
-    publishedContentDigest: receipt.payloadDigest,
+    publishedContentDigest: receipt.publishedContentDigest,
     readBackContentDigest: receipt.readBackContentDigest,
     status: "confirmed" as const,
     readBackStatus: "confirmed" as const,
@@ -689,11 +800,18 @@ function withLegacyExternalEvidence(projection: RuntimeProjection, receipt: Exte
 export async function submitApplication(input: SubmitInput, dependencies: SubmitDependencies): Promise<AgentAction> {
   validate("builtin.application-submit-input.v1", input);
   validate<SubmitResult>("builtin.submit-result.v1", input.result);
+  const { root: _root, ...operationInput } = input;
+  const completed = await readIdempotentControlPlaneResult<AgentAction>({
+    cwd: input.root,
+    workItemId: input.workItemId,
+    idempotencyKey: `submit:${input.attemptId}`,
+    operationInput,
+  });
+  if (completed !== undefined) return completed;
   const state = await loadApplicationState(input.root, input.workItemId);
   const governed = await governExternalSubmit(input, state, dependencies);
   if (governed.action !== undefined) return governed.action;
   input = governed.input;
-  const { root: _root, ...operationInput } = input;
   let profileEvent: "profile.selected" | "profile.upgraded" | undefined;
   let profileInvalidatedStepIds: string[] = [];
   const action = await mutateControlPlane<AgentAction>({
@@ -718,7 +836,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       }
       const profile = selectedProfile(runtimeState.snapshot);
       const target = executionTarget(profile, current, input.stepId);
-      if (target.step.securityClass === "external-write" && input.result.status === "completed"
+      if (governedActionStep(target.step) && input.result.status === "completed"
         && input.result.externalWrites.length === 0) {
         throw new ApplicationSubmitError("WSSPEC_EXTERNAL_INTENT_INVALID", "external-write Step 必须提交经过授权和回读验证的外部动作 Receipt。 ");
       }
@@ -982,7 +1100,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
       const running = transitionStage(projection.stages[target.stageId]!, { type: "transition", to: "running" });
       const validating = transitionStage(running, { type: "transition", to: "validating" });
       projection.stages[target.stageId] = validating;
-      if (target.step.approval && target.step.securityClass !== "external-write") {
+      if (target.step.approval && !governedActionStep(target.step)) {
         const artifacts = result.artifacts.filter((candidate) => candidate.path !== undefined);
         const request = await prepareArtifactApproval({
           cwd: input.root,

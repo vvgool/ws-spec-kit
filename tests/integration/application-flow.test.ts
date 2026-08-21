@@ -538,6 +538,119 @@ test("start rejects unknown Workflows and non-repository or unsupported file sou
   );
 });
 
+test("governed documentation start requires a production Knowledge target while standard records it as optional", async () => {
+  const governed = await fixture();
+  await assert.rejects(
+    governed.app.start({
+      root: governed.root,
+      source: { type: "prompt", text: "需要受治理知识发布" },
+      workflowRef: "builtin://workflows/documentation-delivery",
+      profile: "governed",
+    }),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && (error as Error & { code: string }).code === "WSSPEC_KNOWLEDGE_TARGET_REQUIRED",
+  );
+
+  const standard = await fixture();
+  const started = await standard.app.start({
+    root: standard.root,
+    source: { type: "prompt", text: "知识目标可选" },
+    workflowRef: "builtin://workflows/documentation-delivery",
+    profile: "standard",
+  });
+  const projection = await readControlPlane(standard.root, started.workItemId);
+  assert.deepEqual((projection.evidence.bindings as Record<string, unknown>).knowledge, { exists: false });
+});
+
+test("configured Knowledge target must authenticate before start creates a Work Item", async () => {
+  const lark = path.resolve(import.meta.dirname, "../fixtures/bin/lark-cli");
+  const current = await fixture({
+    connectorRuntime: {
+      executables: { git: "/usr/bin/git", gh: "/usr/bin/gh", glab: "/usr/bin/glab", "lark-cli": lark },
+      larkIdentity: "user",
+    },
+  });
+  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), [
+    "version: 1",
+    "publishing:",
+    "  targets:",
+    "    knowledge:",
+    "      provider: feishu",
+    "      document: unauthorizedDocument123",
+    "",
+  ].join("\n"), "utf8");
+
+  await assert.rejects(current.app.start({
+    root: current.root,
+    source: { type: "prompt", text: "认证失败不得建立知识绑定" },
+    workflowRef: "builtin://workflows/documentation-delivery",
+    profile: "governed",
+  }), (error: unknown) => error instanceof Error
+    && "code" in error
+    && (error as Error & { code: string }).code === "WSSPEC_FEISHU_UNAUTHENTICATED");
+  const workItemsRoot = path.join(current.root, ".git", "wsspec", "work-items");
+  assert.deepEqual(await readdir(workItemsRoot).catch(() => []), []);
+});
+
+test("Knowledge target binding and config snapshot remain immutable after project config drift and restart", async () => {
+  const lark = path.resolve(import.meta.dirname, "../fixtures/bin/lark-cli");
+  const connectorRuntime = {
+    executables: { git: "/usr/bin/git", gh: "/usr/bin/gh", glab: "/usr/bin/glab", "lark-cli": lark },
+    larkIdentity: "user" as const,
+  };
+  const current = await fixture({ connectorRuntime });
+  const initialConfig = [
+    "version: 1",
+    "publishing:",
+    "  targets:",
+    "    knowledge:",
+    "      provider: feishu",
+    "      document: existingDocumentToken123",
+    "",
+  ].join("\n");
+  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), initialConfig, "utf8");
+  const started = await current.app.start({
+    root: current.root,
+    source: { type: "prompt", text: "锁定 Knowledge 发布目标" },
+    workflowRef: "builtin://workflows/documentation-delivery",
+    profile: "governed",
+  });
+  const before = await readControlPlane(current.root, started.workItemId);
+  const binding = (before.evidence.bindings as Record<string, unknown>).knowledge;
+  assert.deepEqual(binding, {
+    exists: true,
+    provider: "feishu",
+    stableId: "feishu:existingDocumentToken123",
+    canonicalUrl: "https://tenant.feishu.cn/docx/existingDocumentToken123",
+    externalWorkItemId: started.workItemId,
+  });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const configSnapshot = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "config.yaml");
+  assert.equal(await readFile(configSnapshot, "utf8"), initialConfig);
+
+  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), [
+    "version: 1",
+    "publishing:",
+    "  targets:",
+    "    knowledge:",
+    "      provider: feishu",
+    "      document: sourceDocumentToken123",
+    "",
+  ].join("\n"), "utf8");
+  const restarted = createApplication({
+    provider: "codex",
+    home: os.homedir(),
+    terminal: { isTTY: true },
+    connectorRuntime,
+    now: () => new Date("2026-08-17T04:00:01.000Z"),
+  });
+  assert.equal((await restarted.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" })).action, "execute");
+  const after = await readControlPlane(current.root, started.workItemId);
+  assert.deepEqual((after.evidence.bindings as Record<string, unknown>).knowledge, binding);
+  assert.equal(await readFile(configSnapshot, "utf8"), initialConfig);
+});
+
 test("start strictly validates project config and Workflow selection files", async (t) => {
   const cases: Array<{
     name: string;

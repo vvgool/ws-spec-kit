@@ -66,6 +66,10 @@ export interface NormalizedIssue extends NormalizedRequirementSource {
   labels: string[];
 }
 
+export interface NormalizedIssueWriteResult extends NormalizedIssue {
+  externalEffectId?: string;
+}
+
 function fail(code: IssueProviderErrorCode, message: string): never {
   throw new IssueProviderError(code, message);
 }
@@ -291,6 +295,7 @@ const githubManifestInput = {
   minimumVersion: "2.0.0",
   argvTemplates: [
     ["api", "--method", "GET", "repos/{owner}/{repo}/issues/{number}", "--hostname", "{host}"],
+    ["api", "--method", "GET", "repos/{owner}/{repo}/issues/comments/{commentId}", "--hostname", "{host}"],
     ["api", "--method", "POST", "repos/{owner}/{repo}/issues/{number}/comments", "--hostname", "{host}", "--input", "-"],
     ["api", "--method", "PATCH", "repos/{owner}/{repo}/issues/{number}", "--hostname", "{host}", "--input", "-"],
   ],
@@ -311,6 +316,7 @@ const gitlabManifestInput = {
   minimumVersion: "1.0.0",
   argvTemplates: [
     ["api", "--method", "GET", "projects/{encodedPath}/issues/{iid}", "--hostname", "{host}"],
+    ["api", "--method", "GET", "projects/{encodedPath}/issues/{iid}/notes/{noteId}", "--hostname", "{host}"],
     ["api", "--method", "POST", "projects/{encodedPath}/issues/{iid}/notes", "--hostname", "{host}", "--input", "-"],
     ["api", "--method", "PUT", "projects/{encodedPath}/issues/{iid}", "--hostname", "{host}", "--input", "-"],
   ],

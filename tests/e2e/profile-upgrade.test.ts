@@ -38,6 +38,6 @@ test("Quick upgrades in flight to Governed, adds design, invalidates compact wor
   assert.ok(result.events.some(({ eventType }) => eventType === "profile.upgraded"));
   assert.ok(result.events.some(({ eventType, result: eventResult }) =>
     eventType === "profile.upgraded" && JSON.stringify(eventResult).includes("design")));
-  assert.ok(Object.values(result.recovered.approvals).filter(({ status }) => status === "approved").length >= 4);
+  assert.equal(Object.values(result.recovered.approvals).filter(({ status }) => status === "approved").length, 3);
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
 });

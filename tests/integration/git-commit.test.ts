@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { commitGitChanges } from "../../src/adapters/connectors/git-native.js";
+import { commitGitChanges, reconcileGitCommit } from "../../src/adapters/connectors/git-native.js";
 import {
   GitCommitError,
   gitCommitManifest,
@@ -103,6 +103,81 @@ test("git.commit creates the approved commit, verifies its identity, and leaves 
   assert.equal(receipt.readBackDigest, input.diffDigest);
   assert.equal(await git(setup.root, "show", "HEAD:src/a.txt"), "approved worktree version");
   assert.deepEqual(await readFile(path.join(setup.repositoryCommonDir, "index")), beforeIndex);
+});
+
+test("git.commit reconciliation verifies the exact approved commit without another mutation", async () => {
+  const setup = await fixture();
+  await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+  const input = await approval(setup, ["src/a.txt"]);
+  const receipt = await commitGitChanges({ executable: setup.executable, approval: input });
+
+  const readBack = await reconcileGitCommit({ executable: setup.executable, approval: input });
+
+  assert.equal(readBack.outcome, "verified");
+  if (readBack.outcome !== "verified") throw new Error("expected verified git reconciliation");
+  assert.equal(readBack.commitOid, receipt.commitOid);
+  assert.equal(readBack.repositoryCommonDir, input.repositoryCommonDir);
+  assert.equal(readBack.diffDigest, input.diffDigest);
+  assert.deepEqual(readBack.files, input.files);
+  assert.equal(await git(setup.root, "rev-list", "--count", `${setup.baselineRevision}..HEAD`), "1");
+});
+
+test("git.commit reconciliation remains unknown while HEAD is still the approved baseline", async () => {
+  const setup = await fixture();
+  await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+  const input = await approval(setup, ["src/a.txt"]);
+
+  assert.deepEqual(
+    await reconcileGitCommit({ executable: setup.executable, approval: input }),
+    { outcome: "unknown" },
+  );
+  assert.equal(await git(setup.root, "rev-parse", "HEAD"), setup.baselineRevision);
+});
+
+test("git.commit reconciliation fails closed for a non-approved HEAD", async (t) => {
+  await t.test("wrong parent", async () => {
+    const setup = await fixture();
+    await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+    const input = await approval(setup, ["src/a.txt"]);
+    await git(setup.root, "commit", "--allow-empty", "-m", "unapproved intermediate");
+    await git(setup.root, "add", "src/a.txt");
+    await git(setup.root, "commit", "-m", input.message);
+
+    assert.deepEqual(await reconcileGitCommit({ executable: setup.executable, approval: input }), { outcome: "failed" });
+  });
+
+  await t.test("merge commit", async () => {
+    const setup = await fixture();
+    await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+    const input = await approval(setup, ["src/a.txt"]);
+    const committed = await commitGitChanges({ executable: setup.executable, approval: input });
+    const merge = await git(
+      setup.root,
+      "commit-tree",
+      committed.treeOid,
+      "-p",
+      setup.baselineRevision,
+      "-p",
+      committed.commitOid,
+      "-m",
+      input.message,
+    );
+    await git(setup.root, "update-ref", "HEAD", merge, committed.commitOid);
+
+    assert.deepEqual(await reconcileGitCommit({ executable: setup.executable, approval: input }), { outcome: "failed" });
+  });
+
+  for (const current of ["wrong message", "wrong files", "wrong diff"] as const) await t.test(current, async () => {
+    const setup = await fixture();
+    await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+    const input = await approval(setup, ["src/a.txt"]);
+    if (current === "wrong files") await writeFile(path.join(setup.root, "src/b.txt"), "also changed\n", "utf8");
+    if (current === "wrong diff") await writeFile(path.join(setup.root, "src/a.txt"), "different\n", "utf8");
+    await git(setup.root, "add", "src/a.txt", ...(current === "wrong files" ? ["src/b.txt"] : []));
+    await git(setup.root, "commit", "-m", current === "wrong message" ? "different message" : input.message);
+
+    assert.deepEqual(await reconcileGitCommit({ executable: setup.executable, approval: input }), { outcome: "failed" });
+  });
 });
 
 test("git.commit rejects dirty files outside the exact approval list before moving HEAD", async () => {

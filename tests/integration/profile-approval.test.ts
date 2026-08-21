@@ -69,7 +69,7 @@ test("Profile 快照声明 Artifact 审批矩阵，而不是依赖固定阶段�
   } as const;
 
   for (const profileId of ["quick", "standard", "governed"] as const) {
-    const fixture = await controlRuntimeFixture();
+    const fixture = await controlRuntimeFixture({ knowledgeTarget: profileId === "governed" });
     const started = await fixture.app.start({
       root: fixture.root,
       source: { type: "prompt", text: `${profileId} 审批矩阵` },

@@ -7,7 +7,7 @@ import { readWorkflowTrustRequest } from "../storage/workflow-trust.js";
 import { loadWorkflowPackage } from "../workflow-package/loader.js";
 import { recordWorkflowTrust } from "../workflow-package/trust.js";
 import { acquireApplication, type AcquireDependencies } from "./acquire.js";
-import { approveExternalAction, reconcileExternalAction, rejectExternalAction } from "./external-action.js";
+import { adoptVerifiedExternalAction, approveExternalAction, markExternalActionFailed, reconcileExternalAction, rejectExternalAction } from "./external-action.js";
 import { readControlPlane } from "../storage/control-plane.js";
 
 export interface DecideDependencies extends AcquireDependencies {
@@ -74,13 +74,43 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
     const projection = await readControlPlane(input.root, input.workItemId);
     const state = projection.externalActions[input.requestId];
     if (state === undefined) throw new ApplicationDecisionError("WSSPEC_EXTERNAL_REQUEST_NOT_FOUND", "外部动作请求不存在。 ");
-    await reconcileExternalAction({
-      root: input.root,
-      workItemId: input.workItemId,
-      requestId: input.requestId,
-      executor: dependencies.externalExecutor(state.request.provider, state.request.action),
-      now: dependencies.now().toISOString(),
-    });
+    if (state.request.requestDigest !== input.expectedDigest) {
+      throw new ApplicationDecisionError("WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH", "协调恢复决定未绑定当前 Request 摘要。 ");
+    }
+    if (input.decision === "mark_failed") {
+      await markExternalActionFailed({
+        root: input.root,
+        workItemId: input.workItemId,
+        requestId: input.requestId,
+        expectedRequestDigest: input.expectedDigest,
+        evidence: input.evidence,
+        actor: input.actor,
+        now: dependencies.now().toISOString(),
+        terminal: dependencies.terminal,
+      });
+    } else if (input.decision === "adopt_verified") {
+      await adoptVerifiedExternalAction({
+        root: input.root,
+        workItemId: input.workItemId,
+        requestId: input.requestId,
+        expectedRequestDigest: input.expectedDigest,
+        externalStableId: input.externalStableId,
+        contentDigest: input.contentDigest,
+        evidence: input.evidence,
+        actor: input.actor,
+        now: dependencies.now().toISOString(),
+        terminal: dependencies.terminal,
+        executor: dependencies.externalExecutor(state.request.provider, state.request.action),
+      });
+    } else {
+      await reconcileExternalAction({
+        root: input.root,
+        workItemId: input.workItemId,
+        requestId: input.requestId,
+        executor: dependencies.externalExecutor(state.request.provider, state.request.action),
+        now: dependencies.now().toISOString(),
+      });
+    }
     return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
   }
 

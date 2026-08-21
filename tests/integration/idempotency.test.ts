@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -8,9 +10,12 @@ import {
   prepareExternalAction,
   type ExternalActionExecutor,
 } from "../../src/application/external-action.js";
+import { ApplicationSubmitError } from "../../src/application/submit.js";
 import { externalIdempotencyKey } from "../../src/engine/external-effects/idempotency.js";
+import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import { readControlPlane } from "../../src/storage/control-plane.js";
-import { applicationExternalActionFixture, externalActionFixture, prepareInput, submitExternalAction } from "./helpers/external-action.js";
+import { applicationExternalActionFixture, applicationGitActionFixture, externalActionFixture, prepareInput, submitExternalAction } from "./helpers/external-action.js";
+import { worktreeFor } from "./helpers/control-runtime.js";
 
 async function approvedAction() {
   const fixture = await externalActionFixture();
@@ -66,7 +71,7 @@ test("verified duplicate execute returns the original receipt without another pr
     async execute({ request, markDispatched }) {
       await markDispatched();
       calls += 1;
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-18T04:00:20.000Z" };
+      return { targetStableId: request.target.stableId, publishedContentDigest: request.expectedContentDigest, readBackContentDigest: request.expectedContentDigest, verifiedAt: "2026-08-18T04:00:20.000Z" };
     },
     async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" }; },
   };
@@ -81,20 +86,64 @@ test("verified duplicate execute returns the original receipt without another pr
   assert.equal(calls, 1);
 });
 
+test("comment preparation, grant, and verified receipt bind the authoritative external effect identity", async () => {
+  const fixture = await externalActionFixture();
+  const input = {
+    ...prepareInput(fixture.root, fixture.workPackage),
+    externalEffectKind: "issue.comment" as const,
+  };
+  const prepared = await prepareExternalAction(input);
+  assert.equal((prepared.request as unknown as Record<string, unknown>).externalEffectKind, "issue.comment");
+  const approved = await approveExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: prepared.request.requestId,
+    expectedRequestDigest: prepared.request.requestDigest, actor: "maintainer", approvalDigest: prepared.request.requestDigest,
+    profile: "standard", profileDigest: prepared.request.profileDigest, workspaceDigest: prepared.request.workspaceDigest,
+    configDigest: prepared.request.configDigest, decidedAt: "2026-08-18T04:00:10.000Z",
+    expiresAt: "2026-08-18T04:00:50.000Z", terminal: { isTTY: true },
+  });
+  assert.equal((approved.grant as unknown as Record<string, unknown>).externalEffectKind, "issue.comment");
+
+  const verified = await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: prepared.request.requestId,
+    payload: input.payload,
+    now: "2026-08-18T04:00:20.000Z",
+    executor: {
+      async execute({ request, markDispatched }) {
+        await markDispatched();
+        return {
+          targetStableId: request.target.stableId,
+          externalEffectId: "github-comment:4242",
+          publishedContentDigest: request.expectedContentDigest,
+          readBackContentDigest: request.expectedContentDigest,
+          verifiedAt: "2026-08-18T04:00:20.000Z",
+        };
+      },
+      async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" }; },
+    },
+  });
+  assert.equal(verified.status, "verified");
+  if (verified.status !== "verified") throw new Error("expected verified action");
+  assert.equal((verified.receipt as unknown as Record<string, unknown>).externalEffectKind, "issue.comment");
+  assert.equal((verified.receipt as unknown as Record<string, unknown>).externalEffectId, "github-comment:4242");
+});
+
 test("repeated application submit writes once, stores only the receipt, and rejects a changed payload for the same Attempt", async () => {
   let writes = 0;
   const fixture = await applicationExternalActionFixture({
     async execute({ request, markDispatched }) {
       await markDispatched();
       writes += 1;
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
+      return { targetStableId: request.target.stableId, publishedContentDigest: request.expectedContentDigest, readBackContentDigest: request.expectedContentDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
     },
     async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
   });
   const pending = await submitExternalAction(fixture);
   assert.equal(pending.action, "await_approval");
   const changed = structuredClone(fixture.result);
-  (changed.externalWrites[0] as { payload: unknown }).payload = { body: "different payload" };
+  const changedWrite = changed.externalWrites[0] as { payload: { action: { body: string } } };
+  changedWrite.payload.action.body = "different payload";
   await assert.rejects(submitExternalAction(fixture, changed),
     (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT");
   if (pending.action !== "await_approval") throw new Error("expected approval");
@@ -112,6 +161,243 @@ test("repeated application submit writes once, stores only the receipt, and reje
   assert.equal(JSON.stringify(projection).includes("fixture-secret"), false);
 });
 
+test("verified application retry revalidates the production binding before reusing its receipt", async () => {
+  const executor: ExternalActionExecutor = {
+    async execute({ request, markDispatched }) {
+      await markDispatched();
+      return {
+        targetStableId: request.target.stableId,
+        publishedContentDigest: request.expectedContentDigest,
+        readBackContentDigest: request.expectedContentDigest,
+        verifiedAt: "2026-08-18T04:01:00.000Z",
+      };
+    },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  };
+  const fixture = await applicationExternalActionFixture(executor);
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action",
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "approved",
+    expectedDigest: pending.approval.digest,
+    actor: "maintainer",
+  });
+  const approved = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(approved?.status, "approved");
+  if (approved?.status !== "approved") throw new Error("expected approved action");
+  const intent = fixture.result.externalWrites[0] as { payload: unknown };
+  const verified = await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    payload: intent.payload,
+    executor,
+    now: approved.grant.decidedAt,
+  });
+  assert.equal(verified.status, "verified");
+
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:verified-binding-drift:${pending.approval.requestId}`,
+    operationInput: { requestId: pending.approval.requestId },
+    mutate: (projection) => {
+      const bindings = projection.evidence.bindings as Record<string, Record<string, unknown>>;
+      return {
+        projection: {
+          ...projection,
+          evidence: {
+            ...projection.evidence,
+            bindings: {
+              ...bindings,
+              issue: { ...bindings.issue, stableId: "github:example/project#99" },
+            },
+          },
+        },
+        value: null,
+      };
+    },
+  });
+
+  await assert.rejects(
+    submitExternalAction(fixture),
+    (error: unknown) => error instanceof ApplicationSubmitError && error.code === "WSSPEC_EXTERNAL_BINDING_INVALID",
+  );
+});
+
+test("verified application retry rejects same-path workspace drift before reusing its receipt", async () => {
+  const executor: ExternalActionExecutor = {
+    async execute({ request, markDispatched }) {
+      await markDispatched();
+      return {
+        targetStableId: request.target.stableId,
+        publishedContentDigest: request.expectedContentDigest,
+        readBackContentDigest: request.expectedContentDigest,
+        verifiedAt: "2026-08-18T04:01:00.000Z",
+      };
+    },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  };
+  const fixture = await applicationExternalActionFixture(executor);
+  const worktree = await worktreeFor(fixture.root, fixture.workItemId);
+  await writeFile(path.join(worktree, "README.md"), "approved workspace content\n", "utf8");
+  const result = structuredClone(fixture.result);
+  result.modifiedFiles = ["README.md"];
+
+  const pending = await submitExternalAction(fixture, result);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action",
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "approved",
+    expectedDigest: pending.approval.digest,
+    actor: "maintainer",
+  });
+  const approved = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(approved?.status, "approved");
+  if (approved?.status !== "approved") throw new Error("expected approved action");
+  const intent = result.externalWrites[0] as { payload: unknown };
+  assert.equal((await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    payload: intent.payload,
+    executor,
+    now: approved.grant.decidedAt,
+  })).status, "verified");
+
+  await writeFile(path.join(worktree, "README.md"), "drifted workspace content\n", "utf8");
+  await assert.rejects(
+    submitExternalAction(fixture, result),
+    (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_EXTERNAL_GRANT_MISMATCH",
+  );
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  assert.equal(projection.idempotency[`submit:${fixture.workPackage.attemptId}`], undefined);
+});
+
+test("verified git.commit retry rejects same-path worktree drift without submitting the Attempt", async () => {
+  const executor: ExternalActionExecutor = {
+    async execute({ request, markDispatched }) {
+      await markDispatched();
+      return {
+        targetStableId: request.target.stableId,
+        publishedContentDigest: request.expectedContentDigest,
+        readBackContentDigest: request.expectedContentDigest,
+        verifiedAt: "2026-08-18T04:01:00.000Z",
+      };
+    },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  };
+  const fixture = await applicationGitActionFixture(executor);
+  const pending = await fixture.app.submit({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    stepId: fixture.workPackage.stepId,
+    attemptId: fixture.workPackage.attemptId,
+    leaseToken: fixture.workPackage.lease.token,
+    result: fixture.result,
+  });
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action",
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "approved",
+    expectedDigest: pending.approval.digest,
+    actor: "maintainer",
+  });
+  const approved = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(approved?.status, "approved");
+  if (approved?.status !== "approved") throw new Error("expected approved action");
+  const intent = fixture.result.externalWrites[0] as { payload: unknown };
+  assert.equal((await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    payload: intent.payload,
+    executor,
+    now: approved.grant.decidedAt,
+  })).status, "verified");
+
+  await writeFile(path.join(fixture.worktree, "README.md"), "drifted git content\n", "utf8");
+  await assert.rejects(
+    fixture.app.submit({
+      root: fixture.root,
+      workItemId: fixture.workItemId,
+      stepId: fixture.workPackage.stepId,
+      attemptId: fixture.workPackage.attemptId,
+      leaseToken: fixture.workPackage.lease.token,
+      result: fixture.result,
+    }),
+    (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_EXTERNAL_GRANT_MISMATCH",
+  );
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  assert.equal(projection.idempotency[`submit:${fixture.workPackage.attemptId}`], undefined);
+});
+
+test("verified knowledge.publish retry rejects publication-input drift without submitting the Attempt", async () => {
+  const executor: ExternalActionExecutor = {
+    async execute({ request, markDispatched }) {
+      await markDispatched();
+      return {
+        targetStableId: request.target.stableId,
+        publishedContentDigest: request.expectedContentDigest,
+        readBackContentDigest: request.expectedContentDigest,
+        verifiedAt: "2026-08-18T04:01:00.000Z",
+      };
+    },
+    async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  };
+  const fixture = await applicationExternalActionFixture(executor, { action: "knowledge.publish" });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action",
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "approved",
+    expectedDigest: pending.approval.digest,
+    actor: "maintainer",
+  });
+  const approved = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  assert.equal(approved?.status, "approved");
+  if (approved?.status !== "approved") throw new Error("expected approved action");
+  const intent = fixture.result.externalWrites[0] as { payload: unknown };
+  assert.equal((await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    payload: intent.payload,
+    executor,
+    now: approved.grant.decidedAt,
+  })).status, "verified");
+
+  const publication = fixture.workPackage.artifacts.find(({ artifactType }) => artifactType === "knowledge-entry");
+  assert.ok(publication?.path);
+  const worktree = await worktreeFor(fixture.root, fixture.workItemId);
+  const publicationPath = path.join(worktree, publication.path);
+  await writeFile(publicationPath, `${await readFile(publicationPath, "utf8")}\nDrifted after verification.\n`, "utf8");
+  await assert.rejects(
+    submitExternalAction(fixture),
+    (error: unknown) => (error as { code?: unknown }).code === "WSSPEC_ARTIFACT_REFERENCE_INVALID",
+  );
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  assert.equal(projection.idempotency[`submit:${fixture.workPackage.attemptId}`], undefined);
+});
+
 test("repeated application submit reuses the approved logical request when the clock advances", async () => {
   let currentTime = "2026-08-18T04:00:00.000Z";
   let writes = 0;
@@ -119,7 +405,7 @@ test("repeated application submit reuses the approved logical request when the c
     async execute({ request, markDispatched }) {
       await markDispatched();
       writes += 1;
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: currentTime };
+      return { targetStableId: request.target.stableId, publishedContentDigest: request.expectedContentDigest, readBackContentDigest: request.expectedContentDigest, verifiedAt: currentTime };
     },
     async reconcile() { return { outcome: "unknown", checkedAt: currentTime }; },
   }, { now: () => new Date(currentTime) });
@@ -139,6 +425,62 @@ test("repeated application submit reuses the approved logical request when the c
   assert.equal(writes, 1);
 });
 
+test("repeating the same external approval after a lost response preserves the first decision", async () => {
+  let currentTime = "2026-08-18T04:00:01.000Z";
+  const fixture = await applicationExternalActionFixture({
+    async execute() { throw new Error("must not execute"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: currentTime }; },
+  }, { now: () => new Date(currentTime) });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  const decision = {
+    kind: "external_action" as const,
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "approved" as const,
+    expectedDigest: pending.approval.digest,
+    actor: "maintainer",
+  };
+
+  const first = await fixture.app.decide(decision);
+  const firstGrant = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId];
+  currentTime = "2026-08-18T04:00:02.000Z";
+  const repeated = await fixture.app.decide(decision);
+
+  assert.deepEqual(repeated, first);
+  assert.deepEqual((await readControlPlane(fixture.root, fixture.workItemId)).externalActions[pending.approval.requestId], firstGrant);
+});
+
+test("repeating the same external rejection after a lost response preserves the first decision", async () => {
+  let currentTime = "2026-08-18T04:00:01.000Z";
+  const fixture = await applicationExternalActionFixture({
+    async execute() { throw new Error("must not execute"); },
+    async reconcile() { return { outcome: "unknown", checkedAt: currentTime }; },
+  }, { now: () => new Date(currentTime) });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  const decision = {
+    kind: "external_action" as const,
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId,
+    decision: "rejected" as const,
+    expectedDigest: pending.approval.digest,
+    actor: "maintainer",
+  };
+
+  const first = await fixture.app.decide(decision);
+  const firstRejection = (await readControlPlane(fixture.root, fixture.workItemId)).evidence[`external-rejection:${pending.approval.requestId}`];
+  currentTime = "2026-08-18T04:00:02.000Z";
+  const repeated = await fixture.app.decide(decision);
+
+  assert.deepEqual(repeated, first);
+  assert.deepEqual((await readControlPlane(fixture.root, fixture.workItemId)).evidence[`external-rejection:${pending.approval.requestId}`], firstRejection);
+});
+
 test("concurrent application submits atomically assign one Provider dispatch owner", async () => {
   let providerCalls = 0;
   let enteredResolve!: () => void;
@@ -151,7 +493,7 @@ test("concurrent application submits atomically assign one Provider dispatch own
       enteredResolve();
       await release;
       await markDispatched();
-      return { targetStableId: request.target.stableId, contentDigest: request.payloadDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
+      return { targetStableId: request.target.stableId, publishedContentDigest: request.expectedContentDigest, readBackContentDigest: request.expectedContentDigest, verifiedAt: "2026-08-18T04:01:00.000Z" };
     },
     async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
   });

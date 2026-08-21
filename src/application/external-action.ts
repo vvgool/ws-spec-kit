@@ -6,6 +6,7 @@ import {
   ExternalAuthorizationError,
   transitionExternalAction,
   type ExternalActionGrant,
+  type ExternalEffectKind,
   type ExternalActionName,
   type ExternalActionRequest,
   type ExternalActionState,
@@ -23,9 +24,10 @@ import {
 } from "../storage/external-action-payload.js";
 import { loadApplicationState, selectedProfile } from "./state.js";
 import { validate } from "../schemas/index.js";
+import { inspectDecodedCredentialSurface } from "../registry/connectors/secret-detector.js";
 
 export { ExternalAuthorizationError as ExternalActionError } from "../engine/external-effects/authorization.js";
-export type { ExternalActionGrant, ExternalActionName, ExternalActionRequest, ExternalActionState, ExternalWriteReceipt } from "../engine/external-effects/authorization.js";
+export type { ExternalActionGrant, ExternalActionName, ExternalActionRequest, ExternalActionState, ExternalEffectKind, ExternalWriteReceipt } from "../engine/external-effects/authorization.js";
 
 export interface ExternalActionPrepareInput {
   root: string;
@@ -34,9 +36,11 @@ export interface ExternalActionPrepareInput {
   attemptId: string;
   provider: string;
   action: ExternalActionName;
-  securityClass: "external-write";
+  securityClass: "local-write" | "external-write";
   target: ExternalActionTarget;
+  externalEffectKind?: ExternalEffectKind;
   payload: unknown;
+  expectedContentDigest: `sha256:${string}`;
   bindingDigest: `sha256:${string}`;
   inputDigest: `sha256:${string}`;
   artifactDigests: `sha256:${string}`[];
@@ -78,8 +82,21 @@ export interface ExternalActionExecutor {
     grant: ExternalActionGrant;
     payload: unknown;
     markDispatched(): Promise<void>;
-  }): Promise<{ targetStableId: string; contentDigest: `sha256:${string}`; verifiedAt: string }>;
+  }): Promise<{
+    targetStableId: string;
+    externalEffectId?: string;
+    publishedContentDigest: `sha256:${string}`;
+    readBackContentDigest: `sha256:${string}`;
+    verifiedAt: string;
+  }>;
   reconcile(input: { root: string; request: ExternalActionRequest; grant: ExternalActionGrant }): Promise<ExternalReadBack>;
+  adopt?(input: {
+    root: string;
+    request: ExternalActionRequest;
+    grant: ExternalActionGrant;
+    externalStableId: string;
+    contentDigest: `sha256:${string}`;
+  }): Promise<ExternalReadBack>;
 }
 
 function asExternalError(error: unknown): never {
@@ -113,7 +130,7 @@ function assertActiveAttempt(
   }
 }
 
-async function assertCurrentRequestContext(
+export async function assertCurrentExternalActionContext(
   state: Awaited<ReturnType<typeof loadApplicationState>>,
   projection: RuntimeProjection,
   request: ExternalActionRequest,
@@ -187,7 +204,9 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
       action: input.action,
       securityClass: input.securityClass,
       target: input.target,
+      ...(input.externalEffectKind === undefined ? {} : { externalEffectKind: input.externalEffectKind }),
       payload: input.payload,
+      expectedContentDigest: input.expectedContentDigest,
       payloadArtifactDigest: payloadArtifact.digest,
       bindingDigest: input.bindingDigest,
       inputDigest: input.inputDigest,
@@ -232,7 +251,7 @@ export async function prepareExternalAction(input: ExternalActionPrepareInput): 
           throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT", "同一 Attempt 的外部动作已绑定不同 payload。");
         }
         assertActiveAttempt(projection, request, new Date(input.createdAt));
-        await assertCurrentRequestContext(state, projection, request);
+        await assertCurrentExternalActionContext(state, projection, request);
         if (input.idempotencyKey !== undefined && input.idempotencyKey !== derivedKey) {
           throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_IDEMPOTENCY_INVALID", "外部幂等键不符合规范身份生成规则。");
         }
@@ -292,37 +311,41 @@ export async function approveExternalAction(input: {
   if (current.status !== "prepared" && current.status !== "approved") {
     throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID", "只有 prepared 外部动作可以授权。");
   }
-  let grant: ExternalActionGrant;
-  try {
-    grant = validate<ExternalActionGrant>("builtin.external-action-grant.v1", createExternalActionGrant({
-      request: current.request,
+  return mutateControlPlane({
+    cwd: input.root,
+    workItemId: input.workItemId,
+    eventType: "external-action.approved",
+    idempotencyKey: `external-action:approve:${input.requestId}:${current.request.requestDigest}`,
+    actor: input.actor,
+    stageId: current.request.stepId,
+    attemptId: current.request.attemptId,
+    operationInput: {
+      decision: "approved",
+      requestDigest: input.expectedRequestDigest,
       actor: input.actor,
       approvalDigest: input.approvalDigest,
       profile: input.profile,
       profileDigest: input.profileDigest,
       workspaceDigest: input.workspaceDigest,
       configDigest: input.configDigest,
-      decidedAt: input.decidedAt,
       expiresAt: input.expiresAt,
-    }));
-  } catch (error) {
-    return asExternalError(error);
-  }
-  assertActiveAttempt(await readControlPlane(input.root, input.workItemId), current.request, new Date(input.decidedAt));
-  return mutateControlPlane({
-    cwd: input.root,
-    workItemId: input.workItemId,
-    eventType: "external-action.approved",
-    idempotencyKey: `external-action:approve:${input.requestId}`,
-    actor: input.actor,
-    stageId: current.request.stepId,
-    attemptId: current.request.attemptId,
-    operationInput: grant,
+    },
     mutate: async (projection) => {
       const action = currentAction(projection, input.requestId);
       if (action.status !== "prepared") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID", "只有 prepared 外部动作可以授权。");
+      const grant = validate<ExternalActionGrant>("builtin.external-action-grant.v1", createExternalActionGrant({
+        request: action.request,
+        actor: input.actor,
+        approvalDigest: input.approvalDigest,
+        profile: input.profile,
+        profileDigest: input.profileDigest,
+        workspaceDigest: input.workspaceDigest,
+        configDigest: input.configDigest,
+        decidedAt: input.decidedAt,
+        expiresAt: input.expiresAt,
+      }));
       assertActiveAttempt(projection, action.request, new Date(input.decidedAt));
-      await assertCurrentRequestContext(applicationState, projection, action.request);
+      await assertCurrentExternalActionContext(applicationState, projection, action.request);
       const approved = transitionExternalAction(action, { status: "approved", request: action.request, grant }) as Extract<ExternalActionState, { status: "approved" }>;
       return { projection: { ...projection, externalActions: { ...projection.externalActions, [input.requestId]: approved } }, value: approved };
     },
@@ -344,14 +367,15 @@ export async function rejectExternalAction(input: {
     cwd: input.root,
     workItemId: input.workItemId,
     eventType: "external-action.rejected",
-    idempotencyKey: `external-action:reject:${input.requestId}`,
+    idempotencyKey: `external-action:reject:${input.requestId}:${initial.request.requestDigest}`,
     actor: input.actor,
     stageId: initial.request.stepId,
     attemptId: initial.request.attemptId,
     operationInput: {
+      decision: "rejected",
       requestId: input.requestId,
       expectedRequestDigest: input.expectedRequestDigest,
-      rejectedAt: input.rejectedAt,
+      actor: input.actor,
     },
     mutate: (projection) => {
       const action = currentAction(projection, input.requestId);
@@ -406,10 +430,15 @@ async function persistAction(input: {
 
 function receipt(request: ExternalActionRequest, grant: ExternalActionGrant, input: {
   targetStableId: string;
-  contentDigest: `sha256:${string}`;
+  externalEffectId?: string;
+  publishedContentDigest: `sha256:${string}`;
+  readBackContentDigest: `sha256:${string}`;
   verifiedAt: string;
 }): ExternalWriteReceipt {
-  if (input.targetStableId !== request.target.stableId || input.contentDigest !== request.payloadDigest) {
+  if (input.targetStableId !== request.target.stableId
+    || (request.externalEffectKind === "issue.comment") !== (input.externalEffectId !== undefined)
+    || input.publishedContentDigest !== request.expectedContentDigest
+    || input.readBackContentDigest !== request.expectedContentDigest) {
     throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_READBACK_MISMATCH", "外部回读的稳定目标或内容摘要不一致。");
   }
   return validate<ExternalWriteReceipt>("builtin.external-write-receipt.v1", {
@@ -424,12 +453,16 @@ function receipt(request: ExternalActionRequest, grant: ExternalActionGrant, inp
     provider: request.provider,
     action: request.action,
     target: { ...request.target },
+    ...(request.externalEffectKind === undefined ? {} : { externalEffectKind: request.externalEffectKind }),
+    ...(input.externalEffectId === undefined ? {} : { externalEffectId: input.externalEffectId }),
     payloadDigest: request.payloadDigest,
+    expectedContentDigest: request.expectedContentDigest,
     bindingDigest: request.bindingDigest,
     inputDigest: request.inputDigest,
     artifactDigests: [...request.artifactDigests],
     idempotencyKey: request.idempotencyKey,
-    readBackContentDigest: input.contentDigest,
+    publishedContentDigest: input.publishedContentDigest,
+    readBackContentDigest: input.readBackContentDigest,
     status: "verified",
     verifiedAt: input.verifiedAt,
   });
@@ -495,7 +528,7 @@ export async function executeExternalAction(input: {
           return { projection, value: { action, owned: false as const } };
         }
         assertActiveAttempt(projection, action.request, new Date(input.now));
-        await assertCurrentRequestContext(applicationState, projection, action.request);
+        await assertCurrentExternalActionContext(applicationState, projection, action.request);
         const executing = action.status === "approved"
           ? transitionExternalAction(action, {
             status: "executing", request: action.request, grant: action.grant, dispatch: "not_sent",
@@ -516,7 +549,7 @@ export async function executeExternalAction(input: {
   }
   const executionProjection = await readControlPlane(input.root, input.workItemId);
   assertActiveAttempt(executionProjection, current.request, new Date(input.now));
-  await assertCurrentRequestContext(applicationState, executionProjection, current.request);
+  await assertCurrentExternalActionContext(applicationState, executionProjection, current.request);
   let dispatched = false;
   const markDispatched = async (): Promise<void> => {
     const dispatchedState = await persistAction({
@@ -625,7 +658,14 @@ export async function reconcileExternalAction(input: {
     }) as Promise<Extract<ExternalActionState, { status: "failed" }>>;
   }
   let confirmed: ExternalWriteReceipt;
-  try { confirmed = receipt(current.request, current.grant, { targetStableId: readBack.targetStableId, contentDigest: readBack.contentDigest, verifiedAt: input.now }); }
+  try {
+    confirmed = receipt(current.request, current.grant, {
+      targetStableId: readBack.targetStableId,
+      publishedContentDigest: readBack.contentDigest,
+      readBackContentDigest: readBack.contentDigest,
+      verifiedAt: input.now,
+    });
+  }
   catch {
     return persistAction({
       ...input,
@@ -643,6 +683,159 @@ export async function reconcileExternalAction(input: {
     update: (action) => {
       if (action.status !== "reconciliation_required") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID", "协调确认需要 reconciliation_required 状态。");
       return transitionExternalAction(action, { status: "verified", request: action.request, grant: action.grant, receipt: confirmed });
+    },
+  }) as Promise<Extract<ExternalActionState, { status: "verified" }>>;
+}
+
+export async function markExternalActionFailed(input: {
+  root: string;
+  workItemId: string;
+  requestId: string;
+  expectedRequestDigest: string;
+  evidence: string;
+  actor: string;
+  now: string;
+  terminal: { isTTY?: boolean };
+}): Promise<Extract<ExternalActionState, { status: "failed" }>> {
+  if (input.terminal.isTTY !== true) {
+    throw new ExternalAuthorizationError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "协调恢复决定必须来自真实交互式 TTY。");
+  }
+  if (input.evidence.trim() === "" || input.evidence.includes("\0")) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID", "协调恢复证据不能为空。");
+  }
+  const applicationState = await loadApplicationState(input.root, input.workItemId);
+  const initial = currentAction(applicationState.projection, input.requestId);
+  if (initial.request.requestDigest !== input.expectedRequestDigest) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH", "协调恢复决定未绑定当前 Request 摘要。");
+  }
+  const evidenceDigest = canonicalDigest({ evidence: input.evidence }, "WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID");
+  return persistAction({
+    root: input.root,
+    workItemId: input.workItemId,
+    requestId: input.requestId,
+    eventType: "external-action.reconciled",
+    suffix: `operator-mark-failed:${evidenceDigest.slice("sha256:".length)}`,
+    actor: input.actor,
+    operationInput: {
+      decision: "mark_failed",
+      requestDigest: input.expectedRequestDigest,
+      evidenceDigest,
+      actor: input.actor,
+    },
+    update: (action, projection) => {
+      if (action.status !== "reconciliation_required") {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "当前外部动作不允许协调恢复决定。");
+      }
+      assertActiveAttempt(projection, action.request, new Date(input.now));
+      return transitionExternalAction(action, {
+        status: "failed",
+        request: action.request,
+        grant: action.grant,
+        reason: "操作者经审计决定将未知写入标记为失败",
+        failedAt: input.now,
+      });
+    },
+  }) as Promise<Extract<ExternalActionState, { status: "failed" }>>;
+}
+
+export async function adoptVerifiedExternalAction(input: {
+  root: string;
+  workItemId: string;
+  requestId: string;
+  expectedRequestDigest: string;
+  externalStableId: string;
+  contentDigest: string;
+  evidence: string;
+  actor: string;
+  now: string;
+  terminal: { isTTY?: boolean };
+  executor: ExternalActionExecutor;
+}): Promise<Extract<ExternalActionState, { status: "verified" }>> {
+  if (input.terminal.isTTY !== true) {
+    throw new ExternalAuthorizationError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "协调恢复决定必须来自真实交互式 TTY。");
+  }
+  if (input.evidence.trim() === "" || input.evidence.includes("\0") || Buffer.byteLength(input.evidence, "utf8") > 2_048) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID", "协调恢复证据不能为空。");
+  }
+  const inspectedId = inspectDecodedCredentialSurface(input.externalStableId, {
+    detectCredentialKeys: true,
+    maximumBytes: 2_048,
+    maximumDecodeRounds: 4,
+  });
+  if (!inspectedId.ok || input.externalStableId.trim() === ""
+    || Buffer.byteLength(input.externalStableId, "utf8") > 2_048 || input.externalStableId.includes("\0")) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID", "外部稳定标识无效。");
+  }
+  const applicationState = await loadApplicationState(input.root, input.workItemId);
+  const initial = currentAction(applicationState.projection, input.requestId);
+  if (initial.request.requestDigest !== input.expectedRequestDigest) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH", "协调恢复决定未绑定当前 Request 摘要。");
+  }
+  if (input.contentDigest !== initial.request.expectedContentDigest) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_READBACK_MISMATCH", "待采纳内容摘要与批准内容不一致。");
+  }
+  if (input.executor.adopt === undefined) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_ADOPTION_UNSUPPORTED", "当前 Provider 不支持带稳定标识的权威回读采纳。");
+  }
+  const evidenceDigest = canonicalDigest({ evidence: input.evidence }, "WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID");
+  return persistAction({
+    root: input.root,
+    workItemId: input.workItemId,
+    requestId: input.requestId,
+    eventType: "external-action.reconciled",
+    suffix: `operator-adopt-verified:${canonicalDigest({ externalStableId: input.externalStableId, contentDigest: input.contentDigest, evidenceDigest }).slice("sha256:".length)}`,
+    actor: input.actor,
+    operationInput: {
+      decision: "adopt_verified",
+      requestDigest: input.expectedRequestDigest,
+      externalStableId: input.externalStableId,
+      contentDigest: input.contentDigest,
+      evidenceDigest,
+      actor: input.actor,
+    },
+    update: async (action, projection) => {
+      if (action.status !== "reconciliation_required") {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "当前外部动作不允许协调恢复决定。");
+      }
+      if (action.request.requestDigest !== input.expectedRequestDigest) {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH", "协调恢复决定未绑定当前 Request 摘要。");
+      }
+      assertActiveAttempt(projection, action.request, new Date(input.now));
+      await assertCurrentExternalActionContext(applicationState, projection, action.request);
+      let readBack: ExternalReadBack;
+      try {
+        readBack = await input.executor.adopt!({
+          root: input.root,
+          request: action.request,
+          grant: action.grant,
+          externalStableId: input.externalStableId,
+          contentDigest: input.contentDigest as `sha256:${string}`,
+        });
+      } catch {
+        throw new ExternalAuthorizationError(
+          "WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED",
+          "Provider 权威只读回查失败，未改变外部动作状态。",
+        );
+      }
+      if (readBack.outcome !== "verified") {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_ADOPTION_NOT_VERIFIED", "Provider 未能权威确认待采纳外部动作。");
+      }
+      if (readBack.targetStableId !== input.externalStableId || readBack.contentDigest !== input.contentDigest) {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_READBACK_MISMATCH", "Provider 权威回读与待采纳稳定标识或内容摘要不一致。");
+      }
+      const confirmed = receipt(action.request, action.grant, {
+        targetStableId: action.request.target.stableId,
+        ...(action.request.externalEffectKind === "issue.comment" ? { externalEffectId: input.externalStableId } : {}),
+        publishedContentDigest: input.contentDigest as `sha256:${string}`,
+        readBackContentDigest: readBack.contentDigest,
+        verifiedAt: input.now,
+      });
+      return transitionExternalAction(action, {
+        status: "verified",
+        request: action.request,
+        grant: action.grant,
+        receipt: confirmed,
+      });
     },
   }) as Promise<Extract<ExternalActionState, { status: "verified" }>>;
 }

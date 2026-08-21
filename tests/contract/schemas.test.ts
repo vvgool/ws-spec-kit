@@ -195,7 +195,9 @@ const validValues: Record<string, Record<string, unknown>> = {
     version: 1, requestId: `external-request-${"a".repeat(64)}`, workItemId: "WSS-20260816-001",
     stepId: "update-issue", attemptId: "attempt-update-issue", provider: "github", action: "issue.update",
     securityClass: "external-write", target: { kind: "issue", stableId: "github:example/project#42" },
-    payloadDigest: `sha256:${"b".repeat(64)}`, payloadArtifactDigest: `sha256:${"6".repeat(64)}`, bindingDigest: `sha256:${"c".repeat(64)}`,
+    externalEffectKind: "issue.comment",
+    payloadDigest: `sha256:${"b".repeat(64)}`, expectedContentDigest: `sha256:${"b".repeat(64)}`,
+    payloadArtifactDigest: `sha256:${"6".repeat(64)}`, bindingDigest: `sha256:${"c".repeat(64)}`,
     inputDigest: `sha256:${"d".repeat(64)}`, artifactDigests: [`sha256:${"e".repeat(64)}`],
     idempotencyKey: `external:${"f".repeat(64)}`, profile: "standard", profileDigest: `sha256:${"1".repeat(64)}`,
     workspaceDigest: `sha256:${"2".repeat(64)}`, configDigest: `sha256:${"3".repeat(64)}`,
@@ -207,6 +209,8 @@ const validValues: Record<string, Record<string, unknown>> = {
     requestDigest: `sha256:${"4".repeat(64)}`, workItemId: "WSS-20260816-001", stepId: "update-issue",
     attemptId: "attempt-update-issue", provider: "github", action: "issue.update", securityClass: "external-write",
     target: { kind: "issue", stableId: "github:example/project#42" }, payloadDigest: `sha256:${"b".repeat(64)}`,
+    externalEffectKind: "issue.comment",
+    expectedContentDigest: `sha256:${"b".repeat(64)}`,
     payloadArtifactDigest: `sha256:${"6".repeat(64)}`,
     bindingDigest: `sha256:${"c".repeat(64)}`, inputDigest: `sha256:${"d".repeat(64)}`,
     artifactDigests: [`sha256:${"e".repeat(64)}`], idempotencyKey: `external:${"f".repeat(64)}`, actor: "maintainer",
@@ -219,9 +223,12 @@ const validValues: Record<string, Record<string, unknown>> = {
     requestDigest: `sha256:${"4".repeat(64)}`, grantDigest: `sha256:${"5".repeat(64)}`,
     workItemId: "WSS-20260816-001", stepId: "update-issue", attemptId: "attempt-update-issue",
     provider: "github", action: "issue.update", target: { kind: "issue", stableId: "github:example/project#42" },
-    payloadDigest: `sha256:${"b".repeat(64)}`, bindingDigest: `sha256:${"c".repeat(64)}`,
+    externalEffectKind: "issue.comment", externalEffectId: "github-comment:44",
+    payloadDigest: `sha256:${"b".repeat(64)}`, expectedContentDigest: `sha256:${"b".repeat(64)}`,
+    bindingDigest: `sha256:${"c".repeat(64)}`,
     inputDigest: `sha256:${"d".repeat(64)}`, artifactDigests: [`sha256:${"e".repeat(64)}`],
-    idempotencyKey: `external:${"f".repeat(64)}`, readBackContentDigest: `sha256:${"b".repeat(64)}`,
+    idempotencyKey: `external:${"f".repeat(64)}`, publishedContentDigest: `sha256:${"b".repeat(64)}`,
+    readBackContentDigest: `sha256:${"b".repeat(64)}`,
     status: "verified", verifiedAt: "2026-08-16T10:06:00.000Z",
   },
   "builtin.artifact.v1": {
@@ -239,6 +246,35 @@ test("all public v1 schemas accept their canonical example", () => {
   for (const [schemaId, value] of Object.entries(validValues)) {
     assert.deepEqual(validate(schemaId as SchemaId, value), value);
   }
+});
+
+test("governed action schemas bind action, security class, and target kind", () => {
+  for (const schemaId of ["builtin.external-action-request.v1", "builtin.external-action-grant.v1"] as const) {
+    const value = validValues[schemaId] as Record<string, unknown>;
+    assert.throws(() => validate(schemaId, { ...value, securityClass: "local-write" }));
+  }
+  const receipt = validValues["builtin.external-write-receipt.v1"] as Record<string, unknown>;
+  assert.throws(() => validate("builtin.external-write-receipt.v1", {
+    ...receipt,
+    target: { kind: "knowledge", stableId: "feishu:document-token" },
+  }));
+});
+
+test("comment effect identity is required only for comment receipts", () => {
+  const receipt = validValues["builtin.external-write-receipt.v1"] as Record<string, unknown>;
+  const { externalEffectId: _externalEffectId, ...missingEffectId } = receipt;
+  assert.throws(() => validate("builtin.external-write-receipt.v1", missingEffectId));
+
+  const {
+    externalEffectKind: _externalEffectKind,
+    externalEffectId: _nonCommentEffectId,
+    ...nonCommentReceipt
+  } = receipt;
+  assert.deepEqual(validate("builtin.external-write-receipt.v1", nonCommentReceipt), nonCommentReceipt);
+  assert.throws(() => validate("builtin.external-write-receipt.v1", {
+    ...nonCommentReceipt,
+    externalEffectId: "github-comment:44",
+  }));
 });
 
 test("public schemas reject unknown fields with a stable diagnostic", () => {

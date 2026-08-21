@@ -210,8 +210,8 @@ const externalTargetSchema: JsonSchema = {
   additionalProperties: false,
   required: ["kind", "stableId"],
   properties: {
-    kind: { enum: ["issue", "knowledge"] },
-    stableId: { type: "string", minLength: 1, maxLength: 512 },
+    kind: { enum: ["repository", "issue", "knowledge"] },
+    stableId: { type: "string", minLength: 1, maxLength: 4096 },
   },
 };
 
@@ -222,10 +222,12 @@ const externalActionIdentityProperties = {
   stepId: { type: "string", pattern: stepInstanceIdPattern },
   attemptId: { type: "string", pattern: attemptIdPattern },
   provider: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}$" },
-  action: { enum: ["issue.update", "knowledge.publish", "issue.close"] },
-  securityClass: { const: "external-write" },
+  action: { enum: ["git.commit", "issue.update", "knowledge.publish", "issue.close"] },
+  securityClass: { enum: ["local-write", "external-write"] },
   target: externalTargetSchema,
+  externalEffectKind: { const: "issue.comment" },
   payloadDigest: strictDigestSchema,
+  expectedContentDigest: strictDigestSchema,
   payloadArtifactDigest: strictDigestSchema,
   bindingDigest: strictDigestSchema,
   inputDigest: strictDigestSchema,
@@ -236,6 +238,65 @@ const externalActionIdentityProperties = {
   workspaceDigest: strictDigestSchema,
   configDigest: strictDigestSchema,
 } as const;
+
+const governedActionConditions: JsonSchema[] = [
+  {
+    if: { properties: { externalEffectKind: { const: "issue.comment" } }, required: ["externalEffectKind"] },
+    then: { properties: {
+      action: { const: "issue.update" },
+      securityClass: { const: "external-write" },
+      target: { type: "object", properties: { kind: { const: "issue" } } },
+    } },
+  },
+  {
+    if: { properties: { action: { const: "knowledge.publish" } }, required: ["action"] },
+    then: { properties: {
+      securityClass: { const: "external-write" },
+      target: { type: "object", properties: { kind: { const: "knowledge" } } },
+    } },
+  },
+  {
+    if: { properties: { action: { enum: ["issue.update", "issue.close"] } }, required: ["action"] },
+    then: { properties: {
+      securityClass: { const: "external-write" },
+      target: { type: "object", properties: { kind: { const: "issue" } } },
+    } },
+  },
+  {
+    if: { properties: { action: { const: "git.commit" } }, required: ["action"] },
+    then: { properties: {
+      provider: { const: "git-native" },
+      securityClass: { const: "local-write" },
+      target: { type: "object", properties: { kind: { const: "repository" } } },
+    } },
+  },
+];
+
+const governedReceiptConditions: JsonSchema[] = [
+  {
+    if: { properties: { externalEffectKind: { const: "issue.comment" } }, required: ["externalEffectKind"] },
+    then: {
+      properties: { externalEffectId: { type: "string", pattern: "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$" } },
+      required: ["externalEffectId"],
+    },
+    else: { properties: { externalEffectId: false } },
+  },
+  {
+    if: { properties: { action: { const: "knowledge.publish" } }, required: ["action"] },
+    then: { properties: { target: { type: "object", properties: { kind: { const: "knowledge" } } } } },
+  },
+  {
+    if: { properties: { action: { enum: ["issue.update", "issue.close"] } }, required: ["action"] },
+    then: { properties: { target: { type: "object", properties: { kind: { const: "issue" } } } } },
+  },
+  {
+    if: { properties: { action: { const: "git.commit" } }, required: ["action"] },
+    then: { properties: {
+      provider: { const: "git-native" },
+      target: { type: "object", properties: { kind: { const: "repository" } } },
+    } },
+  },
+];
 
 const workPackageSchema: JsonSchema = {
   type: "object",
@@ -362,7 +423,23 @@ function applicationProjectConfigSchema(id: "builtin.application-project-config.
         type: "object",
         additionalProperties: false,
         required: ["targets"],
-        properties: { targets: { type: "object", additionalProperties: false } },
+        properties: {
+          targets: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              knowledge: {
+                type: "object",
+                additionalProperties: false,
+                required: ["provider", "document"],
+                properties: {
+                  provider: { const: "feishu" },
+                  document: { type: "string", minLength: 1, maxLength: 2048 },
+                },
+              },
+            },
+          },
+        },
       },
       documentation: {
         type: "object",
@@ -542,10 +619,35 @@ export const schemas = {
       },
       {
         type: "object", additionalProperties: false,
-        required: ["kind", "root", "workItemId", "requestId", "actor"],
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor"],
         properties: {
           kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
           workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { const: "reconcile" }, expectedDigest: strictDigestSchema,
+          actor: { type: "string", minLength: 1 },
+        },
+      },
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "evidence", "actor"],
+        properties: {
+          kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { const: "mark_failed" }, expectedDigest: strictDigestSchema,
+          evidence: { type: "string", minLength: 1, maxLength: 2048 },
+          actor: { type: "string", minLength: 1 },
+        },
+      },
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "externalStableId", "contentDigest", "evidence", "actor"],
+        properties: {
+          kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { const: "adopt_verified" }, expectedDigest: strictDigestSchema,
+          externalStableId: { type: "string", minLength: 1, maxLength: 2048 },
+          contentDigest: strictDigestSchema,
+          evidence: { type: "string", minLength: 1, maxLength: 2048 },
           actor: { type: "string", minLength: 1 },
         },
       },
@@ -724,6 +826,8 @@ export const schemas = {
       kind: { const: "external-receipt" },
       target: { enum: ["issue", "knowledge"] },
       stableId: { type: "string", minLength: 1 },
+      externalEffectKind: { const: "issue.comment" },
+      externalEffectId: { type: "string", pattern: "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$" },
       externalWorkItemId: { type: "string", minLength: 1 },
       publishStepId: { type: "string", pattern: stepInstanceIdPattern },
       publishAttemptId: { type: "string", pattern: attemptIdPattern },
@@ -733,6 +837,14 @@ export const schemas = {
       status: { const: "confirmed" },
       readBackStatus: { enum: ["confirmed", "stale", "failed"] },
     },
+    allOf: [{
+      if: { properties: { externalEffectKind: { const: "issue.comment" } }, required: ["externalEffectKind"] },
+      then: {
+        properties: { externalEffectId: { type: "string", pattern: "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$" } },
+        required: ["externalEffectId"],
+      },
+      else: { properties: { externalEffectId: false } },
+    }],
   },
   "builtin.external-binding.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -756,41 +868,44 @@ export const schemas = {
   "builtin.external-action-request.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.external-action-request.v1",
     type: "object", additionalProperties: false,
-    required: ["version", "requestId", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "payloadArtifactDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "profile", "profileDigest", "workspaceDigest", "configDigest", "sideEffects", "createdAt", "expiresAt", "requestDigest"],
+    required: ["version", "requestId", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "expectedContentDigest", "payloadArtifactDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "profile", "profileDigest", "workspaceDigest", "configDigest", "sideEffects", "createdAt", "expiresAt", "requestDigest"],
     properties: {
       version: { const: 1 }, ...externalActionIdentityProperties,
       sideEffects: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 256 } },
       createdAt: { type: "string", format: "date-time" }, expiresAt: { type: "string", format: "date-time" },
     },
-    allOf: [
-      { if: { properties: { action: { const: "knowledge.publish" } }, required: ["action"] }, then: { properties: { target: { type: "object", properties: { kind: { const: "knowledge" } } } } } },
-      { if: { properties: { action: { enum: ["issue.update", "issue.close"] } }, required: ["action"] }, then: { properties: { target: { type: "object", properties: { kind: { const: "issue" } } } } } },
-    ],
+    allOf: governedActionConditions,
   },
   "builtin.external-action-grant.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.external-action-grant.v1",
     type: "object", additionalProperties: false,
-    required: ["version", "grantId", "requestId", "requestDigest", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "payloadArtifactDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "actor", "approvalDigest", "profile", "profileDigest", "workspaceDigest", "configDigest", "decidedAt", "expiresAt", "grantDigest"],
+    required: ["version", "grantId", "requestId", "requestDigest", "workItemId", "stepId", "attemptId", "provider", "action", "securityClass", "target", "payloadDigest", "expectedContentDigest", "payloadArtifactDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "actor", "approvalDigest", "profile", "profileDigest", "workspaceDigest", "configDigest", "decidedAt", "expiresAt", "grantDigest"],
     properties: {
       version: { const: 1 }, grantId: { type: "string", pattern: "^external-grant-[a-f0-9]{64}$" }, ...externalActionIdentityProperties,
       actor: { type: "string", minLength: 1, maxLength: 256 }, approvalDigest: strictDigestSchema,
       decidedAt: { type: "string", format: "date-time" }, expiresAt: { type: "string", format: "date-time" }, grantDigest: strictDigestSchema,
     },
+    allOf: governedActionConditions,
   },
   "builtin.external-write-receipt.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.external-write-receipt.v1",
     type: "object", additionalProperties: false,
-    required: ["version", "kind", "requestId", "requestDigest", "grantDigest", "workItemId", "stepId", "attemptId", "provider", "action", "target", "payloadDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "readBackContentDigest", "status", "verifiedAt"],
+    required: ["version", "kind", "requestId", "requestDigest", "grantDigest", "workItemId", "stepId", "attemptId", "provider", "action", "target", "payloadDigest", "expectedContentDigest", "bindingDigest", "inputDigest", "artifactDigests", "idempotencyKey", "publishedContentDigest", "readBackContentDigest", "status", "verifiedAt"],
     properties: {
       version: { const: 1 }, kind: { const: "external-write-receipt" },
       requestId: externalActionIdentityProperties.requestId, requestDigest: strictDigestSchema, grantDigest: strictDigestSchema,
       workItemId: externalActionIdentityProperties.workItemId, stepId: externalActionIdentityProperties.stepId,
       attemptId: externalActionIdentityProperties.attemptId, provider: externalActionIdentityProperties.provider,
       action: externalActionIdentityProperties.action, target: externalTargetSchema, payloadDigest: strictDigestSchema,
+      externalEffectKind: externalActionIdentityProperties.externalEffectKind,
+      externalEffectId: { type: "string", pattern: "^(?:github-comment|gitlab-note):[1-9][0-9]{0,15}$" },
+      expectedContentDigest: strictDigestSchema,
       bindingDigest: strictDigestSchema, inputDigest: strictDigestSchema, artifactDigests: externalActionIdentityProperties.artifactDigests,
-      idempotencyKey: externalActionIdentityProperties.idempotencyKey, readBackContentDigest: strictDigestSchema,
+      idempotencyKey: externalActionIdentityProperties.idempotencyKey,
+      publishedContentDigest: strictDigestSchema, readBackContentDigest: strictDigestSchema,
       status: { const: "verified" }, verifiedAt: { type: "string", format: "date-time" },
     },
+    allOf: governedReceiptConditions,
   },
   "builtin.tdd-node-test-report.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema",

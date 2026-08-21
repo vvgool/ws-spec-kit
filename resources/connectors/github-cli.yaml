@@ -5,6 +5,7 @@ executable: gh
 minimumVersion: 2.0.0
 argvTemplates:
   - [api, --method, GET, "repos/{owner}/{repo}/issues/{number}", --hostname, "{host}"]
+  - [api, --method, GET, "repos/{owner}/{repo}/issues/comments/{commentId}", --hostname, "{host}"]
   - [api, --method, POST, "repos/{owner}/{repo}/issues/{number}/comments", --hostname, "{host}", --input, "-"]
   - [api, --method, PATCH, "repos/{owner}/{repo}/issues/{number}", --hostname, "{host}", --input, "-"]
 doctor:

@@ -40,7 +40,7 @@ export interface AcquireDependencies {
   executors: ExecutorRegistry;
   home: string;
   provider: import("../registry/skills/types.js").SkillProvider;
-  externalExecutor(provider: string, action: "issue.update" | "knowledge.publish" | "issue.close"): ExternalActionExecutor;
+  externalExecutor(provider: string, action: import("../engine/external-effects/authorization.js").ExternalActionName): ExternalActionExecutor;
 }
 
 export interface ApplicationStepResult extends SubmitResult {

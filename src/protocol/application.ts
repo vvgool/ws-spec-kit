@@ -83,13 +83,44 @@ export interface ExternalActionDecisionInput {
   actor: string;
 }
 
-export interface ExternalActionReconciliationInput {
+export interface ExternalActionReconcileInput {
   kind: "external_reconciliation";
   root: string;
   workItemId: WorkItemId;
   requestId: string;
+  decision: "reconcile";
+  expectedDigest: string;
   actor: string;
 }
+
+export interface ExternalActionMarkFailedInput {
+  kind: "external_reconciliation";
+  root: string;
+  workItemId: WorkItemId;
+  requestId: string;
+  decision: "mark_failed";
+  expectedDigest: string;
+  evidence: string;
+  actor: string;
+}
+
+export interface ExternalActionAdoptVerifiedInput {
+  kind: "external_reconciliation";
+  root: string;
+  workItemId: WorkItemId;
+  requestId: string;
+  decision: "adopt_verified";
+  expectedDigest: string;
+  externalStableId: string;
+  contentDigest: string;
+  evidence: string;
+  actor: string;
+}
+
+export type ExternalActionReconciliationInput =
+  | ExternalActionReconcileInput
+  | ExternalActionMarkFailedInput
+  | ExternalActionAdoptVerifiedInput;
 
 export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput | ExternalActionDecisionInput | ExternalActionReconciliationInput;
 
@@ -112,8 +143,8 @@ export interface StepApprovalSummary extends BaseApprovalSummary {
 export interface ExternalActionApproval extends BaseApprovalSummary {
   kind: "external_action";
   provider: string;
-  action: "issue.update" | "knowledge.publish" | "issue.close";
-  target: { kind: "issue" | "knowledge"; stableId: string };
+  action: "git.commit" | "issue.update" | "knowledge.publish" | "issue.close";
+  target: { kind: "repository" | "issue" | "knowledge"; stableId: string };
   sideEffects: string[];
 }
 
@@ -141,8 +172,10 @@ export interface WorkItemView {
     stepId: string;
     attemptId: string;
     provider: string;
-    action: "issue.update" | "knowledge.publish" | "issue.close";
-    target: { kind: "issue" | "knowledge"; stableId: string };
+    action: "git.commit" | "issue.update" | "knowledge.publish" | "issue.close";
+    target: { kind: "repository" | "issue" | "knowledge"; stableId: string };
+    externalEffectKind?: "issue.comment";
+    externalEffectId?: string;
     status: "prepared" | "approved" | "executing" | "verified" | "reconciliation_required" | "failed";
   }>;
 }

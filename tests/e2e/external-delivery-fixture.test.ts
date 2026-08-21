@@ -16,7 +16,6 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { commitGitChanges } from "../../src/adapters/connectors/git-native.js";
 import { runCommand } from "../../src/cli/commands/core.js";
 import { createApplication, type ApplicationDependencies } from "../../src/application/application.js";
 import { loadApplicationState } from "../../src/application/state.js";
@@ -30,6 +29,7 @@ import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-pac
 import { doctorConnectors } from "../../src/application/doctor-connectors.js";
 import { ExecutorRegistry, type StepExecutor } from "../../src/registry/executors/registry.js";
 import { loadBuiltinCatalog } from "../../src/resources/catalog.js";
+import { createBuiltinExternalExecutor } from "../../src/registry/connectors/external-executor.js";
 import { readControlPlane, type RuntimeProjection } from "../../src/storage/control-plane.js";
 import { initRepository } from "../../src/storage/repository.js";
 import { createGitRepository, git } from "../integration/helpers/git.js";
@@ -51,7 +51,7 @@ const secretMarkers = [
 
 type IssueProvider = "github" | "gitlab";
 type FaultPoint = "pre-send" | "post-send" | "readback-once" | "readback-always";
-type ExternalStage = "issue.update" | "knowledge.publish" | "issue.close";
+type ExternalStage = "git.commit" | "issue.update" | "knowledge.publish" | "issue.close";
 
 interface Scenario {
   source: RequirementSourceInput;
@@ -60,6 +60,9 @@ interface Scenario {
   knowledgeBinding: boolean;
   faults: Partial<Record<ExternalStage, FaultPoint>>;
   expectClosed: boolean;
+  knowledgePayloadMarkdown?: string;
+  expectedSubmitFailureCode?: string;
+  issueUpdateKind?: "body" | "comment";
 }
 
 interface Fixture {
@@ -148,19 +151,7 @@ function fixtureExecutors(root: string, scenario: Scenario): ExecutorRegistry {
       });
       continue;
     }
-    registry.register(executor(id, securityClass, async (_result, runtime) => {
-      if (id !== "connector.execute/requirement.capture") return;
-      const currentBindings = runtime.evidence.bindings as Record<string, unknown> | undefined;
-      runtime.evidence = {
-        ...runtime.evidence,
-        bindings: {
-          ...(currentBindings?.issue === undefined ? {} : { issue: currentBindings.issue }),
-          knowledge: scenario.knowledgeBinding
-            ? { exists: true, stableId: knowledgeStableId, externalWorkItemId: runtime.workItemId }
-            : { exists: false },
-        },
-      };
-    }));
+    registry.register(executor(id, securityClass));
   }
   return registry;
 }
@@ -230,11 +221,11 @@ function completed(
   };
 }
 
-function issuePayload(provider: IssueProvider, action: "update" | "close") {
+function issuePayload(provider: IssueProvider, action: "update" | "close", updateKind: "body" | "comment" = "body") {
   return {
     target: issueTargets[provider],
     action: action === "update"
-      ? { type: "body" as const, body: `${provider} fixture delivered` }
+      ? { type: updateKind, body: `${provider} fixture delivered` }
       : { type: "issue.close" as const },
   };
 }
@@ -248,6 +239,10 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
   const root = await createGitRepository();
   await initRepository(root);
   await copyFile(path.join(fixtureRoot, "workflows/external-delivery/config.yaml"), path.join(root, ".wsspec/config.yaml"));
+  if (scenario.knowledgeBinding) {
+    const config = await readFile(path.join(root, ".wsspec/config.yaml"), "utf8");
+    await writeFile(path.join(root, ".wsspec/config.yaml"), `${config}publishing:\n  targets:\n    knowledge:\n      provider: feishu\n      document: ${knowledgeDocumentToken}\n`, "utf8");
+  }
   const ignored = await readFile(path.join(root, ".gitignore"), "utf8");
   await writeFile(path.join(root, ".gitignore"), `${ignored}.wsspec/work-items/\n`, "utf8");
   await git(root, "add", ".wsspec", ".gitignore");
@@ -285,6 +280,7 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
     gitlab: { HOME: remoteRoot, GLAB_CONFIG_DIR: gitlabConfig },
     feishu: { HOME: remoteRoot, LARK_CONFIG_DIR: larkConfig },
   };
+  let crashAfterGitCommit = scenario.faults["git.commit"] === "post-send";
   const dependencies = (): ApplicationDependencies => ({
     provider: "codex",
     home: os.homedir(),
@@ -295,6 +291,22 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
       executables,
       environments,
       larkIdentity: "user",
+    },
+    externalExecutor(provider, action) {
+      const executor = createBuiltinExternalExecutor({ executables, environments, larkIdentity: "user" }, provider, action);
+      if (action !== "git.commit") return executor;
+      return {
+        ...executor,
+        async execute(input) {
+          const result = await executor.execute(input);
+          await writeFile(path.join(remoteRoot, "timeline.ndjson"), `${JSON.stringify({ stage: "git.commit" })}\n`, { flag: "a" });
+          if (crashAfterGitCommit) {
+            crashAfterGitCommit = false;
+            throw new Error("simulated crash after git commit and before application receipt persistence");
+          }
+          return result;
+        },
+      };
     },
   });
   const fixture = {
@@ -308,7 +320,7 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
   return fixture;
 }
 
-async function gitCommit(fixture: Fixture, worktree: string): Promise<Record<string, unknown>> {
+async function gitCommitIntent(fixture: Fixture, worktree: string): Promise<Record<string, unknown>> {
   const baselineRevision = await git(worktree, "rev-parse", "HEAD");
   const commonDir = await realpath(await git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"));
   const temporary = await mkdtemp(path.join(os.tmpdir(), "wspec-fixture-approval-"));
@@ -329,19 +341,22 @@ async function gitCommit(fixture: Fixture, worktree: string): Promise<Record<str
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
-  const receipt = await commitGitChanges({
-    executable: fixture.executables.git,
-    approval: {
-      repositoryRoot: await realpath(worktree),
-      repositoryCommonDir: commonDir,
-      baselineRevision,
-      files: ["docs/connector-fixture-delivery.md"],
-      message: "test: commit connector fixture delivery",
-      diffDigest: diffDigest as `sha256:${string}`,
-    },
-  });
-  await writeFile(path.join(fixture.remoteRoot, "timeline.ndjson"), `${JSON.stringify({ stage: "git.commit", oid: receipt.commitOid })}\n`, { flag: "a" });
-  return receipt as unknown as Record<string, unknown>;
+  const approval = {
+    repositoryRoot: await realpath(worktree),
+    repositoryCommonDir: commonDir,
+    baselineRevision,
+    files: ["docs/connector-fixture-delivery.md"],
+    message: "test: commit connector fixture delivery",
+    diffDigest: diffDigest as `sha256:${string}`,
+  };
+  return {
+    kind: "external-action",
+    provider: "git-native",
+    action: "git.commit",
+    target: { kind: "repository", stableId: commonDir },
+    payload: approval,
+    sideEffects: ["提交批准文件并移动当前 Work Item worktree HEAD"],
+  };
 }
 
 function externalIntent(pkg: WorkPackage, scenario: Scenario): Record<string, unknown> | undefined {
@@ -352,12 +367,20 @@ function externalIntent(pkg: WorkPackage, scenario: Scenario): Record<string, un
       provider: scenario.issueProvider,
       action,
       target: { kind: "issue", stableId: issueStableIds[scenario.issueProvider!] },
-      payload: issuePayload(scenario.issueProvider!, pkg.stepId === "update-issue" ? "update" : "close"),
+      payload: issuePayload(
+        scenario.issueProvider!,
+        pkg.stepId === "update-issue" ? "update" : "close",
+        scenario.issueUpdateKind,
+      ),
       sideEffects: [pkg.stepId === "update-issue" ? "更新 Fixture Issue" : "关闭 Fixture Issue"],
     };
   }
   if (pkg.stepId === "update-wiki" && scenario.knowledgeBinding) {
-    const target = { documentToken: knowledgeDocumentToken, title: "Fixture delivery", markdown: deliveryMarkdown };
+    const target = {
+      documentToken: knowledgeDocumentToken,
+      title: "Fixture delivery",
+      markdown: scenario.knowledgePayloadMarkdown ?? deliveryMarkdown,
+    };
     const binding = createExternalBinding({
       target: "knowledge",
       workPackage: pkg,
@@ -379,6 +402,7 @@ function externalIntent(pkg: WorkPackage, scenario: Scenario): Record<string, un
 async function armStageFault(fixture: Fixture, scenario: Scenario, stage: ExternalStage): Promise<void> {
   const point = scenario.faults[stage];
   if (point === undefined) return;
+  if (stage === "git.commit") return;
   const provider = stage === "knowledge.publish" ? "feishu" : scenario.issueProvider;
   assert.ok(provider);
   const marker = path.join(fixture.remoteRoot, `${provider}-${stage}-${point}`);
@@ -413,11 +437,16 @@ async function reconcile(fixture: Fixture, started: StartResult): Promise<AgentA
   const view = await fixture.app.inspect({ root: fixture.root, workItemId: started.workItemId });
   const pending = view.externalActions?.find(({ status }) => status === "reconciliation_required");
   assert.ok(pending);
+  const projection = await readControlPlane(fixture.root, started.workItemId);
+  const state = projection.externalActions[pending.requestId];
+  assert.ok(state);
   return fixture.app.decide({
     kind: "external_reconciliation",
     root: fixture.root,
     workItemId: started.workItemId,
     requestId: pending.requestId,
+    decision: "reconcile",
+    expectedDigest: state.request.requestDigest,
     actor: "fixture-owner",
   });
 }
@@ -431,6 +460,7 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
   });
   const state = await loadApplicationState(fixture.root, started.workItemId);
   const worktree = state.worktree;
+  const gitIntents = new Map<string, Record<string, unknown>>();
   let action = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "fixture-author" });
   let safety = 0;
   while (action.action !== "completed" && safety++ < 60) {
@@ -466,8 +496,6 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
       await mkdir(path.join(worktree, "docs"), { recursive: true });
       await copyFile(path.join(fixtureRoot, "workflows/external-delivery/delivery.md"), path.join(worktree, "docs/connector-fixture-delivery.md"));
       modifiedFiles.push("docs/connector-fixture-delivery.md");
-    } else if (pkg.stepId === "commit") {
-      evidence.push(await gitCommit(fixture, worktree));
     }
     for (const output of pkg.requiredOutputs) {
       if (output.artifactType === "requirement-source") {
@@ -478,7 +506,16 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
         artifacts.push(await writeArtifact(worktree, pkg, output.artifactType));
       }
     }
-    const intent = externalIntent(pkg, scenario);
+    let intent: Record<string, unknown> | undefined;
+    if (pkg.stepId === "commit") {
+      intent = gitIntents.get(pkg.attemptId);
+      if (intent === undefined) {
+        intent = await gitCommitIntent(fixture, worktree);
+        gitIntents.set(pkg.attemptId, intent);
+      }
+    } else {
+      intent = externalIntent(pkg, scenario);
+    }
     if (intent !== undefined) await armStageFault(fixture, scenario, intent.action as ExternalStage);
     const result = completed(pkg, artifacts, modifiedFiles, evidence, intent === undefined ? [] : [intent]);
     try {
@@ -491,6 +528,10 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
         result,
       });
     } catch (error) {
+      if (scenario.expectedSubmitFailureCode !== undefined) {
+        assert.match(String(error), new RegExp(scenario.expectedSubmitFailureCode, "u"));
+        return { started, action, worktree };
+      }
       assert.match(String(error), /WSSPEC_EXTERNAL_PROVIDER_EXECUTION_FAILED/u);
       fixture.restart();
       action = await fixture.app.submit({
@@ -588,6 +629,29 @@ async function assertNoPersistenceLeak(fixture: Fixture, worktree: string): Prom
   assert.ok(records.some(({ rootId, path: filename }) => rootId === "common-git" && filename.includes("external-actions/payloads/")));
 }
 
+async function assertCommentEffectIdentity(input: {
+  fixture: Fixture;
+  workItemId: StartResult["workItemId"];
+  worktree: string;
+  expectedEffectId: string;
+}): Promise<void> {
+  const projection = await readControlPlane(input.fixture.root, input.workItemId);
+  const update = Object.values(projection.externalActions).find(({ request }) => request.action === "issue.update");
+  assert.equal(update?.status, "verified");
+  if (update?.status !== "verified") throw new Error("expected verified issue update");
+  assert.equal(update.request.externalEffectKind, "issue.comment");
+  assert.equal(update.receipt.externalEffectKind, "issue.comment");
+  assert.equal(update.receipt.externalEffectId, input.expectedEffectId);
+  const view = await input.fixture.app.inspect({ root: input.fixture.root, workItemId: input.workItemId });
+  assert.equal(view.externalActions?.find(({ action }) => action === "issue.update")?.externalEffectId, input.expectedEffectId);
+  assert.equal((projection.evidence["external-receipt:issue"] as { externalEffectId?: unknown }).externalEffectId, input.expectedEffectId);
+  const audit = JSON.parse(await readFile(
+    path.join(input.worktree, ".wsspec", "archive", input.workItemId, "audit.json"),
+    "utf8",
+  )) as { projection?: { evidence?: Record<string, { externalEffectId?: unknown }> } };
+  assert.equal(audit.projection?.evidence?.["external-receipt:issue"]?.externalEffectId, input.expectedEffectId);
+}
+
 async function assertDoctorCoversBuiltins(fixture: Fixture): Promise<void> {
   const catalog = await loadBuiltinCatalog();
   const manifests = catalog.connectors;
@@ -608,14 +672,15 @@ async function assertDoctorCoversBuiltins(fixture: Fixture): Promise<void> {
   assert.deepEqual(publicHealth.map(({ provider }) => provider).sort(), ["git-native", "github-cli", "gitlab-cli", "lark-cli"]);
 }
 
-test("GitHub Issue fixture uses Application delivery order and retries only a pre-send failure", async () => {
+test("GitHub Issue fixture preserves the authoritative comment identity through close and archive", async () => {
   const scenario: Scenario = {
     source: { type: "issue", provider: "github", id: "https://github.example.com/acme/widget/issues/7" },
     issueProvider: "github",
     issueBinding: true,
     knowledgeBinding: true,
-    faults: { "issue.update": "pre-send", "knowledge.publish": "post-send", "issue.close": "readback-once" },
+    faults: { "knowledge.publish": "post-send", "issue.close": "readback-once" },
     expectClosed: true,
+    issueUpdateKind: "comment",
   };
   const fixture = await createFixture(scenario);
   await assertDoctorCoversBuiltins(fixture);
@@ -623,22 +688,35 @@ test("GitHub Issue fixture uses Application delivery order and retries only a pr
   assert.equal(result.action.action, "completed");
   assert.equal((await fixture.app.inspect({ root: fixture.root, workItemId: result.started.workItemId })).status, "closed");
   assert.deepEqual(await timeline(fixture.remoteRoot), ["git.commit", "issue.update", "knowledge.publish", "issue.close"]);
+  await assertCommentEffectIdentity({
+    fixture,
+    workItemId: result.started.workItemId,
+    worktree: result.worktree,
+    expectedEffectId: "github-comment:4401",
+  });
   await assertNoPersistenceLeak(fixture, result.worktree);
 });
 
-test("GitLab Issue fixture reconciles sent-or-unknown writes without duplicate mutations and blocks an unverifiable close", async (t) => {
+test("GitLab Issue fixture preserves the authoritative note identity and blocks an unverifiable close", async (t) => {
   const scenario: Scenario = {
     source: { type: "issue", provider: "gitlab", id: "https://gitlab.example.com/group/service/-/issues/9" },
     issueProvider: "gitlab",
     issueBinding: true,
     knowledgeBinding: true,
-    faults: { "issue.update": "post-send", "knowledge.publish": "readback-once", "issue.close": "pre-send" },
+    faults: { "knowledge.publish": "readback-once", "issue.close": "pre-send" },
     expectClosed: true,
+    issueUpdateKind: "comment",
   };
   const fixture = await createFixture(scenario);
   const result = await runDelivery(fixture, scenario);
   assert.equal(result.action.action, "completed");
   assert.deepEqual(await timeline(fixture.remoteRoot), ["git.commit", "issue.update", "knowledge.publish", "issue.close"]);
+  await assertCommentEffectIdentity({
+    fixture,
+    workItemId: result.started.workItemId,
+    worktree: result.worktree,
+    expectedEffectId: "gitlab-note:5501",
+  });
   await assertNoPersistenceLeak(fixture, result.worktree);
 
   await t.test("external close readback failure leaves the Work Item blocked", async () => {
@@ -673,11 +751,30 @@ test("Feishu Document fixture captures through lark-cli, skips Issue stages, and
   await assertNoPersistenceLeak(fixture, result.worktree);
 });
 
+test("Knowledge publish rejects Artifact A with payload Markdown B before preparing authority or writing Provider state", async () => {
+  const scenario: Scenario = {
+    source: { type: "issue", provider: "github", id: "https://github.example.com/acme/widget/issues/7" },
+    issueProvider: "github",
+    issueBinding: true,
+    knowledgeBinding: true,
+    faults: {},
+    expectClosed: false,
+    knowledgePayloadMarkdown: "# Unreviewed payload B\n",
+    expectedSubmitFailureCode: "WSSPEC_EXTERNAL_BINDING_INVALID",
+  };
+  const fixture = await createFixture(scenario);
+  const result = await runDelivery(fixture, scenario);
+  const projection = await readControlPlane(fixture.root, result.started.workItemId);
+  assert.equal(Object.values(projection.externalActions).some(({ request }) => request.action === "knowledge.publish"), false);
+  assert.deepEqual(await timeline(fixture.remoteRoot), ["git.commit", "issue.update"]);
+});
+
 test("each external stage recovers its remaining crash boundary without reordering or duplicate writes", async (t) => {
   const cases: ReadonlyArray<{
     name: string;
     fault: Partial<Record<ExternalStage, FaultPoint>>;
   }> = [
+    { name: "git.commit post-dispatch readback crash", fault: { "git.commit": "post-send" } },
     { name: "issue.update readback crash", fault: { "issue.update": "readback-once" } },
     { name: "knowledge.publish pre-send crash", fault: { "knowledge.publish": "pre-send" } },
     { name: "issue.close post-send crash", fault: { "issue.close": "post-send" } },
@@ -698,6 +795,10 @@ test("each external stage recovers its remaining crash boundary without reorderi
     assert.equal(result.action.action, "completed");
     assert.equal((await fixture.app.inspect({ root: fixture.root, workItemId: result.started.workItemId })).status, "closed");
     assert.deepEqual(await timeline(fixture.remoteRoot), ["git.commit", "issue.update", "knowledge.publish", "issue.close"]);
+    assert.equal(
+      (await git(result.worktree, "log", "--format=%s")).split("\n").filter((message) => message === "test: commit connector fixture delivery").length,
+      1,
+    );
     await assertNoPersistenceLeak(fixture, result.worktree);
   });
 });

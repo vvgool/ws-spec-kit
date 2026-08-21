@@ -32,6 +32,28 @@ export type TransitionInput = {
 
 type MutationEventType = Exclude<DomainEvent["eventType"], "work-item.transitioned" | "stage.transitioned">;
 
+function operationInputDigest(operationInput: unknown): string {
+  const encodedInput = canonicalize(operationInput);
+  if (encodedInput === undefined) throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "操作输入无法规范化。");
+  return sha256(encodedInput);
+}
+
+export async function readIdempotentControlPlaneResult<T>(input: {
+  cwd: string;
+  workItemId: string;
+  idempotencyKey: string;
+  operationInput: unknown;
+}): Promise<T | undefined> {
+  const projection = await readControlPlane(input.cwd, input.workItemId);
+  const previousSequence = projection.idempotency[input.idempotencyKey];
+  if (previousSequence === undefined) return undefined;
+  const previous = (await readEvents(projection.controlPlane))[previousSequence - 1];
+  if (previous?.inputDigest !== operationInputDigest(input.operationInput)) {
+    throw new ControlPlaneError("WSSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
+  }
+  return (previous.result as { value: T }).value;
+}
+
 export async function mutateControlPlane<T>(input: {
   cwd: string;
   workItemId: string;
@@ -48,9 +70,7 @@ export async function mutateControlPlane<T>(input: {
   const initial = await readControlPlane(input.cwd, input.workItemId);
   return withControlPlaneLock(initial.controlPlane, async () => {
     const projection = await readControlPlane(input.cwd, input.workItemId);
-    const encodedInput = canonicalize(input.operationInput);
-    if (encodedInput === undefined) throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "操作输入无法规范化。");
-    const inputDigest = sha256(encodedInput);
+    const inputDigest = operationInputDigest(input.operationInput);
     const previousSequence = projection.idempotency[input.idempotencyKey];
     if (previousSequence !== undefined) {
       const previous = (await readEvents(projection.controlPlane))[previousSequence - 1];

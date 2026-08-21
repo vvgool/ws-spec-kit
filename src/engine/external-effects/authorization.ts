@@ -2,8 +2,10 @@ import { canonicalDigest, externalIdempotencyKey } from "./idempotency.js";
 import { validate } from "../../schemas/index.js";
 import { inspectDecodedCredentialSurface } from "../../registry/connectors/secret-detector.js";
 
-export type ExternalActionName = "issue.update" | "knowledge.publish" | "issue.close";
-export type ExternalTargetKind = "issue" | "knowledge";
+export type ExternalActionName = "git.commit" | "issue.update" | "knowledge.publish" | "issue.close";
+export type ExternalTargetKind = "repository" | "issue" | "knowledge";
+export type ExternalEffectKind = "issue.comment";
+export type GovernedActionSecurityClass = "local-write" | "external-write";
 
 export interface ExternalActionTarget {
   kind: ExternalTargetKind;
@@ -18,9 +20,11 @@ export interface ExternalActionRequest {
   attemptId: string;
   provider: string;
   action: ExternalActionName;
-  securityClass: "external-write";
+  securityClass: GovernedActionSecurityClass;
   target: ExternalActionTarget;
+  externalEffectKind?: ExternalEffectKind;
   payloadDigest: `sha256:${string}`;
+  expectedContentDigest: `sha256:${string}`;
   payloadArtifactDigest: `sha256:${string}`;
   bindingDigest: `sha256:${string}`;
   inputDigest: `sha256:${string}`;
@@ -46,9 +50,11 @@ export interface ExternalActionGrant {
   attemptId: string;
   provider: string;
   action: ExternalActionName;
-  securityClass: "external-write";
+  securityClass: GovernedActionSecurityClass;
   target: ExternalActionTarget;
+  externalEffectKind?: ExternalEffectKind;
   payloadDigest: `sha256:${string}`;
+  expectedContentDigest: `sha256:${string}`;
   payloadArtifactDigest: `sha256:${string}`;
   bindingDigest: `sha256:${string}`;
   inputDigest: `sha256:${string}`;
@@ -77,11 +83,15 @@ export interface ExternalWriteReceipt {
   provider: string;
   action: ExternalActionName;
   target: ExternalActionTarget;
+  externalEffectKind?: ExternalEffectKind;
+  externalEffectId?: string;
   payloadDigest: `sha256:${string}`;
+  expectedContentDigest: `sha256:${string}`;
   bindingDigest: `sha256:${string}`;
   inputDigest: `sha256:${string}`;
   artifactDigests: `sha256:${string}`[];
   idempotencyKey: string;
+  publishedContentDigest: `sha256:${string}`;
   readBackContentDigest: `sha256:${string}`;
   status: "verified";
   verifiedAt: string;
@@ -132,9 +142,16 @@ export function createExternalActionRequest(input: Omit<ExternalActionRequest, "
   nonEmpty(input.provider, "WSSPEC_EXTERNAL_REQUEST_INVALID");
   nonEmpty(input.target.stableId, "WSSPEC_EXTERNAL_REQUEST_INVALID");
   assertCredentialFreeMetadata([input.provider, input.target.stableId, ...input.sideEffects]);
-  if (input.securityClass !== "external-write") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_SECURITY_CLASS_INVALID", "外部写入必须使用 external-write 安全类别。");
-  if ((input.action === "knowledge.publish") !== (input.target.kind === "knowledge")) {
+  const localGit = input.action === "git.commit" && input.securityClass === "local-write" && input.target.kind === "repository";
+  const external = input.action !== "git.commit" && input.securityClass === "external-write"
+    && (input.action === "knowledge.publish") === (input.target.kind === "knowledge")
+    && input.target.kind !== "repository";
+  if (!localGit && !external) {
     throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_TARGET_INVALID", "外部动作与稳定目标类型不一致。");
+  }
+  if (input.externalEffectKind !== undefined
+    && (input.externalEffectKind !== "issue.comment" || input.action !== "issue.update" || input.target.kind !== "issue")) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_TARGET_INVALID", "外部 effect 类型与动作或稳定目标不一致。");
   }
   if (timestamp(input.expiresAt, "WSSPEC_EXTERNAL_REQUEST_INVALID") <= timestamp(input.createdAt, "WSSPEC_EXTERNAL_REQUEST_INVALID")) {
     throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_REQUEST_INVALID", "外部动作请求有效期无效。");
@@ -153,7 +170,9 @@ export function createExternalActionRequest(input: Omit<ExternalActionRequest, "
     action: input.action,
     securityClass: input.securityClass,
     target: { ...input.target },
+    ...(input.externalEffectKind === undefined ? {} : { externalEffectKind: input.externalEffectKind }),
     payloadDigest,
+    expectedContentDigest: input.expectedContentDigest,
     payloadArtifactDigest: input.payloadArtifactDigest,
     bindingDigest: input.bindingDigest,
     inputDigest: input.inputDigest,
@@ -205,7 +224,9 @@ export function createExternalActionGrant(input: {
     action: request.action,
     securityClass: request.securityClass,
     target: { ...request.target },
+    ...(request.externalEffectKind === undefined ? {} : { externalEffectKind: request.externalEffectKind }),
     payloadDigest: request.payloadDigest,
+    expectedContentDigest: request.expectedContentDigest,
     payloadArtifactDigest: request.payloadArtifactDigest,
     bindingDigest: request.bindingDigest,
     inputDigest: request.inputDigest,
@@ -229,7 +250,9 @@ export function assertGrantAuthorizes(request: ExternalActionRequest, grant: Ext
     && grant.workItemId === request.workItemId && grant.stepId === request.stepId && grant.attemptId === request.attemptId
     && grant.provider === request.provider && grant.action === request.action && grant.securityClass === request.securityClass
     && grant.target.kind === request.target.kind && grant.target.stableId === request.target.stableId
+    && grant.externalEffectKind === request.externalEffectKind
     && grant.payloadDigest === request.payloadDigest && grant.payloadArtifactDigest === request.payloadArtifactDigest
+    && grant.expectedContentDigest === request.expectedContentDigest
     && grant.bindingDigest === request.bindingDigest && grant.inputDigest === request.inputDigest
     && JSON.stringify(grant.artifactDigests) === JSON.stringify(request.artifactDigests)
     && grant.idempotencyKey === request.idempotencyKey && grant.approvalDigest === request.requestDigest
@@ -302,9 +325,14 @@ export function assertExternalActionProjection(
       || receipt.stepId !== request.stepId || receipt.attemptId !== request.attemptId
       || receipt.provider !== request.provider || receipt.action !== request.action
       || receipt.target.kind !== request.target.kind || receipt.target.stableId !== request.target.stableId
-      || receipt.payloadDigest !== request.payloadDigest || receipt.bindingDigest !== request.bindingDigest
+      || receipt.externalEffectKind !== request.externalEffectKind
+      || (request.externalEffectKind === "issue.comment") !== (receipt.externalEffectId !== undefined)
+      || receipt.payloadDigest !== request.payloadDigest || receipt.expectedContentDigest !== request.expectedContentDigest
+      || receipt.bindingDigest !== request.bindingDigest
       || receipt.inputDigest !== request.inputDigest || JSON.stringify(receipt.artifactDigests) !== JSON.stringify(request.artifactDigests)
-      || receipt.idempotencyKey !== request.idempotencyKey || receipt.readBackContentDigest !== request.payloadDigest) {
+      || receipt.idempotencyKey !== request.idempotencyKey
+      || receipt.publishedContentDigest !== request.expectedContentDigest
+      || receipt.readBackContentDigest !== request.expectedContentDigest) {
       throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROJECTION_INVALID", "外部写入 Receipt 未绑定当前请求和 Grant。");
     }
   }

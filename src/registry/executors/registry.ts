@@ -68,6 +68,7 @@ export function createDefaultExecutorRegistry(): ExecutorRegistry {
   return new ExecutorRegistry()
     .register(executor("agent.execute", "agent"))
     .register(executor("connector.execute/requirement.capture", "external-read"))
+    .register(executor("connector.execute/git.commit", "local-write"))
     .register(executor("connector.execute/issue.update", "external-write"))
     .register(executor("connector.execute/knowledge.publish", "external-write"))
     .register(executor("connector.execute/issue.close", "external-write"))

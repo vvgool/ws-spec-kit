@@ -5,6 +5,7 @@ executable: glab
 minimumVersion: 1.0.0
 argvTemplates:
   - [api, --method, GET, "projects/{encodedPath}/issues/{iid}", --hostname, "{host}"]
+  - [api, --method, GET, "projects/{encodedPath}/issues/{iid}/notes/{noteId}", --hostname, "{host}"]
   - [api, --method, POST, "projects/{encodedPath}/issues/{iid}/notes", --hostname, "{host}", --input, "-"]
   - [api, --method, PUT, "projects/{encodedPath}/issues/{iid}", --hostname, "{host}", --input, "-"]
 doctor:

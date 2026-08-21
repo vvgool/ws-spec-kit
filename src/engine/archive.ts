@@ -205,7 +205,9 @@ function externalApprovalMatches(projection: RuntimeProjection, instance: Effect
 
 function approvalSatisfied(projection: RuntimeProjection, instance: EffectiveStepInstance): boolean {
   return Object.values(projection.approvals).some((approval) => approvalMatches(approval, instance))
-    || (instance.step.securityClass === "external-write" && externalApprovalMatches(projection, instance));
+    || ((instance.step.securityClass === "external-write"
+      || (instance.step.securityClass === "local-write" && instance.step.action === "git.commit"))
+      && externalApprovalMatches(projection, instance));
 }
 
 function requiredGateIds(profile: SnapshotProfile, policy: ProjectGatePolicy): ReadonlySet<string> {

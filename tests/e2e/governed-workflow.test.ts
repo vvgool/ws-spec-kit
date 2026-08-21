@@ -40,7 +40,7 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
     assert.equal(binding.target, target);
     assert.equal(binding.exists, true);
     assert.equal(binding.externalWorkItemId, started.workItemId);
-    assert.equal(binding.stableId, `local:${target}`);
+    assert.equal(binding.stableId, target === "knowledge" ? "feishu:targetDocumentToken123" : "local:issue");
     assert.equal(binding.publishStepId, target === "issue" ? "update-issue" : "update-wiki");
     assert.match(String(binding.publishAttemptId), /^attempt-/u);
     assert.match(String(binding.publishInputDigest), /^sha256:/u);
@@ -50,7 +50,7 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
     assert.equal(receipt.status, "confirmed");
     assert.equal(receipt.readBackStatus, "confirmed");
     assert.equal(receipt.externalWorkItemId, started.workItemId);
-    assert.equal(receipt.stableId, `local:${target}`);
+    assert.equal(receipt.stableId, target === "knowledge" ? "feishu:targetDocumentToken123" : "local:issue");
     assert.equal(receipt.publishStepId, binding.publishStepId);
     assert.equal(receipt.publishAttemptId, binding.publishAttemptId);
     assert.equal(receipt.publishInputDigest, binding.publishInputDigest);
@@ -62,15 +62,15 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.equal(result.snapshot.profiles.governed.audit.level, "complete");
   assert.equal(result.snapshot.profiles.governed.audit.retention, "extended");
   assert.ok(Object.values(result.recovered.approvals).every(({ status }) => status === "approved"));
-  assert.equal(Object.values(result.recovered.externalActions).filter(({ status }) => status === "verified").length, 3);
+  assert.equal(Object.values(result.recovered.externalActions).filter(({ status }) => status === "verified").length, 4);
   assert.ok(Object.values(result.recovered.externalActions).every((action) => action.status === "verified" && action.grant.actor === "fixture-owner"));
   assert.deepEqual(result.recoveryEvidence, {
-    governedStep: "update-issue",
+    governedStep: "commit",
     governedAttemptChanged: true,
     governedAttemptsUsed: 2,
     governedLoopMaxIterations: 5,
     governedProfile: "governed",
-    governedApprovalCount: 4,
+    governedApprovalCount: 3,
   });
 
   const worktree = await worktreeFor(fixture.root, started.workItemId);
@@ -83,10 +83,10 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
     };
   };
   const decisions = Object.values(audit.projection.approvals);
-  assert.equal(decisions.length, 4);
+  assert.equal(decisions.length, 3);
   assert.ok(decisions.every(({ status, requestedBy, decidedBy, decidedAt }) => status === "approved" && requestedBy !== undefined && decidedBy === "fixture-owner" && decidedAt !== undefined));
   assert.ok(new Set(Object.values(audit.projection.contexts).map(({ actor }) => actor)).has("independent-reviewer"));
-  assert.equal(Object.values(audit.projection.externalActions).filter(({ status }) => status === "verified").length, 3);
+  assert.equal(Object.values(audit.projection.externalActions).filter(({ status }) => status === "verified").length, 4);
   for (const target of ["issue", "knowledge"] as const) {
     const binding = audit.projection.evidence[`external-binding:${target}`] as Record<string, unknown>;
     const publishing = audit.projection.evidence[`external-receipt:${target}`] as Record<string, unknown>;
@@ -94,7 +94,7 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
     assert.equal(publishing.status, "confirmed");
     assert.equal(publishing.readBackStatus, "confirmed");
     assert.equal(publishing.externalWorkItemId, started.workItemId);
-    assert.equal(publishing.stableId, `local:${target}`);
+    assert.equal(publishing.stableId, target === "knowledge" ? "feishu:targetDocumentToken123" : "local:issue");
     assert.equal(publishing.publishStepId, binding.publishStepId);
     assert.equal(publishing.publishAttemptId, binding.publishAttemptId);
     assert.equal(publishing.publishInputDigest, binding.publishInputDigest);

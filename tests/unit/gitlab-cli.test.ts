@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readGitlabIssue, writeGitlabIssue } from "../../src/adapters/connectors/gitlab-cli.js";
+import { readGitlabIssue, readGitlabNote, writeGitlabIssue } from "../../src/adapters/connectors/gitlab-cli.js";
 import { IssueProviderError, validateGitlabIssueTarget, type IssueWriteAction } from "../../src/registry/connectors/issue.js";
 
 const target = { host: "gitlab.example.com", projectPath: "group/service", iid: 9 } as const;
@@ -116,6 +116,39 @@ test("GitLab normalizes issue title and body before returning NormalizedIssue", 
   assert.equal(issue.body, "First\nSecond\nThird");
 });
 
+test("GitLab adoption reads one exact note ID and verifies its approved body and Issue", async (t) => {
+  const response = { id: 56, body: "Café\nSecond", noteable_type: "Issue", noteable_iid: 9 };
+  const cli = await scriptedCli(t, [response]);
+  const note = await readGitlabNote({
+    executable: cli.executable,
+    target,
+    externalStableId: "gitlab-note:56",
+    expectedBody: "Cafe\u0301\r\nSecond",
+  });
+  assert.deepEqual(note, { stableId: "gitlab-note:56", body: "Café\nSecond" });
+  const call = JSON.parse((await readFile(cli.log, "utf8")).trim());
+  assert.deepEqual(call, {
+    argv: ["api", "--method", "GET", "projects/group%2Fservice/issues/9/notes/56", "--hostname", "gitlab.example.com"],
+    input: {},
+  });
+
+  const mismatched = await scriptedCli(t, [{ ...response, body: "Different" }]);
+  await assert.rejects(readGitlabNote({
+    executable: mismatched.executable,
+    target,
+    externalStableId: "gitlab-note:56",
+    expectedBody: response.body,
+  }), (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_READBACK_MISMATCH");
+
+  const wrongIssue = await scriptedCli(t, [{ ...response, noteable_iid: 10 }]);
+  await assert.rejects(readGitlabNote({
+    executable: wrongIssue.executable,
+    target,
+    externalStableId: "gitlab-note:56",
+    expectedBody: response.body,
+  }), (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_READBACK_MISMATCH");
+});
+
 test("GitLab exposes only fixed POST comment and PUT body, labels and state unions", async (t) => {
   const cases: Array<{ action: IssueWriteAction; method: string; endpoint: string; payload: unknown }> = [
     { action: { type: "comment", body: "Approved comment" }, method: "POST", endpoint: "projects/group%2Fservice/issues/9/notes", payload: { body: "Approved comment" } },
@@ -143,11 +176,21 @@ test("GitLab exposes only fixed POST comment and PUT body, labels and state unio
       : current.action.type === "body" ? { ...openIssue, description: "Approved body" }
         : current.action.type === "labels" ? { ...openIssue, labels: ["ready", "bug"] }
           : openIssue;
-    const readback = current.action.type === "comment" ? openIssue : response;
-    const cli = await scriptedCli(st, [response, readback]); await writeGitlabIssue({ executable: cli.executable, target, action: current.action });
+    const responses = current.action.type === "comment" ? [response, response, openIssue] : [response, response];
+    const cli = await scriptedCli(st, responses);
+    const result = await writeGitlabIssue({ executable: cli.executable, target, action: current.action });
     const calls = (await readFile(cli.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(calls[0], { argv: ["api", "--method", current.method, current.endpoint, "--hostname", "gitlab.example.com", "--input", "-"], input: current.payload });
-    assert.deepEqual(calls[1]?.argv, ["api", "--method", "GET", "projects/group%2Fservice/issues/9", "--hostname", "gitlab.example.com"]);
+    if (current.action.type === "comment") {
+      assert.equal((result as unknown as Record<string, unknown>).externalEffectId, "gitlab-note:55");
+      assert.deepEqual(calls.slice(1).map(({ argv }) => argv), [
+        ["api", "--method", "GET", "projects/group%2Fservice/issues/9/notes/55", "--hostname", "gitlab.example.com"],
+        ["api", "--method", "GET", "projects/group%2Fservice/issues/9", "--hostname", "gitlab.example.com"],
+      ]);
+    } else {
+      assert.equal((result as unknown as Record<string, unknown>).externalEffectId, undefined);
+      assert.deepEqual(calls[1]?.argv, ["api", "--method", "GET", "projects/group%2Fservice/issues/9", "--hostname", "gitlab.example.com"]);
+    }
   });
   const cli = await scriptedCli(t, []);
   await assert.rejects(writeGitlabIssue({ executable: cli.executable, target, action: { type: "raw", flags: ["--paginate"] } as never }),
@@ -172,7 +215,7 @@ test("GitLab preserves approved stdin and compares canonical note, body and labe
     {
       name: "comment",
       action: { type: "comment", body: approvedText } as const,
-      writeResponse: { id: 56, body: canonicalText, author: openIssue.author, created_at: openIssue.updated_at, noteable_type: "Issue" },
+      writeResponse: { id: 56, body: canonicalText, author: openIssue.author, created_at: openIssue.updated_at, noteable_type: "Issue", noteable_iid: 9 },
       readback: openIssue,
       payload: { body: approvedText },
     },
@@ -192,7 +235,9 @@ test("GitLab preserves approved stdin and compares canonical note, body and labe
     },
   ];
   for (const current of cases) await t.test(current.name, async (st) => {
-    const cli = await scriptedCli(st, [current.writeResponse, current.readback]);
+    const cli = await scriptedCli(st, current.action.type === "comment"
+      ? [current.writeResponse, current.writeResponse, current.readback]
+      : [current.writeResponse, current.readback]);
     await writeGitlabIssue({ executable: cli.executable, target, action: current.action });
     const first = JSON.parse((await readFile(cli.log, "utf8")).split("\n")[0]!);
     assert.deepEqual(first.input, current.payload);
@@ -204,6 +249,25 @@ test("GitLab preserves approved stdin and compares canonical note, body and labe
     (error: unknown) => error instanceof IssueProviderError && error.code === "WSSPEC_ISSUE_ACTION_INVALID",
   );
   await assert.rejects(access(duplicate.log), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+});
+
+test("GitLab comment write fails when the authoritative note is missing or has different content", async (t) => {
+  const posted = { id: 55, body: "Approved comment", noteable_type: "Issue", noteable_iid: 9 };
+  for (const scenario of [
+    { name: "missing note", readback: openIssue, code: "WSSPEC_ISSUE_RESPONSE_INVALID" },
+    { name: "different body", readback: { ...posted, body: "Different" }, code: "WSSPEC_ISSUE_READBACK_MISMATCH" },
+  ]) await t.test(scenario.name, async (st) => {
+    const cli = await scriptedCli(st, [posted, scenario.readback, openIssue]);
+    await assert.rejects(
+      writeGitlabIssue({ executable: cli.executable, target, action: { type: "comment", body: posted.body } }),
+      (error: unknown) => error instanceof IssueProviderError && error.code === scenario.code,
+    );
+    const calls = (await readFile(cli.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(calls.map(({ argv }) => argv), [
+      ["api", "--method", "POST", "projects/group%2Fservice/issues/9/notes", "--hostname", "gitlab.example.com", "--input", "-"],
+      ["api", "--method", "GET", "projects/group%2Fservice/issues/9/notes/55", "--hostname", "gitlab.example.com"],
+    ]);
+  });
 });
 
 test("GitLab issue.close is read-open, PUT close, same-identity closed readback, with idempotent closed success", async (t) => {

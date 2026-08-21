@@ -269,7 +269,7 @@ test("Profile 升级与重复 Submit 原子幂等，恢复后不丢失 profile/l
 });
 
 test("Governed Review 要求 reviewActor 与 implementationActor 不同", async () => {
-  const fixture = await controlRuntimeFixture();
+  const fixture = await controlRuntimeFixture({ knowledgeTarget: true });
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证独立 Review Actor" }, profile: "governed" });
   await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
   await mutateControlPlane({
@@ -290,7 +290,7 @@ test("Governed Review 要求 reviewActor 与 implementationActor 不同", async 
 });
 
 test("Governed 后续 Review 不能由上一轮 Fix Actor 执行", async () => {
-  const fixture = await controlRuntimeFixture();
+  const fixture = await controlRuntimeFixture({ knowledgeTarget: true });
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证 Fix 后独立 Review Actor" }, profile: "governed" });
   await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
   await mutateControlPlane({
@@ -502,7 +502,7 @@ test("显式 Profile 不受 provisional 边界限制，Intake high 立即单向�
 });
 
 test("Governed Review 拒绝原实现者和所有历史 completed Fix Actor，并在恢复后保持完整集合", async () => {
-  const fixture = await controlRuntimeFixture();
+  const fixture = await controlRuntimeFixture({ knowledgeTarget: true });
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证完整 Review Actor 集合" }, profile: "governed" });
   await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
   await mutateControlPlane({
@@ -541,7 +541,7 @@ test("Governed Review 拒绝原实现者和所有历史 completed Fix Actor，�
 });
 
 test("Governed Review 在 Acquire 阶段按 actorRole 支持重命名 Workflow", async () => {
-  const fixture = await controlRuntimeFixture();
+  const fixture = await controlRuntimeFixture({ knowledgeTarget: true });
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证重命名 Review actor 语义" }, profile: "governed" });
   await rewriteSelectedSnapshot(fixture, started.workItemId, (selected) => {
     const implementation = selected.steps.find(({ id }) => id === "implement")!;
@@ -583,7 +583,7 @@ test("Governed Review 在 Acquire 阶段按 actorRole 支持重命名 Workflow",
 });
 
 test("Governed Review 在已完成实现记录缺少 actor 时 fail closed", async () => {
-  const fixture = await controlRuntimeFixture();
+  const fixture = await controlRuntimeFixture({ knowledgeTarget: true });
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证缺失实现 Actor" }, profile: "governed" });
   await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
   await mutateControlPlane({
