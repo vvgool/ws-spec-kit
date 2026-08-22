@@ -133,8 +133,9 @@ async function inspect(root: string, argv: string[], home: string): Promise<unkn
 
 async function agent(argv: string[], home: string): Promise<unknown> {
   if (argv[0] !== "install") throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知 Agent 命令：${argv[0] ?? ""}`);
-  const args = parseArguments(argv.slice(1), 1, ["--target"], ["--dry-run"]);
-  const name = args.positional[0]!;
+  const usesClientOption = argv.includes("--client");
+  const args = parseArguments(argv.slice(1), usesClientOption ? 0 : 1, ["--client", "--target"], ["--dry-run"]);
+  const name = usesClientOption ? required(args.values["--client"], "--client") : args.positional[0]!;
   if (!(["codex", "claude", "cursor", "generic"] as string[]).includes(name)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "Agent 必须是 codex、claude、cursor 或 generic。");
   const target = args.values["--target"];
   return installDriverSkill({ agent: name as DriverAgent, home, ...(target === undefined ? {} : { target }), dryRun: args.flags.has("--dry-run") });

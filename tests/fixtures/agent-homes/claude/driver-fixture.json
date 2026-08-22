@@ -1,0 +1,14 @@
+{
+  "client": "claude",
+  "actor": "claude-fixture",
+  "feature": {
+    "prompt": "实现本地计数函数，需求正文标记 CLAUDE_FEATURE_ARTIFACT_BODY",
+    "artifactBodyMarker": "CLAUDE_FEATURE_ARTIFACT_BODY",
+    "workflowRef": "builtin://workflows/feature-delivery"
+  },
+  "documentation": {
+    "prompt": "补充本地使用文档，需求正文标记 CLAUDE_DOCUMENT_ARTIFACT_BODY",
+    "artifactBodyMarker": "CLAUDE_DOCUMENT_ARTIFACT_BODY",
+    "workflowRef": "builtin://workflows/documentation-delivery"
+  }
+}

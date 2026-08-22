@@ -100,7 +100,7 @@ test("安装器只升级具有完整 canonical 标识的既有 Driver", async ()
   const ownedTarget = path.join(ownedHome, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
-  assert.match(await readFile(ownedTarget, "utf8"), /wsspeckit-driver-version: 2/);
+  assert.match(await readFile(ownedTarget, "utf8"), /wsspeckit-driver-version: 3/);
 });
 
 test("安装器升级所有已登记的历史 canonical Driver", async (t) => {
@@ -117,7 +117,7 @@ test("安装器升级所有已登记的历史 canonical Driver", async (t) => {
 
         const updated = await readFile(path.join(target, "SKILL.md"), "utf8");
         assert.notEqual(updated, before);
-        assert.match(updated, /wsspeckit-driver-version: 2/);
+        assert.match(updated, /wsspeckit-driver-version: 3/);
         assert.match(updated, /面向用户的说明、文档和交互文案默认使用中文/);
       });
     }

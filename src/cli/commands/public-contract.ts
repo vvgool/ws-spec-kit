@@ -18,7 +18,7 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
   { command: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },
   { command: "inspect", usage: "wspec inspect <workItemId>" },
   { command: "workflow", usage: "wspec workflow <list|show|eject|validate|use>" },
-  { command: "agent", usage: "wspec agent install <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { command: "agent", usage: "wspec agent install --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
   { command: "doctor", usage: "wspec doctor connectors" },
 ]);
 
@@ -34,7 +34,7 @@ export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Ob
   { route: "workflow eject", usage: "wspec workflow eject <内置引用> <目标>" },
   { route: "workflow validate", usage: "wspec workflow validate <引用> [--provider <Provider>]" },
   { route: "workflow use", usage: "wspec workflow use <引用> [--profile <档位>] [--provider <Provider>]" },
-  { route: "agent install", usage: "wspec agent install <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { route: "agent install", usage: "wspec agent install --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
   { route: "doctor connectors", usage: "wspec doctor connectors" },
 ]);
 

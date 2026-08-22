@@ -18,9 +18,9 @@ export interface DriverSkillInstallerDependencies {
   writeSkill(target: string, content: string): Promise<void>;
 }
 
-type DriverVersion = 1 | 2;
+type DriverVersion = 1 | 2 | 3;
 
-const currentDriverVersion = 2 as const;
+const currentDriverVersion = 3 as const;
 const driverDescription = "使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。";
 const driverFrontMatterKeys = ["description", "name", "wsspeckit-driver-content-digest", "wsspeckit-driver-version"] as const;
 
@@ -32,6 +32,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
       "sha256:69b6ad68c123a711095377ffdf64d21225f4bafaab3a414497ffef6c5391773e",
     ],
     2: ["sha256:69b6ad68c123a711095377ffdf64d21225f4bafaab3a414497ffef6c5391773e"],
+    3: ["sha256:451f3853fbc01766264e07c6b3f376aa64acfa0d7f2c6662916f876496558a8f"],
   },
   claude: {
     1: [
@@ -39,6 +40,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
       "sha256:f7876f2691e037c3d5d9e469275e8f9adb110b6ed39f3ba7eb6f962e5d70cbb1",
     ],
     2: ["sha256:f7876f2691e037c3d5d9e469275e8f9adb110b6ed39f3ba7eb6f962e5d70cbb1"],
+    3: ["sha256:100a50a8ca4da95b9513aec29cdd70703cccd6bdb89209d1d18850f63ea944cb"],
   },
   cursor: {
     1: [
@@ -46,6 +48,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
       "sha256:2c5645323532c603f0e2b037bb3cd2cc1275d31abf0fa01180cc3ee436534a93",
     ],
     2: ["sha256:2c5645323532c603f0e2b037bb3cd2cc1275d31abf0fa01180cc3ee436534a93"],
+    3: ["sha256:5d16ec26c199a1c552b9ba81d346f87fc26ff508c9204c68501ba01ace39ea98"],
   },
   generic: {
     1: [
@@ -53,6 +56,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
       "sha256:8248d34a1ac5306701a7d8ac5fbbea175b22ceb932fbcdc3d672a01e31127c25",
     ],
     2: ["sha256:8248d34a1ac5306701a7d8ac5fbbea175b22ceb932fbcdc3d672a01e31127c25"],
+    3: ["sha256:68f5b5a5c650648987fa230f339e162792a431da53d4b4ca202aff78fcb0cff1"],
   },
 };
 
@@ -60,11 +64,15 @@ function body(agent: DriverAgent): string {
   return [
     "# WSSpecKit Driver",
     "",
-    "新任务判断功能/文档 Workflow 并显式 start / 已有任务 inspect -> acquire -> 读取绑定 Skill -> 当前 Agent 执行 -> submit -> 重复",
+    "新任务判断功能/文档 Workflow 并显式 start；已有任务 inspect -> acquire -> 读取绑定 Skill -> 当前 Agent 原生执行 -> submit -> 重复。",
     "",
     "面向用户的说明、文档和交互文案默认使用中文；协议字段、类型名、URI、命令名和错误码保持英文。",
     "",
-    "仅当需求明确为纯文档或无代码变更时，建议 `documentation-delivery`；其余默认 `feature-delivery`。创建时必须传递 `workflowRef`，允许用户覆盖，创建后不得自动切换。",
+    "仅当需求明确为纯文档或无代码变更时选择 `builtin://workflows/documentation-delivery`；其余默认选择 `builtin://workflows/feature-delivery`。创建时必须传递明确的 `workflowRef`，允许用户覆盖；Work Item 创建后不得自动切换 Workflow。",
+    "",
+    "Driver 不得调用模型 API，不得缓存或管理对话、Token、记忆或隐藏推理，不得把 Artifact 正文放入协议 JSON。Artifact 只通过协议中的引用读取，模型上下文由当前 Agent Host 自主管理。",
+    "",
+    "安装只写入本 Skill 文件，不会启动后台 Runner。Driver 使用 WSSpecKit Application Protocol 驱动当前 Agent，不冒充 Codex、Claude、Cursor 或其他真实 Agent Host。",
     "",
     `手动调用示例：\`wspec start --provider ${agent} --prompt "更新 README" --workflow builtin://workflows/documentation-delivery\`。`,
     "",
@@ -118,7 +126,7 @@ function ownedSkill(content: string, agent: DriverAgent): boolean {
     && source.description === driverDescription
     && keys.length === driverFrontMatterKeys.length
     && keys.every((key, index) => key === driverFrontMatterKeys[index])
-    && (version === 1 || version === 2)
+    && (version === 1 || version === 2 || version === 3)
     && typeof digest === "string"
     && digest === sha256(match[2]!)
     && canonicalDriverDigests[agent][version].includes(digest);

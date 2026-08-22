@@ -1,0 +1,14 @@
+{
+  "client": "codex",
+  "actor": "codex-fixture",
+  "feature": {
+    "prompt": "实现本地计数函数，需求正文标记 CODEX_FEATURE_ARTIFACT_BODY",
+    "artifactBodyMarker": "CODEX_FEATURE_ARTIFACT_BODY",
+    "workflowRef": "builtin://workflows/feature-delivery"
+  },
+  "documentation": {
+    "prompt": "补充本地使用文档，需求正文标记 CODEX_DOCUMENT_ARTIFACT_BODY",
+    "artifactBodyMarker": "CODEX_DOCUMENT_ARTIFACT_BODY",
+    "workflowRef": "builtin://workflows/documentation-delivery"
+  }
+}
