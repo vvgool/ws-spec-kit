@@ -10,6 +10,7 @@ export interface AtomicFileHandle {
 export interface AtomicFileDependencies {
   mkdir(directory: string): Promise<unknown>;
   open(filename: string, flags: string, mode?: number): Promise<AtomicFileHandle>;
+  beforeRename(source: string, target: string): Promise<void>;
   rename(source: string, target: string): Promise<void>;
   unlink(filename: string): Promise<void>;
 }
@@ -17,6 +18,7 @@ export interface AtomicFileDependencies {
 const defaultDependencies: AtomicFileDependencies = {
   mkdir: async (directory) => mkdir(directory, { recursive: true }),
   open: async (filename, flags, mode) => open(filename, flags as Parameters<typeof open>[1], mode) as Promise<FileHandle>,
+  beforeRename: async () => undefined,
   rename,
   unlink,
 };
@@ -37,6 +39,7 @@ export function createWriteFileAtomic(overrides: Partial<AtomicFileDependencies>
       await handle.sync();
       await handle.close();
       handle = undefined;
+      await dependencies.beforeRename(temporary, target);
       await dependencies.rename(temporary, target);
       renamed = true;
       const directoryHandle = await dependencies.open(directory, "r");

@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { access, cp, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, cp, link, mkdir, mkdtemp, readFile, readdir, realpath, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
+import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import type { SubmitResult } from "../../src/protocol/application.js";
-import type { WorkPackage } from "../../src/protocol/work-package.js";
+import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
+import { readControlPlane } from "../../src/storage/control-plane.js";
 import { git } from "../integration/helpers/git.js";
 
 type Client = "codex" | "claude" | "cursor" | "generic";
@@ -32,6 +34,31 @@ interface CliRun {
   stdout: string;
   stderr: string;
   value: { ok: boolean; result?: Record<string, unknown>; error?: { code?: string; message?: string } };
+}
+
+type DriverState = "start" | "inspect" | "acquire" | "submit";
+type DriverTerminal = "await_approval" | "blocked" | "completed";
+
+interface DriverOperation {
+  argv: string[];
+  capture?: Record<string, string>;
+  next?: DriverState;
+  branch?: {
+    field: string;
+    cases: Record<"execute" | DriverTerminal, {
+      next: DriverState | DriverTerminal;
+      capture?: Record<string, string>;
+    }>;
+  };
+}
+
+interface DriverContract {
+  kind: "wsspeckit-driver-contract";
+  version: 1;
+  workflowSelection: Record<"feature" | "documentation", TaskFixture["workflowRef"]>;
+  entrypoints: { new: "start"; recovery: "inspect" };
+  operations: Record<DriverState, DriverOperation>;
+  terminals: Record<DriverTerminal, { stop: true }>;
 }
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
@@ -129,7 +156,7 @@ async function fixtureFor(client: Client): Promise<DriverFixture> {
 async function temporaryHome(client: Client): Promise<string> {
   const home = await mkdtemp(path.join(os.tmpdir(), `wspec-task2-${client}-home-`));
   await cp(path.join(fixtureRoot, client), home, { recursive: true });
-  return home;
+  return realpath(home);
 }
 
 async function allFiles(root: string): Promise<string[]> {
@@ -151,6 +178,38 @@ function splitSkill(content: string): { frontMatter: Record<string, unknown>; bo
   return { frontMatter: parse(match[1]!) as Record<string, unknown>, body: match[2]! };
 }
 
+function driverContract(body: string): DriverContract {
+  const candidates = [...body.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/gu)]
+    .map((match) => JSON.parse(match[1]!) as unknown)
+    .filter((value): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value));
+  const contract = candidates.find((value) => value.kind === "wsspeckit-driver-contract") as DriverContract | undefined;
+  assert.ok(contract, "Driver 正文必须包含 fenced JSON 状态机合同");
+  assert.equal(contract.version, 1);
+  assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" });
+  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "inspect", "start", "submit"]);
+  assert.deepEqual(Object.keys(contract.terminals).sort(), ["await_approval", "blocked", "completed"]);
+  return contract;
+}
+
+function valueAt(source: unknown, pointer: string): unknown {
+  return pointer.split(".").reduce<unknown>((current, segment) => {
+    assert.ok(current !== null && typeof current === "object" && !Array.isArray(current), `无法从 ${pointer} 读取 ${segment}`);
+    return (current as Record<string, unknown>)[segment];
+  }, source);
+}
+
+function renderArgv(operation: DriverOperation, values: Record<string, unknown>): string[] {
+  return operation.argv.map((argument) => argument.replace(/\$\{([A-Za-z][A-Za-z0-9]*)\}/gu, (_match, name: string) => {
+    const value = values[name];
+    assert.equal(typeof value, "string", `命令模板变量 ${name} 必须已从 Driver 输出合同捕获`);
+    return value as string;
+  }));
+}
+
+function capture(fields: Record<string, string> | undefined, output: CliRun["value"], values: Record<string, unknown>): void {
+  for (const [name, pointer] of Object.entries(fields ?? {})) values[name] = valueAt(output, pointer);
+}
+
 test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、幂等和冲突均 fail closed", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-task2-install-root-"));
   for (const client of clients) {
@@ -169,6 +228,7 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       const skillPath = path.join(target, "SKILL.md");
       const first = await readFile(skillPath, "utf8");
       const { frontMatter, body } = splitSkill(first);
+      const contract = driverContract(body);
       assert.match(String(frontMatter.description), /[\u3400-\u9fff]/u, `${client}: frontmatter 应为中文说明`);
       assert.match(body, /[\u3400-\u9fff]/u, `${client}: 正文应为中文`);
       assert.match(body, /start.*inspect.*acquire.*submit/su, `${client}: Driver 循环`);
@@ -179,6 +239,22 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.match(body, /builtin:\/\/workflows\/documentation-delivery/u, `${client}: 文档 workflowRef`);
       assert.match(body, /创建后不得自动切换 Workflow/u, `${client}: Workflow 不切换`);
       assert.match(body, /不冒充.*真实 Agent Host/u, `${client}: Host 边界`);
+      assert.equal(contract.operations.acquire.branch?.field, "result.action", `${client}: acquire action 分支`);
+      assert.deepEqual(contract.operations.acquire.branch?.cases, {
+        execute: {
+          next: "submit",
+          capture: {
+            workPackage: "result.workPackage",
+            stepId: "result.workPackage.stepId",
+            attemptId: "result.workPackage.attemptId",
+            leaseToken: "result.workPackage.lease.token",
+          },
+        },
+        await_approval: { next: "await_approval" },
+        blocked: { next: "blocked" },
+        completed: { next: "completed" },
+      }, `${client}: action.kind 分支必须完整`);
+      assert.deepEqual(contract.operations.submit.branch, contract.operations.acquire.branch, `${client}: submit 必须消费返回的 AgentAction`);
 
       const repeated = await runCli(root, home, installArgs);
       assertPassed(repeated, `${client}: idempotent reinstall`);
@@ -200,6 +276,95 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
   assert.equal(missingTarget.value.error?.code, "WSSPEC_ARGUMENT_REQUIRED");
 });
 
+function installArguments(client: Client, target: string): string[] {
+  return ["agent", "install", "--client", client, ...(client === "generic" ? ["--target", target] : [])];
+}
+
+function firstInstallSegment(client: Exclude<Client, "generic">): string {
+  if (client === "codex") return ".agents";
+  if (client === "claude") return ".claude";
+  return ".cursor";
+}
+
+test("四类 Driver 拒绝祖先目录与最终 Skill symlink，且外部路径零副作用", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wspec-task2-link-root-"));
+  for (const client of clients) {
+    await t.test(`${client}/ancestor`, async () => {
+      const home = await temporaryHome(client);
+      const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), `wspec-task2-${client}-outside-`)));
+      const target = client === "generic"
+        ? path.join(home, "linked-parent", "generic-driver")
+        : expectedTarget(client, home);
+      const linkedAncestor = client === "generic"
+        ? path.join(home, "linked-parent")
+        : path.join(home, firstInstallSegment(client));
+      await symlink(outside, linkedAncestor, "dir");
+
+      const result = await runCli(root, home, installArguments(client, target));
+
+      assert.equal(result.code, 1, `${client}: symlink 祖先必须拒绝`);
+      assert.equal(result.value.error?.code, "WSSPEC_SKILL_INSTALL_CONFLICT", `${client}: symlink 祖先错误码`);
+      assert.deepEqual(await readdir(outside), [], `${client}: symlink 祖先不得产生外部写入`);
+    });
+
+    await t.test(`${client}/final`, async () => {
+      const home = await temporaryHome(client);
+      const target = expectedTarget(client, home);
+      const args = installArguments(client, target);
+      const installed = await runCli(root, home, args);
+      assertPassed(installed, `${client}: 安装 final symlink fixture`);
+      const skillPath = path.join(target, "SKILL.md");
+      const canonical = await readFile(skillPath, "utf8");
+      const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), `wspec-task2-${client}-outside-`)));
+      const outsideSkill = path.join(outside, "SKILL.md");
+      await writeFile(outsideSkill, canonical, "utf8");
+      await unlink(skillPath);
+      await symlink(outsideSkill, skillPath, "file");
+
+      const result = await runCli(root, home, args);
+
+      assert.equal(result.code, 1, `${client}: 最终 Skill symlink 必须拒绝`);
+      assert.equal(result.value.error?.code, "WSSPEC_SKILL_INSTALL_CONFLICT", `${client}: 最终 symlink 错误码`);
+      assert.equal(await readFile(outsideSkill, "utf8"), canonical, `${client}: symlink 外部文件不得变化`);
+      assert.deepEqual(await readdir(outside), ["SKILL.md"], `${client}: symlink 外部目录不得新增内容`);
+    });
+  }
+});
+
+test("Driver 最终 Skill 必须是单链接普通文件", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wspec-task2-file-kind-root-"));
+  const home = await temporaryHome("generic");
+  const target = expectedTarget("generic", home);
+  const args = installArguments("generic", target);
+  const installed = await runCli(root, home, args);
+  assertPassed(installed, "generic: 安装 file-kind fixture");
+  const skillPath = path.join(target, "SKILL.md");
+  const canonical = await readFile(skillPath, "utf8");
+
+  await t.test("hardlink", async () => {
+    const outside = path.join(home, "outside-hardlink.md");
+    await writeFile(outside, canonical, "utf8");
+    await unlink(skillPath);
+    await link(outside, skillPath);
+    try {
+      const result = await runCli(root, home, args);
+      assert.equal(result.code, 1);
+      assert.equal(result.value.error?.code, "WSSPEC_SKILL_INSTALL_CONFLICT");
+      assert.equal(await readFile(outside, "utf8"), canonical);
+    } finally {
+      await unlink(skillPath).catch(() => undefined);
+      await unlink(outside).catch(() => undefined);
+    }
+  });
+
+  await t.test("non-regular", async () => {
+    await mkdir(skillPath);
+    const result = await runCli(root, home, args);
+    assert.equal(result.code, 1);
+    assert.equal(result.value.error?.code, "WSSPEC_SKILL_INSTALL_CONFLICT");
+  });
+});
+
 async function createRepository(home: string): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-task2-driver-repo-"));
   await git(root, "init");
@@ -212,13 +377,77 @@ async function createRepository(home: string): Promise<string> {
   return root;
 }
 
-function submissionFor(workPackage: WorkPackage): SubmitResult {
-  const artifacts = workPackage.requiredOutputs.map((expected: { artifactType: string; schemaVersion: number }) => {
-    if (expected.artifactType !== "requirement-source") return expected;
-    const source = workPackage.artifacts.find((artifact: { artifactType: string }) => artifact.artifactType === "requirement-source");
-    assert.ok(source, "intake 必须携带 Requirement Source 引用");
-    return source;
-  });
+function artifactBody(artifactType: string): string {
+  if (artifactType === "specification") return [
+    "# 目标与背景", "验证 Driver 状态机。", "# 范围", "本地 Fixture。", "# 需求", "执行统一协议。",
+    "# 验收条件", "到达明确终点。", "# 约束", "不访问模型端点。", "# 排除项", "真实 Host。", "# 开放问题", "无。", "",
+  ].join("\n");
+  if (artifactType === "tasks") return "# 任务\n\n```yaml\ntasks:\n  - id: task-1\n    status: pending\n    dependencies: []\n    completion: Driver 循环到达明确终点\n```\n";
+  if (artifactType === "implementation-result") return [
+    "# 实际改动", "本地 Fixture。", "# 修改文件", "无。", "# 计划偏差", "无。", "# 验证摘要", "由协议测试验证。",
+    "# 未完成项", "无。", "# 残余风险", "不代表真实 Host。", "",
+  ].join("\n");
+  if (artifactType === "review-result") return "# Findings\n\n```yaml\nfindings: []\n```\n";
+  return `# ${artifactType}\n\n本地 Driver 合同 Fixture。\n`;
+}
+
+async function writeOutputArtifact(root: string, workPackage: WorkPackage, artifactType: string): Promise<ArtifactReference> {
+  const projection = await readControlPlane(root, workPackage.workItemId);
+  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
+  const worktree = path.join(root, locator.worktree);
+  const body = artifactBody(artifactType);
+  const metadata = {
+    artifactType,
+    schemaVersion: 1 as const,
+    workItemId: workPackage.workItemId,
+    stageId: workPackage.stepId,
+    attemptId: workPackage.attemptId,
+    revision: 1,
+  };
+  const contentHash = computeArtifactContentHash(metadata, body);
+  const relative = `.wsspec/work-items/${workPackage.workItemId}/artifacts/${workPackage.stepId.replaceAll(":", "-")}-${artifactType}.md`;
+  await mkdir(path.dirname(path.join(worktree, relative)), { recursive: true });
+  await writeFile(path.join(worktree, relative), [
+    "---", `artifactType: ${artifactType}`, "schemaVersion: 1", `workItemId: ${workPackage.workItemId}`,
+    `stageId: ${workPackage.stepId}`, `attemptId: ${workPackage.attemptId}`, "revision: 1", `contentHash: ${contentHash}`,
+    "---", body,
+  ].join("\n"), "utf8");
+  const contentLevel = workPackage.requiredOutputs.find((output) => output.artifactType === artifactType)?.contentLevel;
+  return {
+    artifactType,
+    schemaVersion: 1,
+    path: relative,
+    revision: 1,
+    contentHash,
+    mediaType: "text/markdown",
+    ...(contentLevel === undefined ? {} : { contentLevel }),
+  };
+}
+
+async function submissionFor(root: string, workPackage: WorkPackage): Promise<SubmitResult> {
+  if (workPackage.stepId === "edit-document") {
+    return {
+      version: 1,
+      status: "failed",
+      summary: "本地 Driver Fixture 不执行真实文档编辑，显式进入 blocked 终点",
+      modifiedFiles: [],
+      artifacts: [],
+      commands: [],
+      evidence: [],
+      externalWrites: [],
+      remainingRisks: [{ code: "WSSPEC_FIXTURE_DOCUMENT_EDIT_NOT_RUN" }],
+    };
+  }
+  const artifacts: ArtifactReference[] = [];
+  for (const expected of workPackage.requiredOutputs) {
+    if (expected.artifactType === "requirement-source") {
+      const source = workPackage.artifacts.find((artifact) => artifact.artifactType === "requirement-source");
+      assert.ok(source, "intake 必须携带 Requirement Source 引用");
+      artifacts.push(source);
+    } else {
+      artifacts.push(await writeOutputArtifact(root, workPackage, expected.artifactType));
+    }
+  }
   return {
     version: 1,
     status: "completed",
@@ -258,63 +487,116 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
             ["agent", "install", "--client", client, ...(client === "generic" ? ["--target", target] : [])],
           );
           assertPassed(install, `${client}/${kind}: install`);
+          const { body } = splitSkill(await readFile(path.join(target, "SKILL.md"), "utf8"));
+          const contract = driverContract(body);
           const root = await createRepository(home);
           const environment = {
             OPENAI_BASE_URL: modelEndpoint,
             ANTHROPIC_BASE_URL: modelEndpoint,
             CURSOR_API_BASE_URL: modelEndpoint,
           };
+          const workflowRef = contract.workflowSelection[kind];
+          assert.equal(workflowRef, task.workflowRef, `${client}/${kind}: Driver workflow 决策`);
+          const values: Record<string, unknown> = {
+            actor: fixture.actor,
+            profile: "quick",
+            prompt: task.prompt,
+            provider: client,
+            workflowRef,
+          };
+          const pids: number[] = [];
+          let protocolJson = "";
+          let state: DriverState = contract.entrypoints.new;
+          let terminal: DriverTerminal | undefined;
+          let terminalResult: Record<string, unknown> | undefined;
+          let acquireCount = 0;
+          let executeCount = 0;
+          let submitCount = 0;
+          let projectDefaultSwitched = false;
 
-          const started = await runCli(root, home, [
-            "start", "--prompt", task.prompt,
-            "--workflow", task.workflowRef,
-            "--profile", "quick",
-            "--provider", client,
-          ], environment);
-          assertPassed(started, `${client}/${kind}: start`);
-          assert.equal(started.value.result.workflowRef, task.workflowRef, `${client}/${kind}: explicit workflowRef`);
-          const workItemId = requiredString(started.value.result.workItemId, `${client}/${kind}: workItemId`);
+          for (let iteration = 0; iteration < 32 && terminal === undefined; iteration += 1) {
+            const operation: DriverOperation = contract.operations[state];
+            assert.ok(operation, `${client}/${kind}: Driver 缺少 ${state} 操作`);
+            if (state === "submit") {
+              const workPackage = requiredWorkPackage(values.workPackage, `${client}/${kind}: submit Work Package`);
+              const resultName = `driver-result-${submitCount + 1}.json`;
+              await writeFile(path.join(root, resultName), `${JSON.stringify(await submissionFor(root, workPackage), null, 2)}\n`, "utf8");
+              values.resultPath = resultName;
+            }
+            const argv = renderArgv(operation, values);
+            assert.equal(argv[0], "wspec", `${client}/${kind}: Driver 命令必须以 wspec 开始`);
+            const run = await runCli(root, home, argv.slice(1), environment);
+            assertPassed(run, `${client}/${kind}: ${state}`);
+            pids.push(run.pid);
+            protocolJson += run.stdout;
+            capture(operation.capture, run.value, values);
+            const branch = operation.branch;
+            const branchCase = branch === undefined
+              ? undefined
+              : branch.cases[requiredString(valueAt(run.value, branch.field), `${client}/${kind}: action.kind`) as keyof typeof branch.cases];
+            capture(branchCase?.capture, run.value, values);
 
-          const opposite = kind === "feature"
-            ? "builtin://workflows/documentation-delivery"
-            : "builtin://workflows/feature-delivery";
-          const switched = await runCli(root, home, ["workflow", "use", opposite, "--profile", "quick", "--provider", client], environment);
-          assertPassed(switched, `${client}/${kind}: switch project default`);
+            if (state === "start") {
+              assert.equal(values.workflowRef, task.workflowRef, `${client}/${kind}: explicit workflowRef`);
+              requiredString(values.workItemId, `${client}/${kind}: workItemId`);
+              assert.equal(operation.next, contract.entrypoints.recovery, `${client}/${kind}: start 后必须进入恢复入口`);
+              const opposite = kind === "feature"
+                ? "builtin://workflows/documentation-delivery"
+                : "builtin://workflows/feature-delivery";
+              const switched = await runCli(root, home, ["workflow", "use", opposite, "--profile", "quick", "--provider", client], environment);
+              assertPassed(switched, `${client}/${kind}: switch project default`);
+              projectDefaultSwitched = true;
+            } else if (state === "inspect") {
+              assert.equal(run.value.result.workflowRef, task.workflowRef, `${client}/${kind}: inspect 不得切换 Workflow`);
+            } else if (state === "acquire") {
+              acquireCount += 1;
+              if (run.value.result.action === "execute") {
+                executeCount += 1;
+                const workPackage = requiredWorkPackage(values.workPackage, `${client}/${kind}: acquire Work Package`);
+                assert.equal(workPackage.workItemId, values.workItemId);
+              }
+            } else {
+              submitCount += 1;
+              if (run.value.result.action === "execute") {
+                executeCount += 1;
+                if (submitCount === 1) {
+                  const repeatedAcquireArgv = renderArgv(contract.operations.acquire, values);
+                  const repeatedAcquire = await runCli(root, home, repeatedAcquireArgv.slice(1), environment);
+                  assertPassed(repeatedAcquire, `${client}/${kind}: submit.execute 后禁止重复 acquire`);
+                  assert.equal(repeatedAcquire.value.result.action, "blocked");
+                  assert.equal(
+                    (repeatedAcquire.value.result.problems as Array<{ code?: string }> | undefined)?.[0]?.code,
+                    "WSSPEC_STAGE_ALREADY_CLAIMED",
+                    `${client}/${kind}: 重复 acquire 必须保护活动 Claim`,
+                  );
+                  pids.push(repeatedAcquire.pid);
+                  protocolJson += repeatedAcquire.stdout;
+                }
+              }
+            }
 
-          const inspected = await runCli(root, home, ["inspect", workItemId], environment);
-          assertPassed(inspected, `${client}/${kind}: inspect in a new process`);
-          assert.equal(inspected.value.result.workflowRef, task.workflowRef, `${client}/${kind}: 已创建任务不得切 Workflow`);
+            const next = branchCase?.next ?? operation.next;
+            assert.ok(next !== undefined, `${client}/${kind}: ${state} 必须声明下一状态`);
+            if (next in contract.terminals) {
+              assert.equal(contract.terminals[next as DriverTerminal].stop, true);
+              terminal = next as DriverTerminal;
+              terminalResult = run.value.result;
+            } else {
+              state = next as DriverState;
+            }
+          }
 
-          const acquired = await runCli(root, home, ["acquire", workItemId, "--actor", fixture.actor], environment);
-          assertPassed(acquired, `${client}/${kind}: acquire in a new process`);
-          assert.equal(acquired.value.result.action, "execute", `${client}/${kind}: acquire action`);
-          const workPackage = requiredWorkPackage(acquired.value.result.workPackage, `${client}/${kind}`);
-          assert.equal(workPackage.workItemId, workItemId);
-          const protocolJson = `${started.stdout}${inspected.stdout}${acquired.stdout}`;
+          assert.equal(projectDefaultSwitched, true, `${client}/${kind}: 必须扰动项目默认 Workflow`);
+          assert.ok(terminal !== undefined, `${client}/${kind}: Driver 循环必须到达明确终点`);
+          assert.ok(acquireCount >= 1, `${client}/${kind}: recovery 必须执行 acquire`);
+          assert.ok(executeCount >= 2, `${client}/${kind}: 必须取得多个 execute Work Package，实际 ${executeCount}`);
+          assert.ok(submitCount >= 2, `${client}/${kind}: 必须多次 submit，实际 ${submitCount}，终点 ${terminal} ${JSON.stringify(terminalResult)}`);
+          assert.equal(new Set(pids).size, pids.length, `${client}/${kind}: 每条协议命令必须使用 fresh process`);
           assert.doesNotMatch(protocolJson, /"body"\s*:/u, `${client}/${kind}: 协议不得内嵌 Artifact 正文`);
           assert.doesNotMatch(protocolJson, new RegExp(task.artifactBodyMarker, "u"), `${client}/${kind}: Artifact 正文标记不得出现在协议`);
           for (const forbidden of [noConversationMarker, noSecretMarker, home, process.env.HOME ?? "", os.userInfo().username]) {
             if (forbidden !== "") assert.doesNotMatch(protocolJson, escapePattern(forbidden), `${client}/${kind}: 不得记录敏感运行环境`);
           }
-
-          const resultPath = path.join(root, "driver-result.json");
-          await writeFile(resultPath, `${JSON.stringify(submissionFor(workPackage), null, 2)}\n`, "utf8");
-          const submitted = await runCli(root, home, [
-            "submit", workItemId,
-            "--step", workPackage.stepId,
-            "--attempt", workPackage.attemptId,
-            "--lease", workPackage.lease.token,
-            "--result", "driver-result.json",
-            "--actor", fixture.actor,
-          ], environment);
-          assertPassed(submitted, `${client}/${kind}: submit`);
-          assert.notEqual(started.pid, inspected.pid, `${client}/${kind}: inspect 必须是新进程`);
-          assert.notEqual(inspected.pid, acquired.pid, `${client}/${kind}: acquire 必须是新进程`);
-          assert.notEqual(acquired.pid, submitted.pid, `${client}/${kind}: submit 必须是新进程`);
-
-          const after = await runCli(root, home, ["inspect", workItemId], environment);
-          assertPassed(after, `${client}/${kind}: inspect after submit`);
-          assert.equal(after.value.result.workflowRef, task.workflowRef, `${client}/${kind}: submit 后 Workflow 保持不变`);
 
           const persisted = await allFiles(path.join(root, ".wsspec"));
           for (const filename of persisted) {
