@@ -218,6 +218,12 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       const target = expectedTarget(client, home);
       const installArgs = ["agent", "install", "--client", client, ...(client === "generic" ? ["--target", target] : [])];
 
+      const missingParent = await runCli(root, home, installArgs);
+      assert.equal(missingParent.code, 1, `${client}: 缺失目标目录必须拒绝`);
+      assert.equal(missingParent.value.error?.code, "WSSPEC_SKILL_INSTALL_CONFLICT", `${client}: 缺失目标目录错误码`);
+      assert.match(String(missingParent.value.error?.message), /目标目录必须预先创建/u, `${client}: 中文预创建提示`);
+      await mkdir(target, { recursive: true });
+
       const dryRun = await runCli(root, home, [...installArgs, "--dry-run"]);
       assertPassed(dryRun, `${client}: dry-run`);
       assert.equal(dryRun.value.result.target, target, `${client}: target`);
@@ -311,6 +317,7 @@ test("四类 Driver 拒绝祖先目录与最终 Skill symlink，且外部路径�
       const home = await temporaryHome(client);
       const target = expectedTarget(client, home);
       const args = installArguments(client, target);
+      await mkdir(target, { recursive: true });
       const installed = await runCli(root, home, args);
       assertPassed(installed, `${client}: 安装 final symlink fixture`);
       const skillPath = path.join(target, "SKILL.md");
@@ -336,6 +343,7 @@ test("Driver 最终 Skill 必须是单链接普通文件", async (t) => {
   const home = await temporaryHome("generic");
   const target = expectedTarget("generic", home);
   const args = installArguments("generic", target);
+  await mkdir(target, { recursive: true });
   const installed = await runCli(root, home, args);
   assertPassed(installed, "generic: 安装 file-kind fixture");
   const skillPath = path.join(target, "SKILL.md");
@@ -481,6 +489,7 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
           const task = fixture[kind];
           const home = await temporaryHome(client);
           const target = expectedTarget(client, home);
+          await mkdir(target, { recursive: true });
           const install = await runCli(
             repositoryRoot,
             home,

@@ -1,11 +1,11 @@
 import type { BigIntStats } from "node:fs";
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
 import { sha256 } from "../../domain/digests.js";
-import { createWriteFileAtomic } from "../../storage/files.js";
 import { CliAdapterError } from "../cli/output.js";
+import { spawnJson } from "../process/spawn-json.js";
 import { claudeDriverTarget } from "./claude.js";
 import { codexDriverTarget } from "./codex.js";
 import { cursorDriverTarget } from "./cursor.js";
@@ -15,13 +15,24 @@ export type DriverAgent = "codex" | "claude" | "cursor" | "generic";
 export interface InstallDriverSkillInput { agent: DriverAgent; home: string; target?: string; dryRun?: boolean }
 export interface InstallDriverSkillResult { agent: DriverAgent; target: string; dryRun: boolean }
 export interface DriverSkillInstallerDependencies {
-  mkdir(target: string): Promise<void>;
-  writeSkill(target: string, content: string, beforeRename: () => Promise<void>): Promise<void>;
+  secureInstall(request: SecureInstallRequest): Promise<void>;
+}
+
+export interface SecureInstallRequest {
+  target: string;
+  targetDev: string;
+  targetIno: string;
+  operation: "create" | "verify";
+  dryRun: boolean;
+  contentBase64?: string;
+  expectedDigest?: string;
+  expectedSize?: number;
 }
 
 type DriverVersion = 1 | 2 | 3 | 4;
 
 const currentDriverVersion = 4 as const;
+const maximumDriverBytes = 1_048_576n;
 const driverDescription = "使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。";
 const driverFrontMatterKeys = ["description", "name", "wsspeckit-driver-content-digest", "wsspeckit-driver-version"] as const;
 
@@ -231,72 +242,33 @@ function assertDirectory(info: BigIntStats): void {
   if (!info.isDirectory()) conflict("Driver 安装路径的每一段都必须是普通目录，禁止 symlink 或其他文件类型。");
 }
 
-async function nearestExistingDirectory(target: string): Promise<string> {
-  let current = target;
-  while (true) {
-    try {
-      const info = await lstat(current, { bigint: true });
-      assertDirectory(info);
-      return current;
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      const parent = path.dirname(current);
-      if (parent === current) return conflict("Driver 安装目标没有可验证的 authority。");
-      current = parent;
-    }
-  }
-}
-
-async function assertCanonicalDirectoryChain(directory: string): Promise<void> {
+async function assertCanonicalDirectoryChain(directory: string): Promise<BigIntStats> {
   const resolved = path.resolve(directory);
   const root = path.parse(resolved).root;
   let current = root;
-  assertDirectory(await lstat(current, { bigint: true }));
+  let currentInfo = await lstat(current, { bigint: true });
+  assertDirectory(currentInfo);
   for (const segment of path.relative(root, resolved).split(path.sep).filter(Boolean)) {
     current = path.join(current, segment);
     const info = await lstat(current, { bigint: true });
     assertDirectory(info);
     if (await realpath(current) !== current) conflict("Driver 安装路径必须是 canonical，禁止任何祖先 symlink。");
+    currentInfo = info;
   }
+  return currentInfo;
 }
 
-async function prepareTarget(
-  target: string,
-  create: boolean,
-  createDirectory: (directory: string) => Promise<void>,
-): Promise<BigIntStats | undefined> {
-  const authority = await nearestExistingDirectory(target);
-  await assertCanonicalDirectoryChain(authority);
-  let current = authority;
-  for (const segment of path.relative(authority, target).split(path.sep).filter(Boolean)) {
-    current = path.join(current, segment);
-    let info: BigIntStats;
-    try {
-      info = await lstat(current, { bigint: true });
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      if (!create) return undefined;
-      try { await createDirectory(current); }
-      catch (mkdirError) { if (!isMissing(mkdirError) && (mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError; }
-      info = await lstat(current, { bigint: true });
-    }
-    assertDirectory(info);
-    if (await realpath(current) !== current) conflict("Driver 安装路径必须是 canonical，禁止任何祖先 symlink。");
-  }
-  return lstat(target, { bigint: true });
-}
-
-function ownedSkill(content: string, agent: DriverAgent): boolean {
+function ownedSkillVersion(content: string, agent: DriverAgent): DriverVersion | undefined {
   const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n\r?\n([\s\S]*)$/u.exec(content);
-  if (match === null) return false;
+  if (match === null) return undefined;
   let frontMatter: unknown;
-  try { frontMatter = parse(match[1]!); } catch { return false; }
-  if (frontMatter === null || typeof frontMatter !== "object" || Array.isArray(frontMatter)) return false;
+  try { frontMatter = parse(match[1]!); } catch { return undefined; }
+  if (frontMatter === null || typeof frontMatter !== "object" || Array.isArray(frontMatter)) return undefined;
   const source = frontMatter as Record<string, unknown>;
   const keys = Object.keys(source).sort();
   const version = source["wsspeckit-driver-version"];
   const digest = source["wsspeckit-driver-content-digest"];
-  return source.name === "wsspeckit-driver"
+  const owned = source.name === "wsspeckit-driver"
     && source.description === driverDescription
     && keys.length === driverFrontMatterKeys.length
     && keys.every((key, index) => key === driverFrontMatterKeys[index])
@@ -304,17 +276,24 @@ function ownedSkill(content: string, agent: DriverAgent): boolean {
     && typeof digest === "string"
     && digest === sha256(match[2]!)
     && canonicalDriverDigests[agent][version].includes(digest);
+  return owned ? version : undefined;
 }
 
 async function skillIdentity(filename: string): Promise<BigIntStats | undefined> {
   let info: BigIntStats;
   try { info = await lstat(filename, { bigint: true }); }
   catch (error) { if (isMissing(error)) return undefined; throw error; }
-  if (!info.isFile() || info.nlink !== 1n) conflict("Driver Skill 必须是单链接普通文件，禁止 symlink、hardlink 或其他文件类型。");
+  if (!info.isFile() || info.nlink !== 1n || info.size > maximumDriverBytes) conflict("Driver Skill 必须是有界单链接普通文件，禁止 symlink、hardlink 或其他文件类型。");
   return info;
 }
 
-async function assertOwned(target: string, agent: DriverAgent): Promise<BigIntStats | undefined> {
+interface OwnedSkill {
+  content: string;
+  info: BigIntStats;
+  version: DriverVersion;
+}
+
+async function assertOwned(target: string, agent: DriverAgent): Promise<OwnedSkill | undefined> {
   const filename = path.join(target, "SKILL.md");
   const before = await skillIdentity(filename);
   if (before === undefined) return undefined;
@@ -322,51 +301,214 @@ async function assertOwned(target: string, agent: DriverAgent): Promise<BigIntSt
   try { existing = await readFile(filename, "utf8"); }
   catch { return conflict(); }
   const after = await skillIdentity(filename);
-  if (after === undefined || !sameIdentity(before, after) || !ownedSkill(existing, agent)) return conflict();
-  return after;
+  const version = ownedSkillVersion(existing, agent);
+  if (after === undefined || !sameIdentity(before, after) || version === undefined) return conflict();
+  return { content: existing, info: after, version };
 }
 
-const defaultDependencies: DriverSkillInstallerDependencies = {
-  mkdir: async (target) => { await mkdir(target); },
-  writeSkill: async (target, content, beforeRename) => {
-    await createWriteFileAtomic({ beforeRename: async () => beforeRename() })(target, content);
-  },
-};
+const secureInstallScript = String.raw`
+import base64, hashlib, json, os, stat, sys
 
-async function revalidateDestination(target: string, parent: BigIntStats, expectedSkill: BigIntStats | undefined): Promise<void> {
-  const currentParent = await lstat(target, { bigint: true });
-  assertDirectory(currentParent);
-  if (!sameIdentity(parent, currentParent) || await realpath(target) !== target) {
-    conflict("Driver 安装父目录在原子替换前发生变化。");
-  }
-  const currentSkill = await skillIdentity(path.join(target, "SKILL.md"));
-  if ((expectedSkill === undefined) !== (currentSkill === undefined)
-    || (expectedSkill !== undefined && currentSkill !== undefined && !sameIdentity(expectedSkill, currentSkill))) {
-    conflict("Driver Skill 在原子替换前发生变化。");
+def result(ok, code=None):
+    value = {"ok": ok}
+    if code is not None:
+        value["code"] = code
+    sys.stdout.write(json.dumps(value, separators=(",", ":")))
+
+def fail():
+    raise RuntimeError("conflict")
+
+def request_value(source, key, kind):
+    value = source.get(key)
+    if not isinstance(value, kind):
+        fail()
+    return value
+
+def open_target(target, expected_dev, expected_ino):
+    if not target.startswith("/") or os.path.normpath(target) != target or target == "/" or "\x00" in target:
+        fail()
+    current = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for segment in [part for part in target.split("/") if part]:
+            before = os.stat(segment, dir_fd=current, follow_symlinks=False)
+            if not stat.S_ISDIR(before.st_mode):
+                fail()
+            child = os.open(segment, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            after = os.fstat(child)
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                os.close(child)
+                fail()
+            os.close(current)
+            current = child
+        final = os.fstat(current)
+        if str(final.st_dev) != expected_dev or str(final.st_ino) != expected_ino:
+            fail()
+        return current
+    except BaseException:
+        os.close(current)
+        raise
+
+def existing_file(directory):
+    try:
+        before = os.stat("SKILL.md", dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 1048576:
+        fail()
+    handle = os.open("SKILL.md", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    after = os.fstat(handle)
+    if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+        os.close(handle)
+        fail()
+    return handle
+
+def verify(directory, expected_digest, expected_size):
+    handle = existing_file(directory)
+    if handle is None:
+        fail()
+    try:
+        data = bytearray()
+        while True:
+            chunk = os.read(handle, 65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > 1048576:
+                fail()
+        if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_digest:
+            fail()
+    finally:
+        os.close(handle)
+
+def create(directory, content, dry_run):
+    existing = existing_file(directory)
+    if existing is not None:
+        os.close(existing)
+        fail()
+    if dry_run:
+        return False
+    handle = None
+    try:
+        handle = os.open("SKILL.md", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        offset = 0
+        while offset < len(content):
+            written = os.write(handle, content[offset:])
+            if written < 1:
+                fail()
+            offset += written
+        os.fsync(handle)
+        os.close(handle)
+        handle = None
+        os.fsync(directory)
+        return True
+    except BaseException:
+        if handle is not None:
+            os.close(handle)
+        raise
+
+try:
+    source = json.load(sys.stdin)
+    if not isinstance(source, dict) or set(source) - {"target", "targetDev", "targetIno", "operation", "dryRun", "contentBase64", "expectedDigest", "expectedSize"}:
+        fail()
+    target = request_value(source, "target", str)
+    target_dev = request_value(source, "targetDev", str)
+    target_ino = request_value(source, "targetIno", str)
+    operation = request_value(source, "operation", str)
+    dry_run = request_value(source, "dryRun", bool)
+    directory = open_target(target, target_dev, target_ino)
+    created = False
+    try:
+        if operation == "create":
+            encoded = request_value(source, "contentBase64", str)
+            content = base64.b64decode(encoded, validate=True)
+            if len(content) > 1048576:
+                fail()
+            created = create(directory, content, dry_run)
+            if created:
+                verify(directory, hashlib.sha256(content).hexdigest(), len(content))
+        elif operation == "verify":
+            digest = request_value(source, "expectedDigest", str)
+            size = request_value(source, "expectedSize", int)
+            if dry_run not in (True, False) or len(digest) != 64 or size < 0 or size > 1048576:
+                fail()
+            verify(directory, digest, size)
+        else:
+            fail()
+        confirmed = open_target(target, target_dev, target_ino)
+        os.close(confirmed)
+    except BaseException:
+        raise
+    finally:
+        os.close(directory)
+    result(True)
+except BaseException:
+    result(False, "conflict")
+`;
+
+function helperSucceeded(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === 1 && (value as Record<string, unknown>).ok === true;
+}
+
+export async function secureInstallDriverFile(request: SecureInstallRequest): Promise<void> {
+  if (process.platform !== "darwin") conflict("Driver 安全安装当前仅支持 macOS。");
+  try {
+    const helper = await realpath("/usr/bin/python3");
+    const helperInfo = await lstat(helper);
+    if (!helperInfo.isFile() || helperInfo.uid !== 0 || (helperInfo.mode & 0o022) !== 0) {
+      conflict("Driver 安全安装 helper 不可信。");
+    }
+    const result = await spawnJson({
+      executable: helper,
+      argv: ["-I", "-S", "-c", secureInstallScript],
+      input: request,
+      timeoutMs: 5_000,
+      maxStdoutBytes: 256,
+    });
+    if (!helperSucceeded(result.value)) conflict("Driver 安全安装未通过文件系统边界校验。");
+  } catch (error) {
+    if (error instanceof CliAdapterError) throw error;
+    conflict("Driver 安全安装 helper 不可用或执行失败。");
   }
 }
+
+const defaultDependencies: DriverSkillInstallerDependencies = { secureInstall: secureInstallDriverFile };
 
 export function createDriverSkillInstaller(overrides: Partial<DriverSkillInstallerDependencies> = {}): (input: InstallDriverSkillInput) => Promise<InstallDriverSkillResult> {
   const dependencies = { ...defaultDependencies, ...overrides };
   return async (input) => {
     const target = await targetFor(input);
-    const existingParent = await prepareTarget(target, false, dependencies.mkdir);
-    const expectedSkill = existingParent === undefined ? undefined : await assertOwned(target, input.agent);
-    if (existingParent !== undefined && expectedSkill === undefined) conflict();
-    if (input.dryRun === true) return { agent: input.agent, target, dryRun: true };
-    const parent = await prepareTarget(target, true, dependencies.mkdir);
-    if (parent === undefined) throw new Error("Driver 安装父目录创建失败。");
-    const currentSkill = await assertOwned(target, input.agent);
-    if ((expectedSkill === undefined) !== (currentSkill === undefined)
-      || (expectedSkill !== undefined && currentSkill !== undefined && !sameIdentity(expectedSkill, currentSkill))) {
-      conflict("Driver Skill 在安装准备期间发生变化。");
+    let targetInfo: BigIntStats;
+    try { targetInfo = await assertCanonicalDirectoryChain(target); }
+    catch (error) {
+      if (isMissing(error)) conflict("Driver 安装目标目录必须预先创建。");
+      throw error;
     }
-    await dependencies.writeSkill(
-      path.join(target, "SKILL.md"),
-      skill(input.agent),
-      async () => revalidateDestination(target, parent, currentSkill),
-    );
-    return { agent: input.agent, target, dryRun: false };
+    const existing = await assertOwned(target, input.agent);
+    if (existing !== undefined && existing.version !== currentDriverVersion) {
+      conflict("旧版 Driver 不进行原地升级；请移除旧文件后重新安装。");
+    }
+    const content = skill(input.agent);
+    const request: SecureInstallRequest = existing === undefined
+      ? {
+        target,
+        targetDev: targetInfo.dev.toString(),
+        targetIno: targetInfo.ino.toString(),
+        operation: "create",
+        dryRun: input.dryRun === true,
+        contentBase64: Buffer.from(content).toString("base64"),
+      }
+      : {
+        target,
+        targetDev: targetInfo.dev.toString(),
+        targetIno: targetInfo.ino.toString(),
+        operation: "verify",
+        dryRun: input.dryRun === true,
+        expectedDigest: sha256(existing.content).slice("sha256:".length),
+        expectedSize: Buffer.byteLength(existing.content),
+      };
+    await dependencies.secureInstall(request);
+    return { agent: input.agent, target, dryRun: input.dryRun === true };
   };
 }
 

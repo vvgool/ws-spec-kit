@@ -9,25 +9,32 @@ Claude 或 Cursor Host 已发现、触发或执行该 Skill。真实 Host 的自
 
 ## 文件安装
 
-公开命令为：
+当前安全安装只在 macOS 验证，并依赖系统 `/usr/bin/python3`。先创建最终目标目录，再执行公开命令：
 
 ```sh
+mkdir -p ~/.agents/skills/wsspeckit-driver
 wspec agent install --client codex
+mkdir -p ~/.claude/skills/wsspeckit-driver
 wspec agent install --client claude
+mkdir -p ~/.cursor/skills/wsspeckit-driver
 wspec agent install --client cursor
+mkdir -p <安装目录>
 wspec agent install --client generic --target <安装目录>
 ```
 
 Codex、Claude、Cursor 分别安装到宿主约定的 `~/.agents/skills/wsspeckit-driver/SKILL.md`、
 `~/.claude/skills/wsspeckit-driver/SKILL.md` 和 `~/.cursor/skills/wsspeckit-driver/SKILL.md`。
-Generic 没有可推断的宿主目录，必须显式提供 `--target`。安装器支持 `--dry-run`；同 canonical 摘要重复
-安装保持幂等，未知或被修改的同名内容拒绝覆盖。四类安装都只生成中文说明的 `SKILL.md`，不生成 `.mdc`
+Generic 没有可推断的宿主目录，必须显式提供 `--target`。四类目标目录都必须预先存在，安装器不会创建
+任何祖先或目标目录。安装器支持 `--dry-run`；同 v4 canonical 摘要只读复验并保持幂等，历史 v1-v3、
+未知或被修改的同名内容都拒绝覆盖或原地升级。四类安装只生成中文说明的 `SKILL.md`，不生成 `.mdc`
 或后台 Runner。
 
-安装器以 canonical HOME 或 Generic target authority 为边界，逐段 `lstat` 已存在路径；缺失目录逐段
-非递归创建并立即复验。祖先目录和最终 `SKILL.md` 的 symlink、hardlink、非普通文件都 fail closed；
-原子 rename 前还会复验最终父目录和既有目标文件 identity。四类 Adapter 的祖先/最终 symlink 对抗均
-验证外部目录无新增或修改。
+安全 helper 固定使用 canonical、root-owned 且不可 group/world write 的 `/usr/bin/python3 -I -S`；请求只从
+stdin 接收结构化 JSON，stdout 仅允许有界固定 JSON，不继承 HOME、PYTHONPATH 或用户凭据，并受超时和
+输出上限约束。helper 从根目录开始以 `dir_fd`、`O_DIRECTORY`、`O_NOFOLLOW` 逐段打开预创建目标并核对
+最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v4 只读复验，不执行
+pathname `mkdir` 或 `rename`。祖先/最终 symlink、hardlink、非普通文件和两个 parent-swap race 都 fail
+closed，且对抗测试验证外部目录无新增或修改。
 
 ## 模拟协议循环
 
@@ -63,6 +70,6 @@ Fixture 还验证协议输出和持久化控制数据不记录测试 secret、�
 
 - 文件级证据：四类临时 HOME 的目标路径、中文 Skill、dry-run、幂等、冲突拒绝和无 `.mdc`。
 - 模拟循环证据：四个 Adapter 各自执行功能与纯文档 Fixture，共八条由安装产物 manifest 驱动的跨进程 CLI 路径。
-- 路径安全证据：四类 Adapter 的祖先/最终 symlink、hardlink、非普通文件和 rename 前父目录替换均 fail closed。
+- 路径安全证据：四类 Adapter 的预创建目录、祖先/最终 symlink、hardlink、非普通文件，以及 mkdir/rename 两个 parent-swap probe 均 fail closed。
 - 安全边界证据：本地模型端点收到零请求，协议无 Artifact 正文，控制数据无对话或 secret 标记。
 - 未运行证据：真实 Codex、Claude、Cursor Skill 发现、自动触发、模型执行和真实客户端跨会话恢复。

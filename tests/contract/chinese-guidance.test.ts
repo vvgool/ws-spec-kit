@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,15 +13,18 @@ test("四类 Driver 使用同一条中文输出提示", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "wspec-guidance-home-"));
 
   for (const agent of ["codex", "claude", "cursor"] as const) {
+    await mkdir(path.join(home, agent === "codex" ? ".agents" : `.${agent}`, "skills", "wsspeckit-driver"), { recursive: true });
     const result = await installDriverSkill({ agent, home });
     const content = await readFile(path.join(result.target, "SKILL.md"), "utf8");
     assert.match(content, new RegExp(guidance, "u"));
   }
 
+  const genericTarget = path.join(home, "generic-driver");
+  await mkdir(genericTarget);
   const generic = await installDriverSkill({
     agent: "generic",
     home,
-    target: path.join(home, "generic-driver"),
+    target: genericTarget,
   });
   const content = await readFile(path.join(generic.target, "SKILL.md"), "utf8");
   assert.match(content, new RegExp(guidance, "u"));

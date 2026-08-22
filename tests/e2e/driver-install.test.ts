@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createDriverSkillInstaller, installDriverSkill } from "../../src/adapters/skills/install.js";
-import { createWriteFileAtomic } from "../../src/storage/files.js";
+import { createDriverSkillInstaller, installDriverSkill, secureInstallDriverFile } from "../../src/adapters/skills/install.js";
 
 const historicalDriverDigests = {
   initial: {
@@ -67,11 +66,13 @@ function targetFor(agent: DriverAgent, home: string): string {
 
 async function install(agent: DriverAgent, home: string): Promise<void> {
   const target = targetFor(agent, home);
+  await mkdir(target, { recursive: true });
   await installDriverSkill({ agent, home, ...(agent === "generic" ? { target } : {}) });
 }
 
 test("Codex Driver 安装只写入临时 HOME 的官方目录，并包含中文执行循环", async () => {
   const home = await temporaryHome();
+  await mkdir(targetFor("codex", home), { recursive: true });
   const result = await installDriverSkill({ agent: "codex", home });
   assert.equal(result.target, path.join(home, ".agents", "skills", "wsspeckit-driver"));
   const skill = await readFile(path.join(result.target, "SKILL.md"), "utf8");
@@ -84,12 +85,14 @@ test("Codex Driver 安装只写入临时 HOME 的官方目录，并包含中文�
 
 test("Driver 安装 dry-run 不创建目录，Generic 必须提供显式目标", async () => {
   const home = await temporaryHome();
+  await mkdir(targetFor("claude", home), { recursive: true });
   const preview = await installDriverSkill({ agent: "claude", home, dryRun: true });
-  await assert.rejects(access(preview.target), /ENOENT/);
+  assert.equal(preview.dryRun, true);
+  await assert.rejects(access(path.join(preview.target, "SKILL.md")), /ENOENT/);
   await assert.rejects(installDriverSkill({ agent: "generic", home }), (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ARGUMENT_REQUIRED");
 });
 
-test("安装器只升级具有完整 canonical 标识的既有 Driver", async () => {
+test("安装器只幂等复验当前 canonical Driver", async () => {
   const home = await temporaryHome();
   const target = path.join(home, ".agents", "skills", "wsspeckit-driver");
   await mkdir(target, { recursive: true });
@@ -102,12 +105,15 @@ test("安装器只升级具有完整 canonical 标识的既有 Driver", async ()
   assert.match(before, /unrelated-skill/);
   const ownedHome = await temporaryHome();
   const ownedTarget = path.join(ownedHome, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
+  await mkdir(path.dirname(ownedTarget), { recursive: true });
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
+  const first = await readFile(ownedTarget, "utf8");
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
-  assert.match(await readFile(ownedTarget, "utf8"), /wsspeckit-driver-version: 4/);
+  assert.equal(await readFile(ownedTarget, "utf8"), first);
+  assert.match(first, /wsspeckit-driver-version: 4/);
 });
 
-test("安装器升级所有已登记的历史 canonical Driver", async (t) => {
+test("安装器拒绝原地升级所有已登记的历史 canonical Driver", async (t) => {
   for (const revision of ["initial", "chineseGuidance"] as const) {
     for (const agent of ["codex", "claude", "cursor", "generic"] as const) {
       await t.test(`${revision}/${agent}`, async () => {
@@ -117,12 +123,15 @@ test("安装器升级所有已登记的历史 canonical Driver", async (t) => {
         await mkdir(target, { recursive: true });
         await writeFile(path.join(target, "SKILL.md"), before, "utf8");
 
-        await install(agent, home);
+        await assert.rejects(
+          installDriverSkill({ agent, home, ...(agent === "generic" ? { target } : {}) }),
+          (error: unknown) => error instanceof Error
+            && "code" in error
+            && (error as Error & { code: string }).code === "WSSPEC_SKILL_INSTALL_CONFLICT",
+        );
 
         const updated = await readFile(path.join(target, "SKILL.md"), "utf8");
-        assert.notEqual(updated, before);
-        assert.match(updated, /wsspeckit-driver-version: 4/);
-        assert.match(updated, /面向用户的说明、文档和交互文案默认使用中文/);
+        assert.equal(updated, before);
       });
     }
   }
@@ -174,6 +183,7 @@ test("同名 Driver 的损坏标识或正文篡改也必须拒绝覆盖", async 
     await t.test(mutate.name || "altered", async () => {
       const home = await temporaryHome();
       const target = path.join(home, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
+      await mkdir(path.dirname(target), { recursive: true });
       await installDriverSkill({ agent: "codex", home });
       const altered = mutate(await readFile(target, "utf8"));
       await writeFile(target, altered, "utf8");
@@ -187,91 +197,62 @@ test("同名 Driver 的损坏标识或正文篡改也必须拒绝覆盖", async 
   }
 });
 
-test("更新既有 Driver 写入失败时保留原有可发现入口", async () => {
+test("安全 helper 失败时不创建 Driver 文件", async () => {
   const home = await temporaryHome();
   const target = path.join(home, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
-  await installDriverSkill({ agent: "codex", home });
-  const before = await readFile(target, "utf8");
+  await mkdir(path.dirname(target), { recursive: true });
 
-  const install = createDriverSkillInstaller({ writeSkill: async () => { throw new Error("injected write failure"); } });
+  const install = createDriverSkillInstaller({ secureInstall: async () => { throw new Error("injected helper failure"); } });
   await assert.rejects(
     install({
       agent: "codex",
       home,
     }),
-    /injected write failure/,
+    /injected helper failure/,
   );
 
-  assert.equal(await readFile(target, "utf8"), before);
+  await assert.rejects(access(target), /ENOENT/);
 });
 
-test("Driver 在原子 rename 前复验最终父目录身份", async () => {
+test("缺失的目标目录 fail closed 且安装器不创建任何路径段", async () => {
   const home = await temporaryHome();
   const target = path.join(home, ".agents", "skills", "wsspeckit-driver");
-  const moved = `${target}-authenticated`;
-  const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-driver-outside-")));
-  const install = createDriverSkillInstaller({
-    writeSkill: async (_filename, _content, beforeRename) => {
-      await rename(target, moved);
-      await symlink(outside, target, "dir");
-      await beforeRename();
-    },
-  });
 
   await assert.rejects(
-    install({ agent: "codex", home }),
+    installDriverSkill({ agent: "codex", home }),
     (error: unknown) => error instanceof Error
       && "code" in error
       && (error as Error & { code: string }).code === "WSSPEC_SKILL_INSTALL_CONFLICT",
   );
-  assert.deepEqual(await readdir(outside), []);
+  await assert.rejects(access(target), /ENOENT/);
 });
 
-test("原子 Driver 写入在 write、fsync、父目录复验与 rename 故障时保留发现入口并清理临时文件", async (t) => {
-  for (const phase of ["write", "file-sync", "parent-check", "rename"] as const) {
-    await t.test(phase, async () => {
-      const home = await temporaryHome();
-      const target = path.join(home, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
-      await installDriverSkill({ agent: "codex", home });
-      const before = await readFile(target, "utf8");
-      const writer = createWriteFileAtomic({
-        open: async (filename, flags, mode) => {
-          const handle = await open(filename, flags, mode);
-          if (filename === path.dirname(target)) return handle;
-          if (phase === "write") return { writeFile: async () => { throw new Error("injected write failure"); }, sync: handle.sync.bind(handle), close: handle.close.bind(handle) };
-          if (phase === "file-sync") return { writeFile: handle.writeFile.bind(handle), sync: async () => { throw new Error("injected file sync failure"); }, close: handle.close.bind(handle) };
-          return handle;
-        },
-        rename: async (source, destination) => {
-          if (phase === "rename") throw new Error("injected rename failure");
-          await rename(source, destination);
-        },
-        beforeRename: async () => {
-          if (phase === "parent-check") throw new Error("injected parent check failure");
-        },
-      });
-      const install = createDriverSkillInstaller({ writeSkill: writer });
-
-      await assert.rejects(install({ agent: "codex", home }), /injected/);
-      assert.equal(await readFile(target, "utf8"), before);
-      assert.deepEqual((await readdir(path.dirname(target))).filter((name) => name.endsWith(".tmp")), []);
-    });
-  }
-});
-
-test("目录 fsync 故障后仍保留可发现 Driver 并清理临时文件", async () => {
+test("安全 helper 用已记录 inode 拒绝 parent swap 且外部目录零副作用", async () => {
   const home = await temporaryHome();
-  const target = path.join(home, ".agents", "skills", "wsspeckit-driver", "SKILL.md");
-  const writer = createWriteFileAtomic({
-    open: async (filename, flags, mode) => {
-      const handle = await open(filename, flags, mode);
-      if (filename !== path.dirname(target)) return handle;
-      return { writeFile: handle.writeFile.bind(handle), sync: async () => { throw new Error("injected directory sync failure"); }, close: handle.close.bind(handle) };
+  const target = path.join(home, ".agents", "skills", "wsspeckit-driver");
+  const moved = `${target}-authenticated`;
+  const outside = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-driver-helper-race-outside-")));
+  await mkdir(target, { recursive: true });
+  const install = createDriverSkillInstaller({
+    secureInstall: async (request) => {
+      await rename(target, moved);
+      await symlink(outside, target, "dir");
+      await secureInstallDriverFile(request);
     },
   });
-  const install = createDriverSkillInstaller({ writeSkill: writer });
 
-  await assert.rejects(install({ agent: "codex", home }), /injected directory sync failure/);
-  assert.match(await readFile(target, "utf8"), /name: wsspeckit-driver/);
-  assert.deepEqual((await readdir(path.dirname(target))).filter((name) => name.endsWith(".tmp")), []);
+  let failure: Error | undefined;
+  await assert.rejects(
+    install({ agent: "codex", home }),
+    (error: unknown) => {
+      if (error instanceof Error) failure = error;
+      return error instanceof Error
+        && "code" in error
+        && (error as Error & { code: string }).code === "WSSPEC_SKILL_INSTALL_CONFLICT";
+    },
+  );
+  assert.equal(failure?.message.includes(home), false);
+  assert.equal(failure?.message.includes(outside), false);
+  assert.deepEqual(await readdir(outside), []);
+  await assert.rejects(access(path.join(moved, "SKILL.md")), /ENOENT/);
 });
