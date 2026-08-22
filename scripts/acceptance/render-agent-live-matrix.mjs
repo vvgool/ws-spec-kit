@@ -24,6 +24,14 @@ const observationNames = [
   "externalClose",
   "workItemClose",
 ];
+const releaseGateChecks = [
+  "signed-fixture-and-run-binding",
+  "bound-fixture-bin-wspec",
+  "three-distinct-fresh-client-sessions",
+  "chained-before-after-checkpoints",
+  "meaningful-auto-explicit-recovery-deltas",
+  "final-verifier-pass",
+];
 
 function parseMode(argv) {
   if (argv.length !== 1 || !["--check", "--write"].includes(argv[0])) {
@@ -46,6 +54,11 @@ function validateHistory(value) {
   const history = record(value, "history");
   if (history.version !== 1 || history.kind !== "wsspeckit-agent-live-history" || history.overall !== "no-go") {
     throw new Error("历史 manifest 版本、类型或 overall 无效");
+  }
+  const releaseGate = record(history.releaseGate, "releaseGate");
+  if (releaseGate.status !== "no-go" || JSON.stringify(releaseGate.requiredChecks) !== JSON.stringify(releaseGateChecks)
+    || !Array.isArray(releaseGate.satisfiedChecks) || releaseGate.satisfiedChecks.length !== 0) {
+    throw new Error("legacy history 缺少完整 release PASS 前置条件或错误声明已满足");
   }
   const clients = record(history.clients, "clients");
   for (const name of clientNames) {
@@ -96,6 +109,7 @@ export function renderAgentLiveMatrix(value) {
     wsspeckitCommit: history.wsspeckitCommit,
     authorityStatus: "legacy-unbound",
     overall: "no-go",
+    releaseGate: history.releaseGate,
     clients: Object.fromEntries(clientNames.map((name) => [name, renderClient(clients[name])])),
   };
   const header = [

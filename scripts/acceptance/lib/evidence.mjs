@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -35,6 +35,35 @@ export function sha256(value) {
 
 export async function sha256File(filename) {
   return sha256(await readFile(filename));
+}
+
+export async function inspectBoundFile(root, relativePath) {
+  const canonicalRoot = await realpath(root);
+  const normalized = relativePath.split(path.sep).join("/");
+  if (path.isAbsolute(relativePath) || normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
+    throw new Error("bound file path 必须是 canonical repository-relative path");
+  }
+  const filename = path.join(canonicalRoot, relativePath);
+  const before = await lstat(filename);
+  const resolved = await realpath(filename);
+  const info = await stat(resolved);
+  const after = await lstat(filename);
+  const expectedUid = typeof process.getuid === "function" ? process.getuid() : info.uid;
+  const stable = resolved === filename && !before.isSymbolicLink() && !after.isSymbolicLink()
+    && before.dev === info.dev && before.ino === info.ino && after.dev === info.dev && after.ino === info.ino;
+  if (!stable || !info.isFile() || info.nlink !== 1 || ![0, expectedUid].includes(info.uid) || (info.mode & 0o022) !== 0) {
+    throw new Error("bound file identity 无效");
+  }
+  const value = {
+    path: normalized,
+    digest: await sha256File(resolved),
+    dev: info.dev.toString(),
+    ino: info.ino.toString(),
+    mode: info.mode & 0o777,
+    uid: info.uid,
+    size: info.size,
+  };
+  return { ...value, identity: sha256(value) };
 }
 
 function authorityIdentityValue(info) {

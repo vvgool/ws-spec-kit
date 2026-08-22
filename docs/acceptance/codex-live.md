@@ -59,6 +59,13 @@ node scripts/acceptance/verify-agent-smoke.mjs \
   --authority <authority-file> --authority-identity <sha256>
 ```
 
+三个阶段均以独立 fresh client session 启动，禁止使用 `resume` 或 `--resume` 复用原生 Host session。Host PATH
+首项固定为 fixture 的 canonical `bin/`；signed fixture 同时绑定 `bin/wspec` 的 digest、device、inode、mode、
+uid、size、identity 和 WSSpecKit commit。每份 invocation receipt 都包含调用前后 event/projection 摘要与脱敏
+`inspect/acquire/submit` 计数；相邻 checkpoint 必须严格串联，auto、explicit、recovery 每段都必须有实际控制面
+推进，recovery 还必须出现成功 `inspect + acquire`。三段 receipt 全通过仍不足以发布 PASS，最终 verifier 的
+全部交付检查也必须通过；本页旧记录不满足其中任何一项，继续 NO-GO。
+
 此边界防止 authority 经 observer 启动的 Host child argv/env 泄露，并以仓库外 `0600` 文件约束普通读取；它不
 声称能够抵抗同一 UID 下可扫描临时目录、附加进程或改写 observer 文件的主机级攻击。更强保证需要独立 OS
 用户、隔离执行环境或外部 signer。

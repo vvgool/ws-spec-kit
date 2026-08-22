@@ -5,6 +5,18 @@
   "platform": "macOS-26.6.2-arm64",
   "wsspeckitCommit": "3d0175b7ea8c6e6f1539912b35ccac9bc2ac7396",
   "overall": "no-go",
+  "releaseGate": {
+    "status": "no-go",
+    "requiredChecks": [
+      "signed-fixture-and-run-binding",
+      "bound-fixture-bin-wspec",
+      "three-distinct-fresh-client-sessions",
+      "chained-before-after-checkpoints",
+      "meaningful-auto-explicit-recovery-deltas",
+      "final-verifier-pass"
+    ],
+    "satisfiedChecks": []
+  },
   "clients": {
     "codex": {
       "recordedDate": "2026-08-22",

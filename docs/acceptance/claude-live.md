@@ -28,5 +28,11 @@ child 全部退出后向 observer 调用方返回 authority path/identity。新 
 `--authority-identity <sha256>`；并要求 observer-signed auto/explicit/recovery 三阶段 invocation receipts，
 缺失或不匹配会 fail closed。
 
+auto、explicit、recovery 必须是三个互不相同的 fresh client session，不使用 `--resume`。Host PATH 首项必须是
+fixture canonical `bin/`，`bin/wspec` 的 path/digest/device/inode/mode/uid/size/identity/WSSpecKit commit 均由
+signed fixture 绑定。每份 receipt 还要绑定 before/after event、projection 和 wrapper command checkpoint；三段
+都必须有 meaningful delta，recovery 必须通过 `inspect + acquire` 取得新的 Work Package。只有这些阶段证据与
+最终 verifier 同时通过才允许 PASS；本页没有运行 Claude Code，因此全部保持未满足和 NO-GO。
+
 信任边界是 observer process、Host child 的 clean argv/env 和仓库外 mode `0600` authority；不声称抵抗同一
 UID 的主机级扫描、进程附加或文件改写。更强保证需要独立 OS 用户、隔离执行环境或外部 signer。

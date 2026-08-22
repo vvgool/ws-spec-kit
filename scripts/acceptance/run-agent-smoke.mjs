@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
   cleanEnvironment,
+  inspectBoundFile,
   readAuthority,
   readSignedJson,
   sha256,
@@ -79,31 +80,25 @@ async function inspectExecutable(client, filename) {
   };
 }
 
-function prompts(phase) {
+function prompts(phase, workItemToken) {
   if (phase === "auto") {
-    return "WSSPECKIT_SMOKE_AUTO：请在当前隔离仓库完成 SMOKE_REQUIREMENT.md；先自行发现项目 Driver，并按 Application 协议推进。";
+    return `WSSPECKIT_SMOKE_AUTO：Work Item token=${workItemToken}。请自行发现项目 Driver；inspect 当前 Work Item 后，最多完成一个 acquire -> submit 控制面周期，然后立即停止。`;
   }
   if (phase === "explicit") {
-    return "WSSPECKIT_SMOKE_EXPLICIT：请显式使用 wsspeckit-driver，inspect 后 acquire 当前 Work Item，并在下一次 submit 前停止。";
+    return `WSSPECKIT_SMOKE_EXPLICIT：Work Item token=${workItemToken}。这是全新 client session；请显式使用 wsspeckit-driver，inspect 后最多完成一个 acquire -> submit 控制面周期，然后立即停止。`;
   }
-  return "WSSPECKIT_SMOKE_RECOVERY：这是恢复阶段。请 inspect 当前 Work Item，再 acquire 恢复，并在下一次 submit 前停止。";
+  return `WSSPECKIT_SMOKE_RECOVERY：Work Item token=${workItemToken}。这是与前两阶段无关的全新 client session；只通过 inspect + acquire 恢复，推进至多一个控制面动作后立即停止。`;
 }
 
-function phaseArguments(client, phase, resumeSession) {
-  const prompt = prompts(phase);
+function phaseArguments(client, phase, workItemToken) {
+  const prompt = prompts(phase, workItemToken);
   if (client === "codex") {
-    return phase === "recovery"
-      ? ["exec", "resume", resumeSession, "--json", prompt]
-      : ["exec", "--json", "--skip-git-repo-check", prompt];
+    return ["exec", "--json", "--skip-git-repo-check", prompt];
   }
   if (client === "claude") {
-    return phase === "recovery"
-      ? ["--resume", resumeSession, "--print", "--output-format", "stream-json", "--verbose", prompt]
-      : ["--print", "--output-format", "stream-json", "--verbose", prompt];
+    return ["--print", "--output-format", "stream-json", "--verbose", prompt];
   }
-  return phase === "recovery"
-    ? ["--resume", resumeSession, "--print", "--output-format", "stream-json", prompt]
-    : ["--print", "--output-format", "stream-json", prompt];
+  return ["--print", "--output-format", "stream-json", prompt];
 }
 
 function findSessionId(value, depth = 0) {
@@ -175,6 +170,79 @@ function invocationPaths(root, phase) {
   };
 }
 
+function object(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function wrapperBindingMatches(actual, expected) {
+  return ["path", "digest", "dev", "ino", "mode", "uid", "size", "identity"]
+    .every((field) => actual?.[field] === expected?.[field]);
+}
+
+async function checkedWrapper(root, expected) {
+  try {
+    const actual = await inspectBoundFile(root, expected.path);
+    if (!wrapperBindingMatches(actual, expected)) throw new Error("binding changed");
+    return actual;
+  } catch {
+    throw new Error("wspec wrapper identity 无效或发生漂移");
+  }
+}
+
+async function wrapperCommandCounts(root) {
+  let text;
+  try {
+    text = await readFile(path.join(root, ".acceptance", "wspec-wrapper-audit.jsonl"), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return { inspect: 0, acquire: 0, submit: 0 };
+    throw error;
+  }
+  const counts = { inspect: 0, acquire: 0, submit: 0 };
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    const command = JSON.parse(line)?.command;
+    if (Object.hasOwn(counts, command)) counts[command] += 1;
+  }
+  return counts;
+}
+
+async function controlCheckpoint(root, workItemId) {
+  if (!/^WSS-[0-9A-HJKMNP-TV-Z]{26}$/u.test(workItemId)) throw new Error("Work Item ID 无效");
+  const controlPlane = path.join(root, ".git", "wsspec", "work-items", workItemId, "control-plane");
+  const [projectionText, eventsText] = await Promise.all([
+    readFile(path.join(controlPlane, "runtime.json"), "utf8"),
+    readFile(path.join(controlPlane, "events.jsonl"), "utf8"),
+  ]);
+  const projection = object(JSON.parse(projectionText));
+  const events = eventsText.split("\n").filter(Boolean).map((line) => object(JSON.parse(line)));
+  if (projection?.workItemId !== workItemId || events.some((event) => event === undefined)) {
+    throw new Error("控制面 checkpoint 结构无效");
+  }
+  let previousHash = null;
+  for (const [index, event] of events.entries()) {
+    if (event.sequence !== index + 1 || event.previousHash !== previousHash || !/^sha256:[a-f0-9]{64}$/u.test(event.eventHash ?? "")) {
+      throw new Error("控制面 checkpoint event chain 无效");
+    }
+    previousHash = event.eventHash;
+  }
+  if (projection.lastSequence !== events.length || projection.lastEventHash !== previousHash) {
+    throw new Error("控制面 checkpoint projection/event 未对齐");
+  }
+  const successfulAcquireCount = events.filter((event) => {
+    const value = object(object(event.result)?.value);
+    return object(value?.action)?.action === "execute";
+  }).length;
+  return {
+    eventCount: events.length,
+    lastEventHash: events.at(-1)?.eventHash ?? null,
+    projectionDigest: sha256(projection),
+    acquireCount: events.filter(({ eventType }) => eventType === "attempt.acquired").length,
+    successfulAcquireCount,
+    submitCount: events.filter(({ eventType }) => eventType === "attempt.submitted").length,
+    wrapperCommands: await wrapperCommandCounts(root),
+  };
+}
+
 async function persistInvocation(context, phase, record) {
   const files = invocationPaths(context.prepared.root, phase);
   const kind = `wsspeckit-agent-smoke-invocation-${phase}-receipt`;
@@ -221,24 +289,33 @@ export async function runAgentSmoke(input) {
     prepared.authorityFile,
     prepared.authorityIdentity,
   );
-  const runtime = await cleanEnvironment(prepared.root, [], { home: process.env.HOME ?? prepared.root });
+  const expectedWrapper = object(fixture.value.wspecWrapper);
+  if (expectedWrapper === undefined || expectedWrapper.wsspeckitCommit !== fixture.value.wsspeckitCommit) {
+    throw new Error("signed fixture 缺少 wspec wrapper binding");
+  }
+  await checkedWrapper(prepared.root, expectedWrapper);
+  const canonicalRoot = await realpath(prepared.root);
+  const runtime = await cleanEnvironment(canonicalRoot, [path.join(canonicalRoot, "bin")], { home: process.env.HOME ?? canonicalRoot });
   const context = { prepared, authority, fixtureDigest: fixture.manifestDigest, runManifest: run.value, references: [] };
-  let explicitSession;
+  const workItemToken = sha256(prepared.workItemId);
 
   for (const phase of phases) {
-    if (phase === "recovery" && explicitSession === undefined) break;
     const before = await inspectExecutable(input.client, input.executable);
     if (before.identity !== executable.identity || before.digest !== executable.digest || before.filename !== executable.filename) {
       throw new Error("client executable 在 observer 启动前发生漂移");
     }
-    const args = phaseArguments(input.client, phase, explicitSession);
+    await checkedWrapper(prepared.root, expectedWrapper);
+    const beforeCheckpoint = await controlCheckpoint(prepared.root, prepared.workItemId);
+    const args = phaseArguments(input.client, phase, workItemToken);
     const result = await runHost(executable.filename, args, prepared.root, runtime.environment);
     const after = await inspectExecutable(input.client, input.executable);
     if (after.identity !== executable.identity || after.digest !== executable.digest || after.filename !== executable.filename) {
       throw new Error("client executable 在 observer 调用期间发生漂移");
     }
+    await checkedWrapper(prepared.root, expectedWrapper);
+    const afterCheckpoint = await controlCheckpoint(prepared.root, prepared.workItemId);
     const output = outputSummary(result.stdout);
-    const sessionId = phase === "recovery" ? output.sessionId ?? explicitSession : output.sessionId;
+    const sessionId = output.sessionId;
     const record = {
       version: 1,
       kind: "wsspeckit-agent-smoke-invocation",
@@ -255,15 +332,16 @@ export async function runAgentSmoke(input) {
       endedAt: result.endedAt,
       exitCode: result.exitCode,
       sessionIdHash: sessionId === undefined ? null : sha256(sessionId),
-      resumedFromSessionIdHash: phase === "recovery" ? sha256(explicitSession) : null,
-      argvTemplateHash: sha256(args.map((value) => value === explicitSession ? "<resume-session>" : value)),
+      resumedFromSessionIdHash: null,
+      argvTemplateHash: sha256(args),
       stdoutDigest: sha256(result.stdout),
       stderrDigest: sha256(result.stderr),
       stdoutEventSummary: output.summary,
       environmentKeys: Object.keys(runtime.environment).sort(),
+      beforeCheckpoint,
+      afterCheckpoint,
     };
     await persistInvocation(context, phase, record);
-    if (phase === "explicit") explicitSession = output.sessionId;
   }
 
   if (context.references.length !== 3) throw new Error("observer 未形成 auto/explicit/recovery 完整 session chain");

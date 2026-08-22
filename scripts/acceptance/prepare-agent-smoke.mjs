@@ -12,6 +12,7 @@ import {
   cleanEnvironment,
   cleanEnvironmentKeys,
   createAuthority,
+  inspectBoundFile,
   sha256,
   sha256File,
   writeSignedJson,
@@ -135,7 +136,18 @@ export async function prepareSmoke(input) {
     "",
   ].join("\n"), "utf8");
   const wrapperArguments = wspecArguments([]).map((value) => JSON.stringify(value)).join(" ");
-  const wrapper = `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${wrapperArguments} \"$@\"\n`;
+  const wrapper = [
+    "#!/bin/sh",
+    "fixture_root=${0%/bin/wspec}",
+    "case \"${1-}\" in",
+    "  inspect|acquire|submit) acceptance_command=$1 ;;",
+    "  *) acceptance_command=other ;;",
+    "esac",
+    "umask 077",
+    "printf '{\"command\":\"%s\"}\\n' \"$acceptance_command\" >> \"$fixture_root/.acceptance/wspec-wrapper-audit.jsonl\"",
+    `exec ${JSON.stringify(process.execPath)} ${wrapperArguments} \"$@\"`,
+    "",
+  ].join("\n");
   await writeFile(path.join(root, "bin", "wspec"), wrapper, { encoding: "utf8", mode: 0o755 });
   await chmod(path.join(root, "bin", "wspec"), 0o755);
 
@@ -174,6 +186,7 @@ export async function prepareSmoke(input) {
   const baselineCommit = (await git(runtime, root, "rev-parse", "HEAD")).stdout.trim();
   const baselineTree = (await git(runtime, root, "rev-parse", "HEAD^{tree}")).stdout.trim();
   const wsspeckitCommit = (await git(runtime, sourceRoot, "rev-parse", "HEAD")).stdout.trim();
+  const wspecWrapper = { ...await inspectBoundFile(root, path.join("bin", "wspec")), wsspeckitCommit };
   const started = await runWspec(root, runtime.environment, [
     "start",
     "--file", "SMOKE_REQUIREMENT.md",
@@ -193,6 +206,7 @@ export async function prepareSmoke(input) {
     baselineCommit,
     baselineTree,
     wsspeckitCommit,
+    wspecWrapper,
     requirementDigest: await sha256File(path.join(root, "SMOKE_REQUIREMENT.md")),
     driver: driverRelativePath(input.client),
     driverDigest: await sha256File(path.join(root, driverRelativePath(input.client))),
@@ -223,7 +237,10 @@ export async function prepareSmoke(input) {
     updatedAt: new Date().toISOString(),
     workflowRef: started.workflowRef,
     wsspeckitCommit,
+    wspecWrapperDigest: metadata.wspecWrapper.digest,
+    wspecWrapperIdentity: metadata.wspecWrapper.identity,
     hostInvocationStatus: "not-run",
+    hostPhaseEvidenceStatus: "not-run",
     hostInvocations: [],
     invocations,
     verifier: null,

@@ -11,6 +11,7 @@ import { parse as parseYaml } from "yaml";
 import {
   cleanEnvironment,
   cleanEnvironmentKeys,
+  inspectBoundFile,
   readSignedJson,
   sha256,
   sha256File,
@@ -35,6 +36,7 @@ const hostExecutableNames = {
 };
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const tsxLoader = path.join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
+const digestPattern = /^sha256:[a-f0-9]{64}$/u;
 
 function parseArguments(argv) {
   const values = {};
@@ -61,6 +63,83 @@ function parseArguments(argv) {
 
 function record(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+}
+
+function wrapperBindingMatches(actual, expected) {
+  return ["path", "digest", "dev", "ino", "mode", "uid", "size", "identity"]
+    .every((field) => actual?.[field] === expected?.[field]);
+}
+
+function workflowCheckpoint(value, label) {
+  const checkpoint = record(value);
+  const commands = record(checkpoint?.wrapperCommands);
+  const integer = (candidate) => Number.isSafeInteger(candidate) && candidate >= 0;
+  const valid = checkpoint !== undefined && integer(checkpoint.eventCount)
+    && (checkpoint.lastEventHash === null || digestPattern.test(checkpoint.lastEventHash))
+    && (checkpoint.eventCount === 0) === (checkpoint.lastEventHash === null)
+    && digestPattern.test(checkpoint.projectionDigest ?? "")
+    && integer(checkpoint.acquireCount) && integer(checkpoint.successfulAcquireCount)
+    && integer(checkpoint.submitCount) && commands !== undefined
+    && integer(commands.inspect) && integer(commands.acquire) && integer(commands.submit);
+  if (!valid) throw new Error(`${label} checkpoint 字段无效`);
+  return checkpoint;
+}
+
+export function validateHostWorkflowPhases(invocations) {
+  if (!Array.isArray(invocations) || invocations.length !== hostPhases.length) {
+    throw new Error("Host 阶段证据必须包含 auto/explicit/recovery");
+  }
+  const sessions = new Set();
+  const checkpoints = invocations.map((invocation, index) => {
+    const phase = hostPhases[index];
+    if (record(invocation)?.phase !== phase || !digestPattern.test(invocation.sessionIdHash ?? "")) {
+      throw new Error(`${phase} 阶段或 session binding 无效`);
+    }
+    sessions.add(invocation.sessionIdHash);
+    return {
+      phase,
+      before: workflowCheckpoint(invocation.beforeCheckpoint, `${phase}.before`),
+      after: workflowCheckpoint(invocation.afterCheckpoint, `${phase}.after`),
+    };
+  });
+  if (sessions.size !== hostPhases.length) throw new Error("auto/explicit/recovery 必须是三个 fresh client sessions");
+
+  for (let index = 1; index < checkpoints.length; index += 1) {
+    if (sha256(checkpoints[index - 1].after) !== sha256(checkpoints[index].before)) {
+      throw new Error(`${checkpoints[index].phase} before checkpoint 未与上一阶段严格串联`);
+    }
+  }
+
+  const countPaths = [
+    ["eventCount"],
+    ["acquireCount"],
+    ["successfulAcquireCount"],
+    ["submitCount"],
+    ["wrapperCommands", "inspect"],
+    ["wrapperCommands", "acquire"],
+    ["wrapperCommands", "submit"],
+  ];
+  const count = (checkpoint, segments) => segments.reduce((value, segment) => value[segment], checkpoint);
+  for (const { phase, before, after } of checkpoints) {
+    for (const segments of countPaths) {
+      if (count(after, segments) < count(before, segments)) throw new Error(`${phase} 阶段 checkpoint 计数回退`);
+    }
+    const eventDelta = after.eventCount - before.eventCount;
+    const inspectDelta = after.wrapperCommands.inspect - before.wrapperCommands.inspect;
+    const successfulAcquireDelta = after.successfulAcquireCount - before.successfulAcquireCount;
+    const submitDelta = after.submitCount - before.submitCount;
+    if (inspectDelta < 1) throw new Error(`${phase} 阶段缺少 bound wspec inspect delta`);
+    if (eventDelta < 1 || after.lastEventHash === before.lastEventHash || after.projectionDigest === before.projectionDigest) {
+      throw new Error(`${phase} 阶段缺少控制面 event/projection delta`);
+    }
+    if (successfulAcquireDelta + submitDelta < 1) {
+      throw new Error(`${phase} 阶段只有 blocked/no-op event，没有成功 acquire/submit delta`);
+    }
+    if (phase === "recovery" && successfulAcquireDelta < 1) {
+      throw new Error("recovery 阶段必须通过 inspect + acquire 恢复新的 Work Package");
+    }
+  }
+  return `observer-signed ${hostPhases.join("/")} phase deltas`;
 }
 
 function artifactReferences(projection) {
@@ -222,27 +301,25 @@ async function checkedHostInvocations(input, metadata, runManifest) {
       && invocation.fixtureManifestDigest === runManifest.fixtureManifestDigest
       && invocation.authorityIdentity === input.authorityIdentity
       && hostExecutableNames[input.client].has(invocation.executableName)
-      && typeof invocation.executableDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.executableDigest)
-      && typeof invocation.executableIdentity === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.executableIdentity)
+      && typeof invocation.executableDigest === "string" && digestPattern.test(invocation.executableDigest)
+      && typeof invocation.executableIdentity === "string" && digestPattern.test(invocation.executableIdentity)
       && Number.isFinite(started) && Number.isFinite(ended) && ended >= started && invocation.exitCode === 0
-      && typeof invocation.sessionIdHash === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.sessionIdHash)
-      && typeof invocation.argvTemplateHash === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.argvTemplateHash)
-      && typeof invocation.stdoutDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.stdoutDigest)
-      && typeof invocation.stderrDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.stderrDigest)
+      && typeof invocation.sessionIdHash === "string" && digestPattern.test(invocation.sessionIdHash)
+      && invocation.resumedFromSessionIdHash === null
+      && typeof invocation.argvTemplateHash === "string" && digestPattern.test(invocation.argvTemplateHash)
+      && typeof invocation.stdoutDigest === "string" && digestPattern.test(invocation.stdoutDigest)
+      && typeof invocation.stderrDigest === "string" && digestPattern.test(invocation.stderrDigest)
       && Number.isInteger(summary?.parsedJsonCount) && summary.parsedJsonCount > 0 && typeCounts !== undefined
       && Array.isArray(invocation.environmentKeys) && JSON.stringify(invocation.environmentKeys) === JSON.stringify(cleanEnvironmentKeys);
     if (!fieldsValid) throw new Error(`${phase} invocation 字段或 executable binding 无效`);
     invocations.push(invocation);
   }
-  const [automatic, explicit, recovery] = invocations;
-  if (automatic.resumedFromSessionIdHash !== null || explicit.resumedFromSessionIdHash !== null
-    || automatic.sessionIdHash === explicit.sessionIdHash
-    || recovery.resumedFromSessionIdHash !== explicit.sessionIdHash || recovery.sessionIdHash !== explicit.sessionIdHash) {
-    throw new Error("observer session/resume chain 无效");
+  if (new Set(invocations.map(({ sessionIdHash }) => sessionIdHash)).size !== hostPhases.length) {
+    throw new Error("auto/explicit/recovery 必须是三个 fresh client sessions");
   }
   const executableBindings = new Set(invocations.map(({ executableDigest, executableIdentity }) => `${executableDigest}:${executableIdentity}`));
   if (executableBindings.size !== 1) throw new Error("三阶段 client executable binding 不一致");
-  return `observer-signed ${hostPhases.join("/")} session chain`;
+  return invocations;
 }
 
 async function verifySmoke(input) {
@@ -252,6 +329,7 @@ async function verifySmoke(input) {
   let metadata;
   let authority;
   let runManifest;
+  let fixtureManifestDigest;
   try {
     const fixture = await readSignedJson(
       path.join(input.repo, ".acceptance", "agent-smoke.json"),
@@ -270,6 +348,7 @@ async function verifySmoke(input) {
     metadata = fixture.value;
     authority = fixture.authority;
     runManifest = run.value;
+    fixtureManifestDigest = fixture.manifestDigest;
     check("fixture.authority", true, fixture.manifestDigest);
     check("run.manifest", true, run.manifestDigest);
   } catch (error) {
@@ -294,12 +373,30 @@ async function verifySmoke(input) {
     && runManifest.authorityIdentity === input.authorityIdentity
     && runManifest.workflowRef === metadata.workflowRef
     && runManifest.wsspeckitCommit === metadata.wsspeckitCommit
-    && typeof runManifest.fixtureManifestDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(runManifest.fixtureManifestDigest);
+    && runManifest.wspecWrapperDigest === record(metadata.wspecWrapper)?.digest
+    && runManifest.wspecWrapperIdentity === record(metadata.wspecWrapper)?.identity
+    && ["not-run", "no-go", "verified"].includes(runManifest.hostPhaseEvidenceStatus)
+    && runManifest.fixtureManifestDigest === fixtureManifestDigest;
   check("run.binding", runBindingValid, "run manifest 必须绑定 signed fixture、Work Item hash 与 seed baseline");
+  let wrapperValid = false;
   try {
-    check("host.invocations", true, await checkedHostInvocations(input, metadata, runManifest));
+    const expected = record(metadata.wspecWrapper);
+    const actual = expected?.path === "bin/wspec" ? await inspectBoundFile(input.repo, expected.path) : undefined;
+    wrapperValid = actual !== undefined && expected.wsspeckitCommit === metadata.wsspeckitCommit
+      && wrapperBindingMatches(actual, expected);
+  } catch {}
+  check("fixture.wspec-wrapper", wrapperValid, "bin/wspec 必须匹配 signed path/digest/device/inode/mode/uid/size/identity/WSSpecKit commit");
+  let hostInvocations;
+  try {
+    hostInvocations = await checkedHostInvocations(input, metadata, runManifest);
+    check("host.invocations", true, `observer-signed ${hostPhases.join("/")} fresh sessions`);
   } catch (error) {
     check("host.invocations", false, error instanceof Error ? error.message : "Host invocation receipts 无效");
+  }
+  try {
+    check("host.workflow-phases", true, validateHostWorkflowPhases(hostInvocations));
+  } catch (error) {
+    check("host.workflow-phases", false, error instanceof Error ? error.message : "Host workflow phase deltas 无效");
   }
 
   let state;
@@ -451,6 +548,7 @@ async function verifySmoke(input) {
     artifactDigests: references.map(({ contentHash }) => contentHash).filter((value) => typeof value === "string").sort(),
     evidenceDigests: evidence.map((value) => sha256(value)).sort(),
     status: summary.ok ? "pass" : "no-go",
+    hostPhaseEvidenceStatus: summary.ok ? "verified" : "no-go",
     reason: summary.ok ? "verified" : failed.join(","),
   };
   await writeSignedJson(

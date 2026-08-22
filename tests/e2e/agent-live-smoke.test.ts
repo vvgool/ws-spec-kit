@@ -19,7 +19,7 @@ process.env.WSSPECKIT_ACCEPTANCE_RUNTIME = "source";
 const prepareModule = "../../scripts/acceptance/prepare-agent-smoke.mjs";
 const verifierModule = "../../scripts/acceptance/verify-agent-smoke.mjs";
 const { prepareSmoke } = await import(prepareModule);
-const { checkedArtifact } = await import(verifierModule);
+const { checkedArtifact, validateHostWorkflowPhases } = await import(verifierModule);
 
 interface PreparedSmoke {
   version: 1;
@@ -118,6 +118,7 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.equal(runManifest.client, "codex");
   assert.equal(runManifest.status, "prepared");
   assert.equal(runManifest.hostInvocationStatus, "not-run");
+  assert.equal(runManifest.hostPhaseEvidenceStatus, "not-run");
   assert.deepEqual(runManifest.hostInvocations, []);
   assert.equal(JSON.stringify(runManifest).includes(prepared.root), false);
   assert.equal(JSON.stringify(runManifest).includes(prepared.workItemId), false);
@@ -125,6 +126,13 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   await execFileAsync(process.execPath, ["--test", "tests/labels.test.ts"], { cwd: prepared.root });
   const source = await readFile(path.join(prepared.root, "src", "labels.ts"), "utf8");
   assert.doesNotMatch(source, /formatLabelParts/u, "fixture 不得预置目标函数实现");
+  const fixtureManifest = JSON.parse(await readFile(path.join(prepared.root, ".acceptance", "agent-smoke.json"), "utf8")) as Record<string, unknown>;
+  const wrapper = fixtureManifest.wspecWrapper as Record<string, unknown>;
+  assert.equal(wrapper.path, "bin/wspec");
+  assert.match(String(wrapper.digest), /^sha256:[a-f0-9]{64}$/u);
+  assert.match(String(wrapper.identity), /^sha256:[a-f0-9]{64}$/u);
+  assert.equal(wrapper.wsspeckitCommit, fixtureManifest.wsspeckitCommit);
+  for (const field of ["dev", "ino", "mode", "uid", "size"]) assert.notEqual(wrapper[field], undefined, `wrapper.${field}`);
 });
 
 test("prepare CLI 未指定目录时创建隔离根目录但不输出 observer authority", async () => {
@@ -158,17 +166,29 @@ test("prepare 拒绝复用已有目录且不修改其中内容", async () => {
   await assert.rejects(access(path.join(root, ".git")), /ENOENT/u);
 });
 
-test("observer 用显式 canonical executable 记录 auto、explicit、recovery 三阶段签名收据", async () => {
+test("observer 让 Host 只从 fixture/bin 命中 bound wspec、实际 inspect，并记录三个 fresh session checkpoint", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-observer-test-"));
   const root = path.join(parent, "repository");
   const executable = path.join(parent, "codex");
   await writeFile(executable, [
     "#!/usr/bin/env node",
+    "const { execFileSync } = require('node:child_process');",
+    "const { readdirSync } = require('node:fs');",
+    "const path = require('node:path');",
     "const text = process.argv.slice(2).join(' ');",
     "const leaked = [...process.argv.slice(2), ...Object.entries(process.env).flat()].some((value) => /authority|hmacKey|wsspeckit-agent-authority/u.test(String(value)));",
     "if (leaked) process.exit(41);",
-    "const session = text.includes('WSSPECKIT_SMOKE_AUTO') ? 'observer-auto-session' : 'observer-explicit-session';",
+    "if (process.argv.some((value) => value === 'resume' || value === '--resume')) process.exit(42);",
+    "const phase = text.includes('WSSPECKIT_SMOKE_AUTO') ? 'auto' : text.includes('WSSPECKIT_SMOKE_EXPLICIT') ? 'explicit' : 'recovery';",
+    "const wrapper = execFileSync('/bin/sh', ['-c', 'command -v wspec'], { encoding: 'utf8', env: process.env }).trim();",
+    "if (wrapper !== path.join(process.cwd(), 'bin', 'wspec')) process.exit(43);",
+    "const workItemId = readdirSync(path.join(process.cwd(), '.worktrees')).find((value) => value.startsWith('WSS-'));",
+    "if (!workItemId || text.includes(workItemId) || !/sha256:[a-f0-9]{64}/u.test(text)) process.exit(44);",
+    "const inspected = JSON.parse(execFileSync(wrapper, ['inspect', workItemId], { encoding: 'utf8', env: process.env }));",
+    "if (inspected.ok !== true || inspected.result.status !== 'active') process.exit(45);",
+    "const session = `observer-${phase}-session`;",
     "console.log(JSON.stringify({ type: 'thread.started', thread_id: session }));",
+    "console.log(JSON.stringify({ type: 'wspec.probe', phase, command: 'inspect', ok: true }));",
     "console.log(JSON.stringify({ type: 'turn.completed', status: 'completed' }));",
     "",
   ].join("\n"), { encoding: "utf8", mode: 0o700 });
@@ -188,13 +208,94 @@ test("observer 用显式 canonical executable 记录 auto、explicit、recovery 
   assert.equal(runManifestText.includes(executable), false);
   assert.equal(runManifestText.includes("observer-explicit-session"), false);
 
+  const invocations = [];
+  for (const phase of ["auto", "explicit", "recovery"]) {
+    const invocation = JSON.parse(await readFile(path.join(root, ".acceptance", `agent-smoke-invocation-${phase}.json`), "utf8")) as Record<string, unknown>;
+    invocations.push(invocation);
+    assert.equal((invocation.beforeCheckpoint as Record<string, unknown>).wrapperCommands !== undefined, true);
+    assert.equal((invocation.afterCheckpoint as Record<string, unknown>).wrapperCommands !== undefined, true);
+    assert.equal(invocation.resumedFromSessionIdHash, null);
+  }
+  assert.equal(new Set(invocations.map(({ sessionIdHash }) => sessionIdHash)).size, 3);
+
   const result = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
   assert.equal(result.summary.checks.find(({ id }) => id === "host.invocations")?.ok, true);
+  assert.equal(result.summary.checks.find(({ id }) => id === "host.workflow-phases")?.ok, false, "inspect-only fake 不得冒充阶段交付 PASS");
+  const verifiedRun = JSON.parse(await readFile(path.join(root, ".acceptance", "agent-smoke-run.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(verifiedRun.hostPhaseEvidenceStatus, "no-go");
   await rm(path.join(root, ".acceptance", "agent-smoke-invocation-explicit-receipt.json"));
   const missing = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
   assert.equal(missing.summary.checks.find(({ id }) => id === "host.invocations")?.ok, false);
   await rm(parent, { recursive: true, force: true });
   await rm(observed.authorityFile, { force: true });
+});
+
+test("observer 对 bound wspec 的删除、同内容替换、symlink 与 digest drift 全部 fail closed", async (t) => {
+  for (const mutation of ["delete", "replace", "symlink", "digest"] as const) {
+    await t.test(mutation, async () => {
+      const parent = await mkdtemp(path.join(os.tmpdir(), `wsspec-agent-wrapper-${mutation}-`));
+      const root = path.join(parent, "repository");
+      const executable = path.join(parent, "codex");
+      await writeFile(executable, [
+        "#!/usr/bin/env node",
+        "const { execFileSync } = require('node:child_process');",
+        "const { appendFileSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } = require('node:fs');",
+        "const path = require('node:path');",
+        "const wrapper = execFileSync('/bin/sh', ['-c', 'command -v wspec'], { encoding: 'utf8', env: process.env }).trim();",
+        "const workItemId = readdirSync(path.join(process.cwd(), '.worktrees')).find((value) => value.startsWith('WSS-'));",
+        "const inspected = JSON.parse(execFileSync(wrapper, ['inspect', workItemId], { encoding: 'utf8', env: process.env }));",
+        "if (inspected.ok !== true) process.exit(45);",
+        mutation === "delete" ? "rmSync(wrapper);" : "",
+        mutation === "replace" ? "const copy = `${wrapper}.copy`; writeFileSync(copy, readFileSync(wrapper)); renameSync(copy, wrapper);" : "",
+        mutation === "symlink" ? "rmSync(wrapper); symlinkSync('/bin/sh', wrapper);" : "",
+        mutation === "digest" ? "appendFileSync(wrapper, '\\n# drift\\n');" : "",
+        "console.log(JSON.stringify({ type: 'thread.started', thread_id: 'tamper-session' }));",
+        "",
+      ].join("\n"), { encoding: "utf8", mode: 0o700 });
+      await chmod(executable, 0o700);
+
+      await assert.rejects(execFileAsync(process.execPath, [
+        runScript, "--client", "codex", "--client-executable", executable, "--directory", root,
+      ], { cwd: repositoryRoot, maxBuffer: 2 * 1024 * 1024 }), /wspec wrapper.*漂移|wspec wrapper.*无效/u);
+      await rm(parent, { recursive: true, force: true });
+    });
+  }
+});
+
+test("phase delta 合同接受三段真实推进，拒绝 auto 全做完后 explicit/recovery 空转", () => {
+  const checkpoint = (input: {
+    eventCount: number;
+    projection: string;
+    inspect: number;
+    acquire: number;
+    successfulAcquire: number;
+    submit: number;
+  }) => ({
+    eventCount: input.eventCount,
+    lastEventHash: input.eventCount === 0 ? null : `sha256:${String(input.eventCount).padStart(64, "0")}`,
+    projectionDigest: `sha256:${input.projection.padEnd(64, "0")}`,
+    acquireCount: input.acquire,
+    successfulAcquireCount: input.successfulAcquire,
+    submitCount: input.submit,
+    wrapperCommands: { inspect: input.inspect, acquire: input.acquire, submit: input.submit },
+  });
+  const a0 = checkpoint({ eventCount: 1, projection: "1", inspect: 0, acquire: 0, successfulAcquire: 0, submit: 0 });
+  const a1 = checkpoint({ eventCount: 2, projection: "2", inspect: 1, acquire: 1, successfulAcquire: 1, submit: 0 });
+  const e1 = checkpoint({ eventCount: 3, projection: "3", inspect: 2, acquire: 1, successfulAcquire: 1, submit: 1 });
+  const r1 = checkpoint({ eventCount: 4, projection: "4", inspect: 3, acquire: 2, successfulAcquire: 2, submit: 1 });
+  const valid = [
+    { phase: "auto", sessionIdHash: `sha256:${"a".repeat(64)}`, beforeCheckpoint: a0, afterCheckpoint: a1 },
+    { phase: "explicit", sessionIdHash: `sha256:${"b".repeat(64)}`, beforeCheckpoint: a1, afterCheckpoint: e1 },
+    { phase: "recovery", sessionIdHash: `sha256:${"c".repeat(64)}`, beforeCheckpoint: e1, afterCheckpoint: r1 },
+  ];
+  assert.match(validateHostWorkflowPhases(valid), /auto\/explicit\/recovery/u);
+
+  const allDone = checkpoint({ eventCount: 9, projection: "9", inspect: 1, acquire: 4, successfulAcquire: 4, submit: 4 });
+  assert.throws(() => validateHostWorkflowPhases([
+    { ...valid[0], afterCheckpoint: allDone },
+    { ...valid[1], beforeCheckpoint: allDone, afterCheckpoint: allDone },
+    { ...valid[2], beforeCheckpoint: allDone, afterCheckpoint: allDone },
+  ]), /explicit.*delta|阶段/u);
 });
 
 test("observer 禁止 PATH 解析和非 canonical executable 名称，拒绝前不创建 fixture", async () => {

@@ -34,5 +34,11 @@ child 全部退出后向 observer 调用方返回 authority path/identity。新 
 `--authority <file>` 和 `--authority-identity <sha256>`，并核对 observer-signed auto/explicit/recovery
 invocation receipts；旧 fixture 缺少签名 receipt 时会 fail closed。
 
+新流程的 auto、explicit、recovery 均为独立 fresh client session，不允许用 `--resume` 复用 chat。Host PATH
+首项固定为 fixture canonical `bin/`，signed fixture 绑定 `bin/wspec` 的 path/digest/device/inode/mode/uid/size、
+identity 与 WSSpecKit commit。三份 invocation receipt 必须各自绑定 before/after event/projection 和 wrapper
+command checkpoint，严格串联且每阶段均有 meaningful delta；recovery 必须通过 `inspect + acquire` 恢复新的
+Work Package。只有阶段证据和最终 verifier 全部通过才允许 PASS；本页没有有效模型调用，继续 NO-GO。
+
 信任边界是 observer process、Host child 的 clean argv/env 和仓库外 mode `0600` authority；不声称抵抗同一
 UID 的主机级扫描、进程附加或文件改写。更强保证需要独立 OS 用户、隔离执行环境或外部 signer。
