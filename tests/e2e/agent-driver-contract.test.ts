@@ -569,17 +569,36 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
               if (run.value.result.action === "execute") {
                 executeCount += 1;
                 if (submitCount === 1) {
+                  const active = requiredWorkPackage(values.workPackage, `${client}/${kind}: active Work Package`);
                   const repeatedAcquireArgv = renderArgv(contract.operations.acquire, values);
-                  const repeatedAcquire = await runCli(root, home, repeatedAcquireArgv.slice(1), environment);
-                  assertPassed(repeatedAcquire, `${client}/${kind}: submit.execute 后禁止重复 acquire`);
-                  assert.equal(repeatedAcquire.value.result.action, "blocked");
+                  const differentActorArgv = [...repeatedAcquireArgv];
+                  differentActorArgv[differentActorArgv.length - 1] = `${fixture.actor}-other`;
+                  const differentActor = await runCli(root, home, differentActorArgv.slice(1), environment);
+                  assertPassed(differentActor, `${client}/${kind}: different actor acquire`);
+                  assert.equal(differentActor.value.result.action, "blocked");
                   assert.equal(
-                    (repeatedAcquire.value.result.problems as Array<{ code?: string }> | undefined)?.[0]?.code,
+                    (differentActor.value.result.problems as Array<{ code?: string }> | undefined)?.[0]?.code,
                     "WSSPEC_STAGE_ALREADY_CLAIMED",
-                    `${client}/${kind}: 重复 acquire 必须保护活动 Claim`,
+                    `${client}/${kind}: different actor 必须被活动 Claim 阻塞`,
                   );
-                  pids.push(repeatedAcquire.pid);
-                  protocolJson += repeatedAcquire.stdout;
+                  pids.push(differentActor.pid);
+                  protocolJson += differentActor.stdout;
+
+                  const inspected = await runCli(root, home, renderArgv(contract.operations.inspect, values).slice(1), environment);
+                  assertPassed(inspected, `${client}/${kind}: fresh-session inspect`);
+                  const reacquired = await runCli(root, home, repeatedAcquireArgv.slice(1), environment);
+                  assertPassed(reacquired, `${client}/${kind}: same actor fresh-session reacquire`);
+                  assert.equal(reacquired.value.result.action, "execute");
+                  const recovered = requiredWorkPackage(reacquired.value.result.workPackage, `${client}/${kind}: reacquired Work Package`);
+                  assert.equal(recovered.stepId, active.stepId);
+                  assert.equal(recovered.attemptId, active.attemptId);
+                  assert.notEqual(recovered.lease.token, active.lease.token);
+                  values.workPackage = recovered;
+                  values.stepId = recovered.stepId;
+                  values.attemptId = recovered.attemptId;
+                  values.leaseToken = recovered.lease.token;
+                  pids.push(inspected.pid, reacquired.pid);
+                  protocolJson += inspected.stdout + reacquired.stdout;
                 }
               }
             }

@@ -52,8 +52,13 @@ Driver v4 正文同时提供人可执行的中文 Host 指南和 fenced JSON `ws
 ```
 
 `acquire` 和 `submit` 都返回 `execute / await_approval / blocked / completed`。`submit.execute` 已携带并
-claim 下一份 Work Package，Host 必须直接执行并继续 submit；若此时错误地再次 acquire，协议会返回
-`WSSPEC_STAGE_ALREADY_CLAIMED`。只有 start 后首次进入和 Host 中断恢复才使用 `inspect -> acquire`。
+claim 下一份 Work Package，Host 必须直接执行并继续 submit；若同一 actor 此时错误地再次 acquire，协议会
+轮换活动 Attempt 的 Lease，使 submit 返回的旧 token 立即失效。只有 start 后首次进入和 Host 中断恢复才使用
+`inspect -> acquire`。恢复时，同一 actor 的活动 Claim 保留 Step/Attempt/Work Package 身份，原子更新
+`claimedAt`、到期时间和 token，并记录 `attempt.reacquired`；不同 actor 仍返回
+`WSSPEC_STAGE_ALREADY_CLAIMED`。Runtime 在区分 actor 前先把完整 Claim/Context/Work Package 与事件链中的
+可信投影逐字段绑定；Skill、Artifact、forbidden action、required output、Gate、result schema、Lease 或任一
+嵌套结构损坏都以 `WSSPEC_ACTIVE_CLAIM_INVALID` fail closed。
 每条 Fixture 都验证 fresh-process recovery、至少两个 execute grants 和至少两次 submit，并到达明确 blocked
 终点；功能 Fixture 由本地可信门禁边界停止，文档 Fixture 在不执行真实编辑的边界显式提交 failed 后停止。
 
@@ -66,10 +71,19 @@ Driver 和 WSSpecKit Runtime 不调用模型 API，不缓存或管理 Agent 对�
 Fixture 还验证协议输出和持久化控制数据不记录测试 secret、机器 HOME 或用户名。需求 Source 本身按产品
 合同保存为受控 Artifact，这不属于对话缓存。
 
+本地 `git.commit` 使用临时 index 并保持用户真实 index 的文件身份与内容不变。批准提交移动 Work Item HEAD
+后，真实 index 仍相对旧 HEAD，因此 `git status` 可能把已提交的批准文件显示为 `MM`；Driver 不得擅自刷新、
+reset 或覆盖用户 index。observer 在 Host 运行前签入真实 index 的 repository-relative path、digest、device、
+inode、mode、uid、size 与组合 identity，verifier 在结束后逐项复验；同内容 inode 替换也 fail closed。验收还
+应核对单父 verified commit、批准的 `baseline..HEAD` diff digest 与 Receipt，再从该 commit 的 clean checkout
+执行行为探针。该状态仍属于需要在发布评估中跟踪的 UX 风险。
+
 ## 证据分层
 
 - 文件级证据：四类临时 HOME 的目标路径、中文 Skill、dry-run、幂等、冲突拒绝和无 `.mdc`。
 - 模拟循环证据：四个 Adapter 各自执行功能与纯文档 Fixture，共八条由安装产物 manifest 驱动的跨进程 CLI 路径。
 - 路径安全证据：四类 Adapter 的预创建目录、祖先/最终 symlink、hardlink、非普通文件，以及 mkdir/rename 两个 parent-swap probe 均 fail closed。
 - 安全边界证据：本地模型端点收到零请求，协议无 Artifact 正文，控制数据无对话或 secret 标记。
+- fresh-session 证据：checkpoint 分开记录 acquired/reacquired，并绑定活动 Stage、Attempt、Lease digest；
+  explicit/recovery 必须各自对 before-checkpoint 的同一 Attempt 产生一次 `attempt.reacquired` 和 Lease 轮换。
 - 未运行证据：真实 Codex、Claude、Cursor Skill 发现、自动触发、模型执行和真实客户端跨会话恢复。

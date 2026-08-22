@@ -14,9 +14,10 @@ import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-pac
 import { captureLocalRequirement } from "../../src/registry/connectors/local-requirement.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
-import { withControlPlaneLock } from "../../src/storage/events.js";
+import { readEvents, withControlPlaneLock } from "../../src/storage/events.js";
 import { initRepository } from "../../src/storage/repository.js";
 import { createWorkItem } from "../../src/storage/work-items.js";
+import { applicationExternalActionFixture, submitExternalAction } from "./helpers/external-action.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
 interface Fixture {
@@ -1447,6 +1448,247 @@ test("explicit recovery resumes an interrupted Attempt from any Git worktree", a
   const resumed = requireExecute(await current.app.acquire({ root: observer, workItemId: started.workItemId, actor: "codex-b" }));
   assert.equal(resumed.stepId, interrupted.stepId);
   assert.notEqual(resumed.attemptId, interrupted.attemptId);
+});
+
+test("same actor fresh-session acquire rotates the active Lease while retaining the Attempt", async () => {
+  const current = await fixture();
+  current.setNow("2099-08-17T04:00:00.000Z");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "同 actor 恢复" }, profile: "quick" });
+  const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+
+  current.setNow("2099-08-17T04:00:30.000Z");
+  const reacquired = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+
+  assert.equal(reacquired.stepId, original.stepId);
+  assert.equal(reacquired.attemptId, original.attemptId);
+  assert.notEqual(reacquired.lease.token, original.lease.token);
+  assert.ok(reacquired.lease.expiresAt > original.lease.expiresAt);
+  const projection = await readControlPlane(current.root, started.workItemId);
+  assert.equal(projection.claims[original.stepId]?.claimToken, reacquired.lease.token);
+  assert.equal((projection.contexts[original.stepId] as { workPackage: WorkPackage }).workPackage.lease.token, reacquired.lease.token);
+  const event = (await readEvents(projection.controlPlane)).at(-1)!;
+  assert.equal(event.eventType, "attempt.reacquired");
+  assert.equal(event.actor, "codex");
+  assert.equal(event.stageId, original.stepId);
+  assert.equal(event.attemptId, original.attemptId);
+
+  await assert.rejects(
+    submitPackage(current, original),
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ATTEMPT_NOT_ACTIVE",
+  );
+  const submitted = await submitPackage(current, reacquired);
+  const repeated = await submitPackage(current, reacquired);
+  assert.deepEqual(repeated, submitted, "reacquired Attempt 的 submit 仍须保持幂等");
+});
+
+test("active Lease reacquire rejects another actor and invalid Attempt bindings", async (t) => {
+  await t.test("different actor", async () => {
+    const current = await fixture();
+    current.setNow("2099-08-17T04:00:00.000Z");
+    const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "actor 隔离" }, profile: "quick" });
+    const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex-a" }));
+
+    const action = await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex-b" });
+
+    assert.equal(action.action, "blocked");
+    if (action.action !== "blocked") throw new Error("expected blocked action");
+    assert.deepEqual(action.problems.map(({ code }) => code), ["WSSPEC_STAGE_ALREADY_CLAIMED"]);
+    assert.equal((await readControlPlane(current.root, started.workItemId)).claims[original.stepId]?.claimToken, original.lease.token);
+  });
+
+  for (const corruption of ["claim-digest", "context-token", "context-step", "forbidden-actions", "missing-lease"] as const) {
+    await t.test(corruption, async () => {
+      const current = await fixture();
+      current.setNow("2099-08-17T04:00:00.000Z");
+      const started = await current.app.start({ root: current.root, source: { type: "prompt", text: `拒绝 ${corruption}` }, profile: "quick" });
+      const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+      const projection = await readControlPlane(current.root, started.workItemId);
+      const context = projection.contexts[original.stepId] as { stepInstanceId?: string; workPackage: WorkPackage };
+      if (corruption === "claim-digest") projection.claims[original.stepId]!.inputWorkspaceTreeDigest = `sha256:${"0".repeat(64)}`;
+      else if (corruption === "context-token") context.workPackage.lease.token = "tampered-token";
+      else if (corruption === "context-step") context.stepInstanceId = "tampered-step";
+      else if (corruption === "forbidden-actions") context.workPackage.constraints.forbiddenActions = [];
+      else delete (context.workPackage as Partial<WorkPackage>).lease;
+      await writeProjection(projection);
+
+      await assert.rejects(
+        current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+        (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ACTIVE_CLAIM_INVALID",
+      );
+    });
+  }
+
+  await t.test("different actor still observes corruption", async () => {
+    const current = await fixture();
+    current.setNow("2099-08-17T04:00:00.000Z");
+    const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "跨 actor 拒绝损坏 Claim" }, profile: "quick" });
+    const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex-a" }));
+    const projection = await readControlPlane(current.root, started.workItemId);
+    (projection.contexts[original.stepId] as { workPackage: WorkPackage }).workPackage.constraints.forbiddenActions = [];
+    await writeProjection(projection);
+
+    await assert.rejects(
+      current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex-b" }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ACTIVE_CLAIM_INVALID",
+    );
+  });
+});
+
+test("concurrent same-actor reacquires serialize Lease rotation and leave only the latest token active", async () => {
+  const current = await fixture();
+  current.setNow("2099-08-17T04:00:00.000Z");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "并发恢复" }, profile: "quick" });
+  const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  current.setNow("2099-08-17T04:00:30.000Z");
+
+  const reacquired = await Promise.all([
+    current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+    current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+  ]).then((actions) => actions.map(requireExecute));
+  const projection = await readControlPlane(current.root, started.workItemId);
+  const latestToken = projection.claims[original.stepId]!.claimToken;
+  const winner = reacquired.find(({ lease }) => lease.token === latestToken)!;
+  const loser = reacquired.find(({ lease }) => lease.token !== latestToken)!;
+
+  assert.ok(winner);
+  assert.ok(loser);
+  assert.equal(winner.attemptId, original.attemptId);
+  assert.equal(loser.attemptId, original.attemptId);
+  await assert.rejects(
+    submitPackage(current, loser),
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ATTEMPT_NOT_ACTIVE",
+  );
+  await submitPackage(current, winner);
+  assert.equal((await readEvents(projection.controlPlane)).filter(({ eventType }) => eventType === "attempt.reacquired").length, 2);
+});
+
+test("recovery replays a same-actor Lease rotation after projection damage", async () => {
+  const current = await fixture();
+  current.setNow("2099-08-17T04:00:00.000Z");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "回放恢复 Lease" }, profile: "quick" });
+  const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  current.setNow("2099-08-17T04:00:30.000Z");
+  const reacquired = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  const projection = await readControlPlane(current.root, started.workItemId);
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "damaged\n", "utf8");
+
+  const recovered = await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+
+  assert.equal(recovered.claims[original.stepId]?.attemptId, original.attemptId);
+  assert.equal(recovered.claims[original.stepId]?.claimToken, reacquired.lease.token);
+  assert.equal((recovered.contexts[original.stepId] as { workPackage: WorkPackage }).workPackage.lease.token, reacquired.lease.token);
+});
+
+test("same-actor reacquire cannot resurrect a Claim removed by a later authoritative event", async () => {
+  const current = await fixture();
+  current.setNow("2099-08-17T04:00:00.000Z");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "拒绝复活旧 Claim" }, profile: "quick" });
+  const original = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  const acquiredProjection = structuredClone(await readControlPlane(current.root, started.workItemId));
+  await submitPackage(current, original);
+  const currentProjection = await readControlPlane(current.root, started.workItemId);
+
+  currentProjection.claims = { [original.stepId]: acquiredProjection.claims[original.stepId]! };
+  currentProjection.contexts = { [original.stepId]: acquiredProjection.contexts[original.stepId]! };
+  currentProjection.stages[original.stepId] = { status: "claimed" };
+  await writeProjection(currentProjection);
+
+  await assert.rejects(
+    current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+    (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ACTIVE_CLAIM_INVALID",
+  );
+});
+
+test("acquire validates active Claims before external-action and approval early returns", async (t) => {
+  const executor = {
+    async execute() { throw new Error("unexpected external execution"); },
+    async reconcile() { return { outcome: "unknown" as const, checkedAt: "2026-08-18T04:02:00.000Z" }; },
+  };
+
+  await t.test("approved external action rejects a tampered WorkPackage without appending an event", async () => {
+    const current = await applicationExternalActionFixture(executor);
+    const pending = await submitExternalAction(current);
+    assert.equal(pending.action, "await_approval");
+    if (pending.action !== "await_approval") throw new Error("expected external approval");
+    await current.app.decide({
+      kind: "external_action",
+      root: current.root,
+      workItemId: current.workItemId,
+      requestId: pending.approval.requestId,
+      decision: "approved",
+      expectedDigest: pending.approval.digest,
+      actor: "maintainer",
+    });
+    const projection = await readControlPlane(current.root, current.workItemId);
+    const eventsBefore = (await readEvents(projection.controlPlane)).length;
+    (projection.contexts[current.workPackage.stepId] as { workPackage: WorkPackage })
+      .workPackage.constraints.forbiddenActions = [];
+    await writeProjection(projection);
+
+    await assert.rejects(
+      current.app.acquire({ root: current.root, workItemId: current.workItemId, actor: "codex" }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ACTIVE_CLAIM_INVALID",
+    );
+    assert.equal((await readEvents(projection.controlPlane)).length, eventsBefore);
+  });
+
+  await t.test("verified external action cannot resurrect a historical Claim", async () => {
+    const current = await applicationExternalActionFixture({
+      async execute({ request, markDispatched }) {
+        await markDispatched();
+        return {
+          targetStableId: request.target.stableId,
+          publishedContentDigest: request.expectedContentDigest,
+          readBackContentDigest: request.expectedContentDigest,
+          verifiedAt: "2026-08-18T04:01:00.000Z",
+        };
+      },
+      async reconcile() { return { outcome: "unknown", checkedAt: "2026-08-18T04:02:00.000Z" }; },
+    });
+    const pending = await submitExternalAction(current);
+    assert.equal(pending.action, "await_approval");
+    if (pending.action !== "await_approval") throw new Error("expected external approval");
+    await current.app.decide({
+      kind: "external_action",
+      root: current.root,
+      workItemId: current.workItemId,
+      requestId: pending.approval.requestId,
+      decision: "approved",
+      expectedDigest: pending.approval.digest,
+      actor: "maintainer",
+    });
+    const historical = structuredClone(await readControlPlane(current.root, current.workItemId));
+    await submitExternalAction(current);
+    const projection = await readControlPlane(current.root, current.workItemId);
+    projection.claims = { [current.workPackage.stepId]: historical.claims[current.workPackage.stepId]! };
+    projection.contexts = { [current.workPackage.stepId]: historical.contexts[current.workPackage.stepId]! };
+    projection.stages[current.workPackage.stepId] = { status: "claimed" };
+    await writeProjection(projection);
+    const eventsBefore = (await readEvents(projection.controlPlane)).length;
+
+    await assert.rejects(
+      current.app.acquire({ root: current.root, workItemId: current.workItemId, actor: "codex" }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ACTIVE_CLAIM_INVALID",
+    );
+    assert.equal((await readEvents(projection.controlPlane)).length, eventsBefore);
+  });
+
+  await t.test("pending external approval rejects a corrupted Context without appending an event", async () => {
+    const current = await applicationExternalActionFixture(executor);
+    const pending = await submitExternalAction(current);
+    assert.equal(pending.action, "await_approval");
+    const projection = await readControlPlane(current.root, current.workItemId);
+    const eventsBefore = (await readEvents(projection.controlPlane)).length;
+    assert.ok(projection.claims[current.workPackage.stepId]);
+    (projection.contexts[current.workPackage.stepId] as { workPackage: WorkPackage }).workPackage.constraints.forbiddenActions = [];
+    await writeProjection(projection);
+
+    await assert.rejects(
+      current.app.acquire({ root: current.root, workItemId: current.workItemId, actor: "codex" }),
+      (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_ACTIVE_CLAIM_INVALID",
+    );
+    assert.equal((await readEvents(projection.controlPlane)).length, eventsBefore);
+  });
 });
 
 test("inspect preserves an unexpired active lease", async () => {

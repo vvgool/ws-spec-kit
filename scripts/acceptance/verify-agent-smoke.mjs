@@ -73,12 +73,22 @@ function wrapperBindingMatches(actual, expected) {
 function workflowCheckpoint(value, label) {
   const checkpoint = record(value);
   const commands = record(checkpoint?.wrapperCommands);
+  const activeClaim = checkpoint?.activeClaim === null ? null : record(checkpoint?.activeClaim);
+  const lastReacquire = checkpoint?.lastReacquire === null ? null : record(checkpoint?.lastReacquire);
   const integer = (candidate) => Number.isSafeInteger(candidate) && candidate >= 0;
+  const activeClaimValid = activeClaim === null || (typeof activeClaim?.stageId === "string"
+    && typeof activeClaim.attemptId === "string" && digestPattern.test(activeClaim.leaseDigest ?? ""));
+  const reacquireValid = lastReacquire === null || (Number.isSafeInteger(lastReacquire?.eventSequence)
+    && lastReacquire.eventSequence > 0 && typeof lastReacquire.stageId === "string"
+    && typeof lastReacquire.attemptId === "string" && digestPattern.test(lastReacquire.previousLeaseDigest ?? "")
+    && digestPattern.test(lastReacquire.leaseDigest ?? "") && lastReacquire.previousLeaseDigest !== lastReacquire.leaseDigest);
   const valid = checkpoint !== undefined && integer(checkpoint.eventCount)
     && (checkpoint.lastEventHash === null || digestPattern.test(checkpoint.lastEventHash))
     && (checkpoint.eventCount === 0) === (checkpoint.lastEventHash === null)
     && digestPattern.test(checkpoint.projectionDigest ?? "")
-    && integer(checkpoint.acquireCount) && integer(checkpoint.successfulAcquireCount)
+    && integer(checkpoint.acquireCount) && integer(checkpoint.acquiredCount) && integer(checkpoint.reacquiredCount)
+    && checkpoint.acquireCount === checkpoint.acquiredCount + checkpoint.reacquiredCount
+    && integer(checkpoint.successfulAcquireCount) && activeClaimValid && reacquireValid
     && integer(checkpoint.submitCount) && commands !== undefined
     && integer(commands.inspect) && integer(commands.acquire) && integer(commands.submit);
   if (!valid) throw new Error(`${label} checkpoint 字段无效`);
@@ -113,6 +123,8 @@ export function validateHostWorkflowPhases(invocations) {
   const countPaths = [
     ["eventCount"],
     ["acquireCount"],
+    ["acquiredCount"],
+    ["reacquiredCount"],
     ["successfulAcquireCount"],
     ["submitCount"],
     ["wrapperCommands", "inspect"],
@@ -126,17 +138,39 @@ export function validateHostWorkflowPhases(invocations) {
     }
     const eventDelta = after.eventCount - before.eventCount;
     const inspectDelta = after.wrapperCommands.inspect - before.wrapperCommands.inspect;
+    const acquireDelta = after.acquireCount - before.acquireCount;
+    const acquiredDelta = after.acquiredCount - before.acquiredCount;
+    const reacquiredDelta = after.reacquiredCount - before.reacquiredCount;
     const successfulAcquireDelta = after.successfulAcquireCount - before.successfulAcquireCount;
     const submitDelta = after.submitCount - before.submitCount;
+    const wrapperAcquireDelta = after.wrapperCommands.acquire - before.wrapperCommands.acquire;
+    const wrapperSubmitDelta = after.wrapperCommands.submit - before.wrapperCommands.submit;
     if (inspectDelta < 1) throw new Error(`${phase} 阶段缺少 bound wspec inspect delta`);
     if (eventDelta < 1 || after.lastEventHash === before.lastEventHash || after.projectionDigest === before.projectionDigest) {
       throw new Error(`${phase} 阶段缺少控制面 event/projection delta`);
     }
-    if (successfulAcquireDelta + submitDelta < 1) {
-      throw new Error(`${phase} 阶段只有 blocked/no-op event，没有成功 acquire/submit delta`);
+    if (phase === "auto") {
+      if (wrapperAcquireDelta < 1 || acquiredDelta < 1 || reacquiredDelta !== 0 || successfulAcquireDelta < 1
+        || after.activeClaim === null) {
+        throw new Error("auto 阶段必须通过 inspect + acquire 获得 Work Package");
+      }
+      if (wrapperSubmitDelta !== 0 || submitDelta !== 0) throw new Error("auto 阶段必须在 acquire 后停止");
+      continue;
     }
-    if (phase === "recovery" && successfulAcquireDelta < 1) {
-      throw new Error("recovery 阶段必须通过 inspect + acquire 恢复新的 Work Package");
+    const previous = record(before.activeClaim);
+    const rotation = record(after.lastReacquire);
+    const retainedAttempt = previous !== undefined && rotation !== undefined
+      && rotation.eventSequence > before.eventCount
+      && rotation.stageId === previous.stageId && rotation.attemptId === previous.attemptId
+      && rotation.previousLeaseDigest === previous.leaseDigest && rotation.leaseDigest !== previous.leaseDigest;
+    if (wrapperAcquireDelta < 1 || acquireDelta < 1 || reacquiredDelta !== 1
+      || successfulAcquireDelta < 1 || !retainedAttempt) {
+      throw new Error(`${phase} 阶段必须对 before-checkpoint 的同一 Attempt 执行一次 reacquire 并轮换 Lease`);
+    }
+    if (phase === "explicit") {
+      if (wrapperSubmitDelta !== 1 || submitDelta !== 1) throw new Error("explicit 阶段必须只 submit 一个 Stage 后停止");
+    } else if (wrapperSubmitDelta < 1 || submitDelta < 1) {
+      throw new Error("recovery 阶段必须在 reacquire 后消费 action 至终态");
     }
   }
   return `observer-signed ${hostPhases.join("/")} phase deltas`;
@@ -157,7 +191,7 @@ function artifactReferences(projection) {
 
 function structuredYaml(body, heading) {
   const escaped = heading.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const section = new RegExp(`^#{1,6}\\s+${escaped}\\s*$([\\s\\S]*?)(?=^#{1,6}\\s+|$)`, "mu").exec(body)?.[1] ?? "";
+  const section = new RegExp(`^#{1,6}\\s+${escaped}\\s*$([\\s\\S]*?)(?=^#{1,6}\\s+|(?![\\s\\S]))`, "mu").exec(body)?.[1] ?? "";
   const fenced = /```yaml\s*\n([\s\S]*?)\n```/u.exec(section)?.[1];
   return fenced === undefined ? undefined : parseYaml(fenced);
 }
@@ -228,8 +262,6 @@ async function runBehaviorChallenges(checkout, runtime) {
 }
 
 async function behaviorProbe(state, runtime) {
-  const status = await git(runtime, state.worktree, "status", "--porcelain=v1", "--untracked-files=all", "--", "src/labels.ts", "tests/labels.test.ts");
-  if (status.stdout.trim() !== "") throw new Error("目标产品与测试文件必须提交后再验证");
   const temporary = await mkdtemp(path.join(runtime.environment.TMPDIR, "behavior-probe-"));
   const checkout = path.join(temporary, "checkout");
   try {
@@ -375,6 +407,8 @@ async function verifySmoke(input) {
     && runManifest.wsspeckitCommit === metadata.wsspeckitCommit
     && runManifest.wspecWrapperDigest === record(metadata.wspecWrapper)?.digest
     && runManifest.wspecWrapperIdentity === record(metadata.wspecWrapper)?.identity
+    && runManifest.userIndexDigest === record(metadata.userIndex)?.digest
+    && runManifest.userIndexIdentity === record(metadata.userIndex)?.identity
     && ["not-run", "no-go", "verified"].includes(runManifest.hostPhaseEvidenceStatus)
     && runManifest.fixtureManifestDigest === fixtureManifestDigest;
   check("run.binding", runBindingValid, "run manifest 必须绑定 signed fixture、Work Item hash 与 seed baseline");
@@ -386,6 +420,13 @@ async function verifySmoke(input) {
       && wrapperBindingMatches(actual, expected);
   } catch {}
   check("fixture.wspec-wrapper", wrapperValid, "bin/wspec 必须匹配 signed path/digest/device/inode/mode/uid/size/identity/WSSpecKit commit");
+  let userIndexValid = false;
+  try {
+    const expected = record(metadata.userIndex);
+    const actual = typeof expected?.path === "string" ? await inspectBoundFile(input.repo, expected.path) : undefined;
+    userIndexValid = actual !== undefined && wrapperBindingMatches(actual, expected);
+  } catch {}
+  check("git.user-index", userIndexValid, "Work Item 真实 index 必须保持 signed path/digest/device/inode/mode/uid/size/identity");
   let hostInvocations;
   try {
     hostInvocations = await checkedHostInvocations(input, metadata, runManifest);
@@ -439,8 +480,8 @@ async function verifySmoke(input) {
     } catch {}
     check("fixture.wsspeckit", wsspeckitValid, "verifier checkout 必须匹配 signed WSSpecKit commit");
 
-    const acquired = events.filter(({ eventType }) => eventType === "attempt.acquired").length;
-    const submitted = events.filter(({ eventType }) => eventType === "attempt.submitted").length;
+    const acquired = events.filter(({ eventType }) => eventType === "attempt.acquired" || eventType === "attempt.reacquired").length;
+    const submitted = events.filter(({ idempotencyKey }) => typeof idempotencyKey === "string" && idempotencyKey.startsWith("submit:")).length;
     check("protocol.acquire-submit", acquired >= 1 && submitted >= 1, `acquire=${acquired}, submit=${submitted}`);
 
     const references = artifactReferences(state.projection);
@@ -475,14 +516,16 @@ async function verifySmoke(input) {
       red === undefined || green === undefined ? "缺少同 commandId 的可信 Red/Green" : `commandId=${red.commandId}`,
     );
 
-    const reviewStage = Object.entries(state.projection.stages).find(([id, stage]) => /^review-fix:\d+:review$/u.test(id) && stage.status === "completed");
+    const reviewContext = Object.entries(state.projection.contexts).find(([id, context]) => (
+      /^review-fix:\d+:review$/u.test(id) && record(context)?.result !== undefined
+    ));
     const reviewReference = references.find(({ artifactType }) => artifactType === "review-result");
     let approvedReview = false;
-    if (reviewStage !== undefined && reviewReference !== undefined) {
+    if (state.projection.stages["review-fix"]?.status === "succeeded" && reviewContext !== undefined && reviewReference !== undefined) {
       try {
         const artifact = await checkedArtifact(state.worktree, reviewReference);
         const value = record(structuredYaml(artifact.body, "Findings"));
-        approvedReview = artifact.metadata.stageId === reviewStage[0]
+        approvedReview = artifact.metadata.stageId === reviewContext[0]
           && Array.isArray(value?.findings) && value.findings.every((finding) => {
           const disposition = record(finding)?.disposition;
           return disposition !== "open";
@@ -496,22 +539,29 @@ async function verifySmoke(input) {
       const candidate = record(value);
       return record(candidate?.issue)?.exists === true;
     });
-    const issueClose = Object.values(state.projection.externalActions).some((action) => action.action === "issue.close" && action.status === "verified");
+    const issueClose = Object.values(state.projection.externalActions).some((action) => action.request.action === "issue.close" && action.status === "verified");
     check("workflow.external-close", !issueBinding || issueClose, issueBinding ? "Issue Binding 必须有 verified close" : "无 Issue Binding，按合同跳过");
 
     const closedEvent = events.some(({ eventType }) => eventType === "work-item.closed");
     check("workflow.close", state.projection.workItem.status === "closed" && closedEvent, `status=${state.projection.workItem.status}`);
 
     let changed = [];
-    let diffClean = false;
+    let verifiedCommit = false;
     try {
-      changed = (await git(runtime, state.worktree, "diff", "--name-only", `${metadata.baselineCommit}..HEAD`, "--")).stdout.trim().split("\n").filter(Boolean);
-      const uncommitted = (await git(runtime, state.worktree, "diff", "--name-only", metadata.baselineCommit, "--")).stdout.trim().split("\n").filter(Boolean);
-      changed = [...new Set([...changed, ...uncommitted])];
-      await git(runtime, state.worktree, "diff", "--check", metadata.baselineCommit, "--");
-      diffClean = true;
+      const gitAction = Object.values(state.projection.externalActions).find((action) => action.request.action === "git.commit" && action.status === "verified");
+      const receipt = record(gitAction?.receipt);
+      const head = (await git(runtime, state.worktree, "rev-parse", "HEAD")).stdout.trim();
+      const ancestry = (await git(runtime, state.worktree, "rev-list", "--parents", "-n", "1", head)).stdout.trim().split(/\s+/u);
+      changed = (await git(runtime, state.worktree, "diff", "--name-only", `${metadata.baselineCommit}..${head}`, "--")).stdout.trim().split("\n").filter(Boolean).sort();
+      const diff = (await git(runtime, state.worktree,
+        "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames",
+        "--src-prefix=a/", "--dst-prefix=b/", metadata.baselineCommit, head, "--")).stdout;
+      await git(runtime, state.worktree, "diff", "--check", metadata.baselineCommit, head, "--");
+      verifiedCommit = ancestry.length === 2 && ancestry[0] === head && ancestry[1] === metadata.baselineCommit
+        && receipt?.expectedContentDigest === sha256(diff)
+        && receipt.readBackContentDigest === receipt.expectedContentDigest;
     } catch {}
-    check("git.expected-diff", diffClean && changed.includes("src/labels.ts") && changed.includes("tests/labels.test.ts"), `changed=${changed.sort().join(",")}`);
+    check("git.expected-diff", verifiedCommit && changed.join("\n") === "src/labels.ts\ntests/labels.test.ts", `changed=${changed.join(",")}`);
     try {
       check("smoke.behavior-probe", true, await behaviorProbe(state, runtime));
     } catch (error) {

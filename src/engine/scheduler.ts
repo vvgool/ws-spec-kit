@@ -61,7 +61,7 @@ export async function mutateControlPlane<T>(input: {
   idempotencyKey: string;
   actor?: string;
   stageId?: string | ((value: T) => string | undefined);
-  attemptId?: string;
+  attemptId?: string | ((value: T) => string | undefined);
   operationInput: unknown;
   eventDetails?: (value: T) => Record<string, unknown>;
   simulateProjectionFailure?: boolean;
@@ -104,7 +104,7 @@ export async function mutateControlPlane<T>(input: {
       repositoryId: projection.repositoryId,
       workItemId: projection.workItemId,
       stageId: (typeof input.stageId === "function" ? input.stageId(mutation.value) : input.stageId) ?? null,
-      attemptId: input.attemptId ?? null,
+      attemptId: (typeof input.attemptId === "function" ? input.attemptId(mutation.value) : input.attemptId) ?? null,
       from: projection.workItem.status,
       to: mutation.projection.workItem.status,
       idempotencyKey: input.idempotencyKey,

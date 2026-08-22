@@ -82,12 +82,12 @@ async function inspectExecutable(client, filename) {
 
 function prompts(phase, workItemToken) {
   if (phase === "auto") {
-    return `WSSPECKIT_SMOKE_AUTO：Work Item token=${workItemToken}。请自行发现项目 Driver；inspect 当前 Work Item 后，最多完成一个 acquire -> submit 控制面周期，然后立即停止。`;
+    return `WSSPECKIT_SMOKE_AUTO：Work Item token=${workItemToken}。请自行发现项目 Driver；inspect 当前 Work Item 后只执行一次 acquire，获得 Work Package 后立即停止，不得 submit。`;
   }
   if (phase === "explicit") {
-    return `WSSPECKIT_SMOKE_EXPLICIT：Work Item token=${workItemToken}。这是全新 client session；请显式使用 wsspeckit-driver，inspect 后最多完成一个 acquire -> submit 控制面周期，然后立即停止。`;
+    return `WSSPECKIT_SMOKE_EXPLICIT：Work Item token=${workItemToken}。这是全新 client session；请显式使用 wsspeckit-driver，inspect 后重新 acquire 同一 actor 的活动 Attempt，只 submit 一个 Stage，然后立即停止。`;
   }
-  return `WSSPECKIT_SMOKE_RECOVERY：Work Item token=${workItemToken}。这是与前两阶段无关的全新 client session；只通过 inspect + acquire 恢复，推进至多一个控制面动作后立即停止。`;
+  return `WSSPECKIT_SMOKE_RECOVERY：Work Item token=${workItemToken}。这是与前两阶段无关的全新 client session；通过 inspect + acquire 恢复同一 actor 的活动 Attempt，然后只消费 acquire/submit 返回的 action 直至终态。`;
 }
 
 function phaseArguments(client, phase, workItemToken) {
@@ -230,15 +230,43 @@ async function controlCheckpoint(root, workItemId) {
   }
   const successfulAcquireCount = events.filter((event) => {
     const value = object(object(event.result)?.value);
-    return object(value?.action)?.action === "execute";
+    return (event.eventType === "attempt.acquired" || event.eventType === "attempt.reacquired")
+      && object(value?.action)?.action === "execute";
   }).length;
+  const acquiredCount = events.filter(({ eventType }) => eventType === "attempt.acquired").length;
+  const reacquiredCount = events.filter(({ eventType }) => eventType === "attempt.reacquired").length;
+  const activeClaims = Object.values(object(projection.claims) ?? {});
+  if (activeClaims.length > 1) throw new Error("控制面 checkpoint 同时存在多个活动 Claim");
+  const active = object(activeClaims[0]);
+  const activeClaim = active === undefined ? null : {
+    stageId: active.stageId,
+    attemptId: active.attemptId,
+    leaseDigest: typeof active.claimToken === "string" ? sha256(active.claimToken) : null,
+  };
+  if (activeClaim !== null && (typeof activeClaim.stageId !== "string" || typeof activeClaim.attemptId !== "string"
+    || !/^sha256:[a-f0-9]{64}$/u.test(activeClaim.leaseDigest ?? ""))) {
+    throw new Error("控制面 checkpoint 活动 Claim 无效");
+  }
+  const reacquireEvent = events.findLast(({ eventType }) => eventType === "attempt.reacquired");
+  const reacquireResult = object(reacquireEvent?.result);
+  const lastReacquire = reacquireEvent === undefined ? null : {
+    eventSequence: reacquireEvent.sequence,
+    stageId: reacquireEvent.stageId,
+    attemptId: reacquireEvent.attemptId,
+    previousLeaseDigest: reacquireResult?.previousLeaseDigest,
+    leaseDigest: reacquireResult?.leaseDigest,
+  };
   return {
     eventCount: events.length,
     lastEventHash: events.at(-1)?.eventHash ?? null,
     projectionDigest: sha256(projection),
-    acquireCount: events.filter(({ eventType }) => eventType === "attempt.acquired").length,
+    acquireCount: acquiredCount + reacquiredCount,
+    acquiredCount,
+    reacquiredCount,
     successfulAcquireCount,
-    submitCount: events.filter(({ eventType }) => eventType === "attempt.submitted").length,
+    submitCount: events.filter(({ idempotencyKey }) => typeof idempotencyKey === "string" && idempotencyKey.startsWith("submit:")).length,
+    activeClaim,
+    lastReacquire,
     wrapperCommands: await wrapperCommandCounts(root),
   };
 }

@@ -205,7 +205,9 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
 
 async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotStep, attemptId: string, reference: ArtifactReference): Promise<void> {
   if (reference.artifactType === "requirement-source") {
-    if (JSON.stringify(reference) !== JSON.stringify(state.snapshot.source)) {
+    const source = state.snapshot.source;
+    const fields = ["artifactType", "schemaVersion", "artifactId", "path", "revision", "contentHash", "mediaType", "contentLevel"] as const;
+    if (!fields.every((field) => reference[field] === source[field])) {
       throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Requirement Source Artifact 与不可变快照不一致。 ");
     }
     return;
@@ -817,8 +819,9 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
   const action = await mutateControlPlane<AgentAction>({
     cwd: input.root,
     workItemId: input.workItemId,
-    eventType: (value) => profileEvent
-      ?? (value.action === "completed" && value.summary.status === "closed" ? "work-item.closed" : "attempt.submitted"),
+    eventType: (value) => value.action === "completed" && value.summary.status === "closed"
+      ? "work-item.closed"
+      : profileEvent ?? "attempt.submitted",
     idempotencyKey: `submit:${input.attemptId}`,
     stageId: input.stepId,
     attemptId: input.attemptId,

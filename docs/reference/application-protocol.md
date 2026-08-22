@@ -33,11 +33,27 @@
 
 输入：`AcquireInput`，对应 `builtin.application-acquire-input.v1`，包含 `root`、`workItemId` 与必填 `actor`。输出：`AgentAction`。客户端必须按 `execute`、`await_approval`、`blocked` 或 `completed` 的动作类型继续处理，不能自行推进控制面。
 
+若不存在活动 Claim，`acquire` 原子选择下一 Step 并创建 Attempt。若存在未过期 Claim，同一 `actor` 可用于
+fresh-session 恢复：Runtime 在控制面锁内保留 Stage、Attempt 和 Work Package 身份，轮换 Lease token、
+`claimedAt` 与到期时间，记录绑定前后 token digest 的 `attempt.reacquired`，并返回新的 `execute`；旧 token
+随即失效。不同 actor 返回 `WSSPEC_STAGE_ALREADY_CLAIMED`。活动 Claim 与当前 Stage、Attempt、Context、
+Work Package、允许路径或 workspace snapshot 任一绑定不一致时返回 `WSSPEC_ACTIVE_CLAIM_INVALID`，不得修补
+或继续执行。该完整绑定在 actor 分支之前执行，并以事件链中最后一个可信投影为权威；Work Package 的
+Skill、Artifact、约束、输出、Gate 与 result schema 都不能由恢复请求修改。`submit.execute` 已携带下一份已
+claim 的 Work Package，同一会话必须直接消费；无故再次
+`acquire` 会轮换 Lease 并使刚返回的 token 失效。
+
 ### `submit`
 
 输入：`SubmitInput`，对应 `builtin.application-submit-input.v1`，包含 `root`、`workItemId`、`stepId`、`attemptId`、`leaseToken` 和 `result`。输出：`AgentAction`。`submit` 没有 `actor` 字段；CLI 的 `--actor` 仅为适配层可选上下文，不能写入协议 JSON。`attemptId` 与 `leaseToken` 必须对应仍活动的租约。Agent 的失败结果只提交 `status: "failed"`、执行摘要、Artifact 等执行事实，不能提交 `failureCode` 或 `retryable`。默认 Executor 将普通失败归类为可重试的 `WSSPEC_STEP_FAILED`；失败分类只由受信 Executor 或 Runtime 内部产生并持久化，例如 `WSSPEC_STEP_INPUT_INVALID` 或 `WSSPEC_STEP_CONFIGURATION_INVALID`，Runtime 据此决定是否消耗重试预算。
 
 `external-write` Step，以及 `action: git.commit` 的 `local-write` Step，成功时必须精确提交一个受治理的 `external-action` 意图，包含 Provider、动作、稳定目标、payload 和副作用说明。第一次 `submit` 只持久化 `builtin.external-action-request.v1` 的摘要身份并返回 `await_approval`，不会调用 Provider。批准后重复提交同一 Attempt 才可执行；Runtime 以原子 owner 保证同一 Request 只有一个协调者调用 Provider，并在 Provider 调用前持久化 `executing/not_sent`。Executor 必须在发送边界调用 `markDispatched()` 持久化 `sent_or_unknown`。其他并发提交返回可重试的 `WSSPEC_EXTERNAL_EXECUTION_IN_PROGRESS`。发送后结果未知时进入 `reconciliation_required`，只允许只读回查，不自动重发。Provider 执行或回查异常只返回固定的 `WSSPEC_EXTERNAL_PROVIDER_EXECUTION_FAILED` 或 `WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED`，不回显 Provider 文本。确认成功后 Agent 的原始意图由严格的 `builtin.external-write-receipt.v1` 替换，事件、投影和公开视图不持久化 payload 或凭据。`issue.close` 还要求 `issue.update` 已验证，且 Knowledge 按 Profile 已验证、明确 absent/skipped，或已持久化 optional warning；否则以 `WSSPEC_EXTERNAL_ORDER_INVALID` fail closed。除上述 `external-write` 与本地 `git.commit` 外，其他 Step 禁止携带 `externalWrites`。
+
+本地 `git.commit` 使用临时 index 构造并回读批准提交，不改写用户真实 index。HEAD 成功前移后，真实 index
+仍可能相对旧 HEAD 使批准文件显示为 `MM`；这是保持 index identity 的预期权衡，不代表 verified commit
+缺失。Runtime、Driver 和验收不得自动 refresh/reset 该 index，而应绑定单父 commit、批准的规范 diff digest
+与 verified Receipt，并从 commit tree 的 clean checkout 验证行为。验收还必须在运行前签入真实 index 的
+path、digest、device、inode、mode、uid、size 和组合 identity，并在运行后逐项保持一致。
 
 ### `decide`
 
@@ -161,7 +177,7 @@ skills:
 | `evidenceIngestion` | `WSSPEC_EVIDENCE_ATTEMPT_MISMATCH`、`WSSPEC_EVIDENCE_HASH_MISMATCH`、`WSSPEC_EVIDENCE_INVALID`、`WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT`、`WSSPEC_EVIDENCE_STALE`、`WSSPEC_GATE_NOT_REQUIRED` |
 | `tdd` | `WSSPEC_TDD_EVIDENCE_INVALIDATED`、`WSSPEC_TDD_GATE_CONFIGURATION_INVALID`、`WSSPEC_TDD_GATE_EXECUTION_FAILED`、`WSSPEC_TDD_GREEN_NOT_OBSERVED`、`WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE`、`WSSPEC_TDD_RED_NOT_OBSERVED`、`WSSPEC_TDD_RED_REQUIRED`、`WSSPEC_TDD_RED_SCOPE_INVALID`、`WSSPEC_TDD_RED_SYNTAX_FAILURE`、`WSSPEC_TDD_RED_TIMEOUT`、`WSSPEC_TDD_REPORT_INVALID`、`WSSPEC_TDD_REPORTER_UNSUPPORTED`、`WSSPEC_TDD_STEP_INVALID`、`WSSPEC_TDD_TEST_PATH_INVALID` |
 | `start` | `WSSPEC_START_ROLLBACK_FAILED` |
-| `acquire` | `WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
+| `acquire` | `WSSPEC_ACTIVE_CLAIM_INVALID`、`WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
 | `artifact` | `WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
 | `submit` | `WSSPEC_ARTIFACT_REFERENCE_INVALID`、`WSSPEC_ATTEMPT_NOT_ACTIVE`、`WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`、`WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED`、`WSSPEC_MODIFIED_FILES_MISMATCH`、`WSSPEC_REQUIRED_ARTIFACT_MISSING`、`WSSPEC_STEP_CONFIGURATION_INVALID`、`WSSPEC_STEP_FAILED`、`WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID`、`WSSPEC_STEP_INPUT_INVALID`、`WSSPEC_UNDECLARED_ARTIFACT` |
 | `approval` | `WSSPEC_APPROVAL_DIGEST_INVALID`、`WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED` |

@@ -1,4 +1,6 @@
-import { computeArtifactTreeDigest, computeWorkspaceSnapshot, computeWorkspaceTreeDigest } from "../domain/digests.js";
+import { isDeepStrictEqual } from "node:util";
+
+import { computeArtifactTreeDigest, computeWorkspaceSnapshot, computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import type { AgentAction, AcquireInput, StepFailureCode, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../protocol/work-package.js";
@@ -34,6 +36,7 @@ import type { ApplicationSnapshot, ApplicationState, SnapshotProfile, SnapshotSt
 import { loadApplicationState, selectedProfile } from "./state.js";
 import type { ExternalActionExecutor, ExternalActionRejection } from "./external-action.js";
 import { externalActionApprovalSummary, externalActionRejectionKey } from "./external-action.js";
+import { readEvents } from "../storage/events.js";
 
 export interface AcquireDependencies {
   now(): Date;
@@ -66,6 +69,12 @@ interface AcquiredMutation {
   action: AgentAction;
   skippedStepIds: string[];
   closeDecision?: CloseDecision;
+  reacquired?: {
+    stageId: string;
+    attemptId: string;
+    previousLeaseDigest: string;
+    leaseDigest: string;
+  };
 }
 
 export class ApplicationAcquireError extends Error {
@@ -91,6 +100,166 @@ function skippedRecord(value: unknown): ApplicationSkippedStepRecord | undefined
 
 function ownProjection<T>(values: Record<string, T>, key: string): T | undefined {
   return Object.hasOwn(values, key) ? values[key] : undefined;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function workspaceSnapshotDigest(snapshot: RuntimeClaim["workspaceSnapshot"]): string {
+  const entries = snapshot.map((entry) => {
+    if (entry.type === "file") return { path: entry.path, type: entry.type, mode: entry.mode, digest: entry.digest };
+    if (entry.type === "symlink") return { path: entry.path, type: entry.type, mode: entry.mode, target: entry.target };
+    return { path: entry.path, type: entry.type, mode: entry.mode };
+  });
+  return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
+}
+
+function claimedSnapshotStep(input: {
+  profile: SnapshotProfile;
+  projection: RuntimeProjection;
+  stageId: string;
+  claim: RuntimeClaim;
+}): SnapshotStep | undefined {
+  const root = input.profile.steps.find(({ id }) => id === input.stageId);
+  if (root === undefined) return undefined;
+  if (input.claim.stageId === input.stageId) return root;
+  const loop = ownProjection(input.projection.loops, input.stageId);
+  if (loop === undefined || root.uses !== "control.loop") return undefined;
+  return root.steps.find((step) => loopStepInstanceId(root.id, loop.iteration, step.id) === input.claim.stageId);
+}
+
+async function authoritativeActiveBinding(input: {
+  projection: RuntimeProjection;
+  stageId: string;
+}): Promise<{ claim: unknown; context: unknown }> {
+  const events = await readEvents(input.projection.controlPlane);
+  const tip = events.at(-1);
+  if (tip === undefined || input.projection.lastSequence !== tip.sequence || input.projection.lastEventHash !== tip.eventHash) {
+    throw new Error("runtime projection is not anchored to the event tip");
+  }
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const result = objectRecord(events[index]?.result);
+    const projection = objectRecord(result?.projection);
+    if (projection === undefined) continue;
+    const claims = objectRecord(projection?.claims);
+    const contexts = objectRecord(projection?.contexts);
+    if (claims === undefined || contexts === undefined || !Object.hasOwn(claims, input.stageId)
+      || !Object.hasOwn(contexts, input.stageId)) {
+      throw new Error("latest authoritative projection does not contain the active binding");
+    }
+    return { claim: claims[input.stageId], context: contexts[input.stageId] };
+  }
+  throw new Error("active Claim has no authoritative event projection");
+}
+
+async function activeClaimContext(input: {
+  state: ApplicationState;
+  projection: RuntimeProjection;
+  profile: SnapshotProfile;
+  stageId: string;
+  claim: RuntimeClaim;
+  now: Date;
+}): Promise<{ context: ApplicationAttemptRecord; step: SnapshotStep }> {
+  try {
+    const rawContext = input.projection.contexts[input.stageId];
+    const context = attemptRecord(rawContext);
+    const rawClaim = input.claim as Partial<RuntimeClaim>;
+    const authoritative = await authoritativeActiveBinding(input);
+    if (!isDeepStrictEqual(rawClaim, authoritative.claim) || !isDeepStrictEqual(rawContext, authoritative.context)) {
+      throw new Error("active binding differs from the event projection");
+    }
+    if (context === undefined || typeof context.stepInstanceId !== "string"
+      || typeof rawClaim.stageId !== "string" || typeof rawClaim.attemptId !== "string"
+      || typeof rawClaim.claimToken !== "string" || typeof rawClaim.actor !== "string"
+      || typeof rawClaim.claimedAt !== "string" || typeof rawClaim.expiresAt !== "string"
+      || typeof rawClaim.inputWorkspaceTreeDigest !== "string" || !Array.isArray(rawClaim.allowedPaths)
+      || !rawClaim.allowedPaths.every((value) => typeof value === "string") || !Array.isArray(rawClaim.workspaceSnapshot)) {
+      throw new Error("active Claim or Context shape is invalid");
+    }
+    const workPackage = validate<WorkPackage>("builtin.work-package.v1", context.workPackage);
+    const step = claimedSnapshotStep(input);
+    const stageStatus = input.projection.stages[input.stageId]?.status;
+    const claimedAt = Date.parse(rawClaim.claimedAt);
+    const expiresAt = Date.parse(rawClaim.expiresAt);
+    const valid = step !== undefined
+      && (stageStatus === "claimed" || stageStatus === "awaiting_approval")
+      && rawClaim.stageId !== ""
+      && rawClaim.attemptId !== ""
+      && context.stepInstanceId === rawClaim.stageId
+      && Number.isFinite(claimedAt) && claimedAt <= input.now.getTime()
+      && Number.isFinite(expiresAt) && expiresAt > input.now.getTime()
+      && rawClaim.inputWorkspaceTreeDigest === workspaceSnapshotDigest(rawClaim.workspaceSnapshot)
+      && sameStrings(rawClaim.allowedPaths, input.state.snapshot.changePolicy.allowedPaths)
+      && workPackage.workItemId === input.state.item.workItemId
+      && workPackage.stepId === rawClaim.stageId
+      && workPackage.attemptId === rawClaim.attemptId
+      && workPackage.lease.token === rawClaim.claimToken
+      && workPackage.lease.expiresAt === rawClaim.expiresAt
+      && sameStrings(workPackage.constraints.allowedPaths, rawClaim.allowedPaths);
+    if (!valid || step === undefined) throw new Error("active Claim binding is invalid");
+    return { context: { ...context, workPackage }, step };
+  } catch {
+    throw new ApplicationAcquireError("WSSPEC_ACTIVE_CLAIM_INVALID", "活动 Claim 与当前 Application、Attempt 或 Work Package 绑定不一致。");
+  }
+}
+
+async function reacquireActiveClaim(input: {
+  state: ApplicationState;
+  projection: RuntimeProjection;
+  profile: SnapshotProfile;
+  actor: string;
+  stageId: string;
+  claim: RuntimeClaim;
+  root: string;
+  dependencies: AcquireDependencies;
+  now: Date;
+  active: { context: ApplicationAttemptRecord; step: SnapshotStep };
+}): Promise<{ projection: RuntimeProjection; action: AgentAction; reacquired: NonNullable<AcquiredMutation["reacquired"]> }> {
+  const { context, step } = input.active;
+  const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
+    root: input.root,
+    rootIds: input.state.snapshot.skillResolution.additionalGlobalRootIds,
+  });
+  await revalidateGlobalSkillLock({
+    lock: input.state.snapshot.skillLock,
+    provider: input.state.snapshot.skillResolution.provider,
+    projectRoot: input.state.worktree,
+    home: input.dependencies.home,
+    additionalGlobalRoots,
+  });
+  const token = crypto.randomUUID();
+  const expiresAt = new Date(input.now.getTime() + input.state.snapshot.leaseTtlSeconds * 1000).toISOString();
+  const claim = { ...input.claim, claimToken: token, claimedAt: input.now.toISOString(), expiresAt };
+  const workPackage: WorkPackage = {
+    ...context.workPackage,
+    lease: { token, expiresAt },
+  };
+  input.dependencies.executors.assertStep(step as unknown as CompiledStepShape);
+  const projection = {
+    ...input.projection,
+    claims: { ...input.projection.claims, [input.stageId]: claim },
+    contexts: {
+      ...input.projection.contexts,
+      [input.stageId]: { ...context, workPackage },
+    },
+  };
+  return {
+    projection,
+    action: { action: "execute", workPackage },
+    reacquired: {
+      stageId: input.claim.stageId,
+      attemptId: input.claim.attemptId,
+      previousLeaseDigest: sha256(input.claim.claimToken),
+      leaseDigest: sha256(token),
+    },
+  };
 }
 
 function completedResults(projection: RuntimeProjection, stageId: string): ApplicationStepResult[] {
@@ -634,7 +803,7 @@ export async function acquireNextLocked(input: {
   actor: string;
   root: string;
   dependencies: AcquireDependencies;
-}): Promise<{ projection: RuntimeProjection; action: AgentAction; skippedStepIds: string[]; closeDecision?: CloseDecision }> {
+}): Promise<{ projection: RuntimeProjection; action: AgentAction; skippedStepIds: string[]; closeDecision?: CloseDecision; reacquired?: NonNullable<AcquiredMutation["reacquired"]> }> {
   const { state, actor, dependencies } = input;
   let projection = {
     ...input.projection,
@@ -648,14 +817,39 @@ export async function acquireNextLocked(input: {
     return { projection, action: completed(state.item.workItemId, projection.workItem.status, "Workflow 已结束。"), skippedStepIds: [] };
   }
   const profile = selectedProfile(state.snapshot);
+  const now = dependencies.now();
+  const activeClaims = new Map<string, { context: ApplicationAttemptRecord; step: SnapshotStep }>();
+  for (const [stepId, claim] of Object.entries(projection.claims)) {
+    if (new Date(claim.expiresAt) > now) {
+      activeClaims.set(stepId, await activeClaimContext({ state, projection, profile, stageId: stepId, claim, now }));
+    }
+  }
   projection = settleOptionalKnowledgeFailures(projection, profile);
-  const externalAction = pendingExternalAction(projection, state.item.workItemId, dependencies.now());
+  const externalAction = pendingExternalAction(projection, state.item.workItemId, now);
   if (externalAction !== undefined) return { projection, action: externalAction, skippedStepIds: [] };
   const approval = pendingApproval(projection, state.item.workItemId);
   if (approval !== undefined) return { projection, action: approval, skippedStepIds: [] };
-  const now = dependencies.now();
   for (const [stepId, claim] of Object.entries(projection.claims)) {
     if (new Date(claim.expiresAt) > now) {
+      const active = activeClaims.get(stepId);
+      if (active === undefined || projection.stages[stepId]?.status !== "claimed") {
+        throw new ApplicationAcquireError("WSSPEC_ACTIVE_CLAIM_INVALID", "活动 Claim 与当前 Application、Attempt 或 Work Package 绑定不一致。");
+      }
+      if (claim.actor === actor) {
+        const reacquired = await reacquireActiveClaim({
+          state,
+          projection,
+          profile,
+          actor,
+          stageId: stepId,
+          claim,
+          root: input.root,
+          dependencies,
+          now,
+          active,
+        });
+        return { ...reacquired, skippedStepIds: [] };
+      }
       return {
         projection,
         action: { action: "blocked", problems: [{ code: "WSSPEC_STAGE_ALREADY_CLAIMED", message: `步骤 ${claim.stageId} 已有活动 Lease。`, retryable: true }] },
@@ -848,15 +1042,21 @@ export async function acquireApplication(input: AcquireInput, dependencies: Acqu
     eventType: (value) => {
       if (value.action.action === "completed" && value.action.summary.status === "closed") return "work-item.closed";
       if (value.closeDecision !== undefined) return "evidence.recorded";
+      if (value.reacquired !== undefined) return "attempt.reacquired";
       return value.skippedStepIds.length > 0 ? "step.skipped" : "attempt.acquired";
     },
-    stageId: (value) => value.skippedStepIds[0],
+    stageId: (value) => value.reacquired?.stageId ?? value.skippedStepIds[0],
+    attemptId: (value) => value.reacquired?.attemptId,
     idempotencyKey: `acquire:${crypto.randomUUID()}`,
     actor: input.actor,
     operationInput: { actor: input.actor, at: dependencies.now().toISOString() },
     eventDetails: (value) => ({
       ...(value.skippedStepIds.length === 0 ? {} : { skippedStepIds: value.skippedStepIds }),
       ...(value.closeDecision === undefined ? {} : { closeDecision: value.closeDecision }),
+      ...(value.reacquired === undefined ? {} : {
+        previousLeaseDigest: value.reacquired.previousLeaseDigest,
+        leaseDigest: value.reacquired.leaseDigest,
+      }),
     }),
     mutate: async (projection) => {
       const acquired = await acquireNextLocked({ state, projection, actor: input.actor, root: input.root, dependencies });
@@ -866,6 +1066,7 @@ export async function acquireApplication(input: AcquireInput, dependencies: Acqu
           action: acquired.action,
           skippedStepIds: acquired.skippedStepIds,
           ...(acquired.closeDecision === undefined ? {} : { closeDecision: acquired.closeDecision }),
+          ...(acquired.reacquired === undefined ? {} : { reacquired: acquired.reacquired }),
         },
       };
     },

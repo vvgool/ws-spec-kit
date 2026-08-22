@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -104,7 +104,7 @@ export async function prepareSmoke(input) {
   await mkdir(path.join(root, "src"), { recursive: true });
   await mkdir(path.join(root, "tests"), { recursive: true });
   await mkdir(path.join(root, "bin"), { recursive: true });
-  await writeFile(path.join(root, ".gitignore"), ".acceptance/\n", "utf8");
+  await writeFile(path.join(root, ".gitignore"), ".acceptance/\n.wsspec/work-items/\n", "utf8");
   await writeFile(path.join(root, "package.json"), `${JSON.stringify({
     name: "wsspeckit-agent-live-smoke",
     private: true,
@@ -157,13 +157,13 @@ export async function prepareSmoke(input) {
     version: 1,
     testing: {
       pathRules: ["node"],
-      testAssetPaths: ["tests/**", "**/*.test.*"],
+      testAssetPaths: ["tests/**"],
       productPaths: ["src/**"],
     },
     quality: {
       gates: {
         test: {
-          command: [process.execPath, "--test", "tests/labels.test.ts"],
+          command: [process.execPath, "--import", tsxLoader, "--test", "tests/labels.test.ts"],
           cwd: "worktree",
           timeoutSeconds: 30,
           required: true,
@@ -195,6 +195,13 @@ export async function prepareSmoke(input) {
     "--provider", input.client,
   ]);
   recordInvocation("wspec.start");
+  const worktree = path.join(root, ".worktrees", started.workItemId);
+  const indexPath = (await git(runtime, worktree, "rev-parse", "--path-format=absolute", "--git-path", "index")).stdout.trim();
+  const indexRelativePath = path.relative(await realpath(root), indexPath).split(path.sep).join("/");
+  if (indexRelativePath === "" || indexRelativePath === ".." || indexRelativePath.startsWith("../")) {
+    throw new Error("Work Item 真实 index 不在 fixture repository 内");
+  }
+  const userIndex = await inspectBoundFile(root, indexRelativePath);
   const metadata = {
     version: 1,
     kind: "wsspeckit-agent-smoke",
@@ -207,6 +214,7 @@ export async function prepareSmoke(input) {
     baselineTree,
     wsspeckitCommit,
     wspecWrapper,
+    userIndex,
     requirementDigest: await sha256File(path.join(root, "SMOKE_REQUIREMENT.md")),
     driver: driverRelativePath(input.client),
     driverDigest: await sha256File(path.join(root, driverRelativePath(input.client))),
@@ -239,6 +247,8 @@ export async function prepareSmoke(input) {
     wsspeckitCommit,
     wspecWrapperDigest: metadata.wspecWrapper.digest,
     wspecWrapperIdentity: metadata.wspecWrapper.identity,
+    userIndexDigest: metadata.userIndex.digest,
+    userIndexIdentity: metadata.userIndex.identity,
     hostInvocationStatus: "not-run",
     hostPhaseEvidenceStatus: "not-run",
     hostInvocations: [],

@@ -78,6 +78,157 @@ async function git(root: string, ...args: string[]): Promise<void> {
   ], { cwd: root });
 }
 
+function productionHostSource(): string {
+  return `#!/usr/bin/env node
+const { execFileSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
+const { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const text = process.argv.slice(2).join(" ");
+const phase = text.includes("WSSPECKIT_SMOKE_AUTO") ? "auto" : text.includes("WSSPECKIT_SMOKE_EXPLICIT") ? "explicit" : "recovery";
+const wrapper = execFileSync("/bin/sh", ["-c", "command -v wspec"], { encoding: "utf8", env: process.env }).trim();
+const workItemId = readdirSync(path.join(process.cwd(), ".worktrees")).find((value) => value.startsWith("WSS-"));
+const worktree = path.join(process.cwd(), ".worktrees", workItemId);
+const actor = "codex-smoke";
+
+function envelope(output) {
+  for (const line of String(output).split(/\\r?\\n/u).reverse()) {
+    try {
+      const value = JSON.parse(line.trim());
+      if (value && value.ok === true) return value.result;
+    } catch {}
+  }
+  throw new Error("wspec did not return a successful JSON envelope");
+}
+
+function wspec(args, tty = false) {
+  if (!tty) return envelope(execFileSync(wrapper, args, { encoding: "utf8", env: process.env }));
+  const expectPath = path.join(process.cwd(), ".acceptance", "tty-command.exp");
+  writeFileSync(expectPath, "#!/usr/bin/expect -f\\nlog_user 1\\nspawn -noecho {*}$argv\\nexpect eof\\ncatch wait result\\nexit [lindex $result 3]\\n", { mode: 0o700 });
+  return envelope(execFileSync("/usr/bin/expect", [expectPath, wrapper, ...args], { encoding: "utf8", env: process.env }));
+}
+
+function digest(value) {
+  return "sha256:" + createHash("sha256").update(value).digest("hex");
+}
+
+function bodyFor(type) {
+  if (type === "exploration-report") return "# Exploration\\n\\nThe fixture has one source module and one Node test.\\n";
+  if (type === "specification") return [
+    "# 目标与背景", "格式化标签数组。", "# 范围", "只修改 fixture 源码与测试。", "# 需求", "规范化并移除空项。",
+    "# 验收条件", "多输入组合通过。", "# 约束", "不得访问网络。", "# 排除项", "无。", "# 开放问题", "无。", "",
+  ].join("\\n");
+  if (type === "tasks") return "# 任务\\n\\n\`\`\`yaml\\ntasks:\\n  - id: task-1\\n    status: pending\\n    dependencies: []\\n    completion: 固定测试由 Red 转 Green\\n\`\`\`\\n";
+  if (type === "implementation-result") return [
+    "# 实际改动", "新增 formatLabelParts。", "# 修改文件", "src/labels.ts 与 tests/labels.test.ts。", "# 计划偏差", "无。",
+    "# 验证摘要", "由引擎执行固定 Gate。", "# 未完成项", "无。", "# 残余风险", "仅本地 fixture。", "",
+  ].join("\\n");
+  if (type === "review-result") return "# Findings\\n\\n\`\`\`yaml\\nfindings: []\\n\`\`\`\\n";
+  return "# " + type + "\\n\\nLocal acceptance artifact.\\n";
+}
+
+function artifact(pkg, type) {
+  const body = bodyFor(type).replace(/\\r\\n?/gu, "\\n").replace(/\\n*$/u, "") + "\\n";
+  const metadata = { artifactType: type, attemptId: pkg.attemptId, revision: 1, schemaVersion: 1, stageId: pkg.stepId, workItemId: pkg.workItemId };
+  const contentHash = digest(JSON.stringify(metadata) + "\\n" + body);
+  const relative = ".wsspec/work-items/" + pkg.workItemId + "/artifacts/" + pkg.stepId.replaceAll(":", "-") + "-" + type + ".md";
+  mkdirSync(path.dirname(path.join(worktree, relative)), { recursive: true });
+  writeFileSync(path.join(worktree, relative), [
+    "---", "artifactType: " + type, "schemaVersion: 1", "workItemId: " + pkg.workItemId, "stageId: " + pkg.stepId,
+    "attemptId: " + pkg.attemptId, "revision: 1", "contentHash: " + contentHash, "---", body,
+  ].join("\\n"));
+  const expected = pkg.requiredOutputs.find((item) => item.artifactType === type);
+  return { artifactType: type, schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown", ...(expected && expected.contentLevel ? { contentLevel: expected.contentLevel } : {}) };
+}
+
+function gitOutput(args, options = {}) {
+  return execFileSync("/usr/bin/git", args, { cwd: worktree, encoding: "utf8", env: { PATH: "/usr/bin:/bin", ...options.env } }).trim();
+}
+
+function commitIntent() {
+  const files = ["src/labels.ts", "tests/labels.test.ts"];
+  const baselineRevision = gitOutput(["rev-parse", "HEAD"]);
+  const repositoryCommonDir = realpathSync(gitOutput(["rev-parse", "--path-format=absolute", "--git-common-dir"]));
+  const temporary = mkdtempSync(path.join(os.tmpdir(), "wsspec-smoke-index-"));
+  const index = path.join(temporary, "index");
+  const pathspec = path.join(temporary, "pathspec");
+  try {
+    writeFileSync(pathspec, Buffer.from(files.join("\\0") + "\\0", "utf8"));
+    gitOutput(["read-tree", baselineRevision], { env: { GIT_INDEX_FILE: index } });
+    gitOutput(["--literal-pathspecs", "add", "--all", "--pathspec-from-file=" + pathspec, "--pathspec-file-nul"], { env: { GIT_INDEX_FILE: index } });
+    const diff = execFileSync("/usr/bin/git", [
+      "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "--no-renames",
+      "--src-prefix=a/", "--dst-prefix=b/", baselineRevision, "--",
+    ], { cwd: worktree, env: { PATH: "/usr/bin:/bin", GIT_INDEX_FILE: index } });
+    const approval = { repositoryRoot: realpathSync(worktree), repositoryCommonDir, baselineRevision, files, message: "feat: complete agent smoke", diffDigest: digest(diff) };
+    return { kind: "external-action", provider: "git-native", action: "git.commit", target: { kind: "repository", stableId: repositoryCommonDir }, payload: approval, sideEffects: ["commit approved fixture files"] };
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+function submit(pkg) {
+  let modifiedFiles = [];
+  if (pkg.stepId === "write-tests") {
+    writeFileSync(path.join(worktree, "tests", "labels.test.ts"), [
+      "import assert from 'node:assert/strict';", "import test from 'node:test';", "import * as labels from '../src/labels.ts';", "",
+      "test('formats normalized non-empty label parts', () => {", "  assert.equal(typeof labels.formatLabelParts, 'function');",
+      "  assert.equal(labels.formatLabelParts(['  READY  ', '', ' Next Step ']), 'ready / next step');", "});", "",
+    ].join("\\n"));
+    modifiedFiles = ["tests/labels.test.ts"];
+  } else if (pkg.stepId === "implement") {
+    writeFileSync(path.join(worktree, "src", "labels.ts"), [
+      "export function normalizeLabel(value: string): string {", "  return value.trim().toLowerCase();", "}", "",
+      "export function formatLabelParts(parts: readonly string[]): string {", "  return parts.map(normalizeLabel).filter(Boolean).join(' / ');", "}", "",
+    ].join("\\n"));
+    modifiedFiles = ["src/labels.ts"];
+  }
+  const artifacts = [];
+  for (const expected of pkg.requiredOutputs) {
+    if (expected.artifactType === "red-evidence" || expected.artifactType === "tdd-evidence") continue;
+    if (expected.artifactType === "requirement-source") {
+      artifacts.push(pkg.artifacts.find((item) => item.artifactType === "requirement-source"));
+    } else artifacts.push(artifact(pkg, expected.artifactType));
+  }
+  const result = {
+    version: 1, status: "completed", summary: pkg.stepId + " completed by production fixture", modifiedFiles, artifacts,
+    commands: [], evidence: [], externalWrites: pkg.stepId === "commit" ? [commitIntent()] : [], remainingRisks: [{ risk: "low" }],
+  };
+  const resultPath = path.join(".acceptance", "result-" + pkg.stepId.replaceAll(":", "-") + ".json");
+  writeFileSync(path.join(process.cwd(), resultPath), JSON.stringify(result));
+  return wspec(["submit", workItemId, "--step", pkg.stepId, "--attempt", pkg.attemptId, "--lease", pkg.lease.token, "--result", resultPath, "--actor", actor]);
+}
+
+function decide(approval) {
+  const decisionPath = path.join(".acceptance", "decision.json");
+  writeFileSync(path.join(process.cwd(), decisionPath), JSON.stringify({
+    kind: approval.kind === "external_action" ? "external_action" : "approval", workItemId, requestId: approval.requestId,
+    decision: "approved", expectedDigest: approval.digest,
+  }));
+  return wspec(["decide", "--input", decisionPath, "--actor", "fixture-owner"], true);
+}
+
+const inspected = wspec(["inspect", workItemId]);
+if (inspected.status !== "active") throw new Error("fixture is not active");
+let action = wspec(["acquire", workItemId, "--actor", actor]);
+if (phase === "explicit") action = submit(action.workPackage);
+if (phase === "recovery") {
+  let safety = 0;
+  while (action.action !== "completed") {
+    if (safety++ > 30) throw new Error("fixture exceeded action bound");
+    if (action.action === "execute") action = submit(action.workPackage);
+    else if (action.action === "await_approval") action = decide(action.approval);
+    else throw new Error("fixture blocked: " + JSON.stringify(action));
+  }
+}
+console.log(JSON.stringify({ type: "thread.started", thread_id: "production-" + phase + "-session" }));
+console.log(JSON.stringify({ type: "wspec.probe", phase, action: action.action }));
+console.log(JSON.stringify({ type: "turn.completed", status: "completed" }));
+`;
+}
+
 async function filesUnder(root: string): Promise<string[]> {
   const files: string[] = [];
   async function visit(directory: string): Promise<void> {
@@ -123,7 +274,7 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.equal(JSON.stringify(runManifest).includes(prepared.root), false);
   assert.equal(JSON.stringify(runManifest).includes(prepared.workItemId), false);
 
-  await execFileAsync(process.execPath, ["--test", "tests/labels.test.ts"], { cwd: prepared.root });
+  await execFileAsync(process.execPath, ["--import", tsxLoader, "--test", "tests/labels.test.ts"], { cwd: prepared.root });
   const source = await readFile(path.join(prepared.root, "src", "labels.ts"), "utf8");
   assert.doesNotMatch(source, /formatLabelParts/u, "fixture 不得预置目标函数实现");
   const fixtureManifest = JSON.parse(await readFile(path.join(prepared.root, ".acceptance", "agent-smoke.json"), "utf8")) as Record<string, unknown>;
@@ -133,6 +284,11 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.match(String(wrapper.identity), /^sha256:[a-f0-9]{64}$/u);
   assert.equal(wrapper.wsspeckitCommit, fixtureManifest.wsspeckitCommit);
   for (const field of ["dev", "ino", "mode", "uid", "size"]) assert.notEqual(wrapper[field], undefined, `wrapper.${field}`);
+  const userIndex = fixtureManifest.userIndex as Record<string, unknown>;
+  assert.match(String(userIndex.path), /^\.git\/worktrees\/WSS-[0-9A-HJKMNP-TV-Z]{26}\/index$/u);
+  assert.match(String(userIndex.digest), /^sha256:[a-f0-9]{64}$/u);
+  assert.match(String(userIndex.identity), /^sha256:[a-f0-9]{64}$/u);
+  for (const field of ["dev", "ino", "mode", "uid", "size"]) assert.notEqual(userIndex[field], undefined, `userIndex.${field}`);
 });
 
 test("prepare CLI 未指定目录时创建隔离根目录但不输出 observer authority", async () => {
@@ -230,6 +386,56 @@ test("observer 让 Host 只从 fixture/bin 命中 bound wspec、实际 inspect�
   await rm(observed.authorityFile, { force: true });
 });
 
+test("observer production fixture 通过真实 wrapper 完成 same-actor 三 fresh-session 恢复链", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-production-host-"));
+  const root = path.join(parent, "repository");
+  const executable = path.join(parent, "codex");
+  await writeFile(executable, productionHostSource(), { encoding: "utf8", mode: 0o700 });
+  await chmod(executable, 0o700);
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    runScript,
+    "--client", "codex",
+    "--client-executable", executable,
+    "--directory", root,
+  ], { cwd: repositoryRoot, maxBuffer: 8 * 1024 * 1024 });
+  const observed = JSON.parse(stdout) as PreparedSmoke;
+  const phases = ["auto", "explicit", "recovery"];
+  const invocations = await Promise.all(phases.map(async (phase) => JSON.parse(
+    await readFile(path.join(root, ".acceptance", `agent-smoke-invocation-${phase}.json`), "utf8"),
+  ) as Record<string, unknown>));
+  const checkpoints = invocations.map(({ beforeCheckpoint, afterCheckpoint }) => ({
+    before: beforeCheckpoint as { acquireCount: number; reacquiredCount: number; submitCount: number; wrapperCommands: { inspect: number; acquire: number; submit: number } },
+    after: afterCheckpoint as { acquireCount: number; reacquiredCount: number; submitCount: number; wrapperCommands: { inspect: number; acquire: number; submit: number } },
+  }));
+
+  assert.equal(checkpoints[0]!.after.submitCount - checkpoints[0]!.before.submitCount, 0, "auto 必须在 acquire 后停止");
+  assert.equal(checkpoints[1]!.after.acquireCount - checkpoints[1]!.before.acquireCount, 1);
+  assert.equal(checkpoints[1]!.after.reacquiredCount - checkpoints[1]!.before.reacquiredCount, 1);
+  assert.equal(checkpoints[1]!.after.submitCount - checkpoints[1]!.before.submitCount, 1);
+  assert.ok(checkpoints[2]!.after.acquireCount - checkpoints[2]!.before.acquireCount >= 1);
+  assert.equal(checkpoints[2]!.after.reacquiredCount - checkpoints[2]!.before.reacquiredCount, 1);
+  assert.ok(checkpoints[2]!.after.submitCount - checkpoints[2]!.before.submitCount >= 1);
+  assert.ok(checkpoints.every(({ after, before }) => after.wrapperCommands.inspect - before.wrapperCommands.inspect >= 1));
+  assert.ok(checkpoints.every(({ after, before }) => after.wrapperCommands.acquire - before.wrapperCommands.acquire >= 1));
+
+  const result = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
+  assert.equal(result.summary.checks.find(({ id }) => id === "host.workflow-phases")?.ok, true);
+  assert.equal(result.summary.checks.find(({ id }) => id === "workflow.close")?.ok, true);
+  assert.equal(result.summary.checks.find(({ id }) => id === "git.user-index")?.ok, true);
+  assert.equal(result.summary.ok, true, result.summary.checks.filter(({ ok }) => !ok).map(({ id, detail }) => `${id}:${detail}`).join("\n"));
+
+  const fixture = JSON.parse(await readFile(path.join(root, ".acceptance", "agent-smoke.json"), "utf8")) as { userIndex: { path: string } };
+  const indexPath = path.join(root, fixture.userIndex.path);
+  const replacement = `${indexPath}.replacement`;
+  await writeFile(replacement, await readFile(indexPath), { mode: 0o644 });
+  await rename(replacement, indexPath);
+  const replaced = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
+  assert.equal(replaced.summary.checks.find(({ id }) => id === "git.user-index")?.ok, false, "同内容替换真实 index 也必须 fail closed");
+  await rm(parent, { recursive: true, force: true });
+  await rm(observed.authorityFile, { force: true });
+});
+
 test("observer 对 bound wspec 的删除、同内容替换、symlink 与 digest drift 全部 fail closed", async (t) => {
   for (const mutation of ["delete", "replace", "symlink", "digest"] as const) {
     await t.test(mutation, async () => {
@@ -262,27 +468,42 @@ test("observer 对 bound wspec 的删除、同内容替换、symlink 与 digest 
   }
 });
 
-test("phase delta 合同接受三段真实推进，拒绝 auto 全做完后 explicit/recovery 空转", () => {
+test("phase delta 合同接受三段真实推进，拒绝 auto 全做完、recovery submit-only 与伪 acquire", () => {
   const checkpoint = (input: {
     eventCount: number;
     projection: string;
     inspect: number;
     acquire: number;
+    reacquired?: number;
     successfulAcquire: number;
     submit: number;
+    activeClaim?: { stageId: string; attemptId: string; leaseDigest: string } | null;
+    lastReacquire?: { eventSequence: number; stageId: string; attemptId: string; previousLeaseDigest: string; leaseDigest: string } | null;
   }) => ({
     eventCount: input.eventCount,
     lastEventHash: input.eventCount === 0 ? null : `sha256:${String(input.eventCount).padStart(64, "0")}`,
     projectionDigest: `sha256:${input.projection.padEnd(64, "0")}`,
     acquireCount: input.acquire,
+    acquiredCount: input.acquire - (input.reacquired ?? 0),
+    reacquiredCount: input.reacquired ?? 0,
     successfulAcquireCount: input.successfulAcquire,
     submitCount: input.submit,
+    activeClaim: input.activeClaim ?? null,
+    lastReacquire: input.lastReacquire ?? null,
     wrapperCommands: { inspect: input.inspect, acquire: input.acquire, submit: input.submit },
   });
   const a0 = checkpoint({ eventCount: 1, projection: "1", inspect: 0, acquire: 0, successfulAcquire: 0, submit: 0 });
-  const a1 = checkpoint({ eventCount: 2, projection: "2", inspect: 1, acquire: 1, successfulAcquire: 1, submit: 0 });
-  const e1 = checkpoint({ eventCount: 3, projection: "3", inspect: 2, acquire: 1, successfulAcquire: 1, submit: 1 });
-  const r1 = checkpoint({ eventCount: 4, projection: "4", inspect: 3, acquire: 2, successfulAcquire: 2, submit: 1 });
+  const firstClaim = { stageId: "explore", attemptId: "attempt-a", leaseDigest: `sha256:${"1".repeat(64)}` };
+  const secondClaim = { stageId: "define", attemptId: "attempt-b", leaseDigest: `sha256:${"3".repeat(64)}` };
+  const a1 = checkpoint({ eventCount: 2, projection: "2", inspect: 1, acquire: 1, successfulAcquire: 1, submit: 0, activeClaim: firstClaim });
+  const e1 = checkpoint({
+    eventCount: 4, projection: "3", inspect: 2, acquire: 2, reacquired: 1, successfulAcquire: 2, submit: 1, activeClaim: secondClaim,
+    lastReacquire: { eventSequence: 3, stageId: firstClaim.stageId, attemptId: firstClaim.attemptId, previousLeaseDigest: firstClaim.leaseDigest, leaseDigest: `sha256:${"2".repeat(64)}` },
+  });
+  const r1 = checkpoint({
+    eventCount: 7, projection: "4", inspect: 3, acquire: 3, reacquired: 2, successfulAcquire: 3, submit: 3,
+    lastReacquire: { eventSequence: 5, stageId: secondClaim.stageId, attemptId: secondClaim.attemptId, previousLeaseDigest: secondClaim.leaseDigest, leaseDigest: `sha256:${"4".repeat(64)}` },
+  });
   const valid = [
     { phase: "auto", sessionIdHash: `sha256:${"a".repeat(64)}`, beforeCheckpoint: a0, afterCheckpoint: a1 },
     { phase: "explicit", sessionIdHash: `sha256:${"b".repeat(64)}`, beforeCheckpoint: a1, afterCheckpoint: e1 },
@@ -296,6 +517,27 @@ test("phase delta 合同接受三段真实推进，拒绝 auto 全做完后 expl
     { ...valid[1], beforeCheckpoint: allDone, afterCheckpoint: allDone },
     { ...valid[2], beforeCheckpoint: allDone, afterCheckpoint: allDone },
   ]), /explicit.*delta|阶段/u);
+
+  const submitOnly = checkpoint({ eventCount: 8, projection: "8", inspect: 4, acquire: 2, successfulAcquire: 2, submit: 4 });
+  assert.throws(() => validateHostWorkflowPhases([
+    valid[0]!,
+    valid[1]!,
+    { ...valid[2]!, beforeCheckpoint: e1, afterCheckpoint: submitOnly },
+  ]), /recovery.*acquire|阶段/u);
+
+  const mislabeled = checkpoint({ eventCount: 8, projection: "8", inspect: 4, acquire: 3, successfulAcquire: 2, submit: 4 });
+  assert.throws(() => validateHostWorkflowPhases([
+    valid[0]!,
+    valid[1]!,
+    { ...valid[2]!, beforeCheckpoint: e1, afterCheckpoint: mislabeled },
+  ]), /recovery.*成功 acquire|阶段/u);
+
+  const expiredReplacement = checkpoint({ eventCount: 4, projection: "e", inspect: 2, acquire: 2, successfulAcquire: 2, submit: 1, activeClaim: secondClaim });
+  assert.throws(() => validateHostWorkflowPhases([
+    valid[0]!,
+    { ...valid[1]!, beforeCheckpoint: a1, afterCheckpoint: expiredReplacement },
+    { ...valid[2]!, beforeCheckpoint: expiredReplacement, afterCheckpoint: r1 },
+  ]), /explicit.*reacquire|Attempt|Lease|阶段/u);
 });
 
 test("observer 禁止 PATH 解析和非 canonical executable 名称，拒绝前不创建 fixture", async () => {
