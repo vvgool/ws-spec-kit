@@ -139,7 +139,7 @@ export async function readSignedJson(manifestFile, receiptFile, kind, authorityF
     || receipt.authorityIdentity !== expectedIdentity || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
     throw new Error("acceptance receipt 无效");
   }
-  return { authority, value: JSON.parse(manifestText), manifestDigest };
+  return { authority, value: JSON.parse(manifestText), manifestDigest, receipt };
 }
 
 async function fixedGitExecutable() {

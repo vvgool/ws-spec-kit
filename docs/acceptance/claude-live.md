@@ -15,5 +15,18 @@ Claude Code CLI；本机存在 Claude Desktop `1.28929.0`，其 canonical binary
 恢复，也没有生成 Work Item 或 verifier 通过证据。桌面应用文件存在不能替代真实 Claude Code 客户端验收。
 
 未安装、未登录、未修改 Claude 配置，也未读取任何认证配置正文。后续必须在可用且已认证的 Claude Code CLI
-环境重新运行同一 prepare/verify 流程。新 verifier 必须同时提供 `--authority <file>` 和
-`--authority-identity <sha256>`；缺失或不匹配会 fail closed。
+环境通过 observer 运行完整流程；本机未验证 Claude CLI argv 模板，也没有启动模型会话：
+
+```bash
+node scripts/acceptance/run-agent-smoke.mjs \
+  --client claude --client-executable /absolute/path/to/claude \
+  --directory /absolute/path/to/new-fixture
+```
+
+直接运行 `prepare-agent-smoke.mjs` 只返回 `observer-only-unbound` 的公开 fixture 信息；runner 仅在三个 Host
+child 全部退出后向 observer 调用方返回 authority path/identity。新 verifier 必须同时提供 `--authority <file>` 和
+`--authority-identity <sha256>`；并要求 observer-signed auto/explicit/recovery 三阶段 invocation receipts，
+缺失或不匹配会 fail closed。
+
+信任边界是 observer process、Host child 的 clean argv/env 和仓库外 mode `0600` authority；不声称抵抗同一
+UID 的主机级扫描、进程附加或文件改写。更强保证需要独立 OS 用户、隔离执行环境或外部 signer。

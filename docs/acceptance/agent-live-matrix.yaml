@@ -13,6 +13,7 @@ clients:
     authorityStatus: legacy-unbound
     runIdHash: sha256:fcbaa440da36bc9abae4f3e3ffd2fbeb727911d4c78e3c80dc7632cd84777ba9
     runIdBasis: sanitized-legacy-record
+    hostInvocations: not-run-legacy-unbound
     version: 0.148.0-alpha.21
     executable: canonical
     authentication: observed-unverified
@@ -28,13 +29,14 @@ clients:
     externalClose: skipped-no-binding
     workItemClose: missing-observed-unverified
     verifier: failed-observed-unverified
-    status: partial-no-go
+    status: observed-unverified-no-go
     blocker: missing-public-artifact-authoring-contract-and-default-60-second-attempt-lease
   claude:
     recordedDate: 2026-08-22
     authorityStatus: legacy-unbound
     runIdHash: sha256:38f3bd9c80257c734aa601b11a4e3e1846eb5ffb5c83ec1cc950d8d31f8a0ef9
     runIdBasis: sanitized-legacy-record
+    hostInvocations: not-run-legacy-unbound
     version: 1.28929.0-desktop
     executable: gui-only
     authentication: not-run
@@ -57,6 +59,7 @@ clients:
     authorityStatus: legacy-unbound
     runIdHash: sha256:6e4a635f438aa1a9d19ddda1300c4e9aafaf8e87012e8f6252d3ddef34b8c614
     runIdBasis: sanitized-legacy-record
+    hostInvocations: not-run-legacy-unbound
     version: 2025.10.28-0a91dc2-agent
     executable: agent-cli
     authentication: inconsistent-observed-unverified

@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,51 +52,6 @@ async function run(executable, args, options = {}) {
   });
 }
 
-async function findClientExecutable(client) {
-  const names = client === "cursor" ? ["agent", "cursor-agent", "cursor"] : [client];
-  const directories = (process.env.PATH ?? "").split(path.delimiter).filter(path.isAbsolute);
-  for (const directory of directories) {
-    for (const name of names) {
-      const candidate = path.join(directory, name);
-      try {
-        await access(candidate, fsConstants.X_OK);
-        return { filename: await realpath(candidate), name };
-      } catch {}
-    }
-  }
-  return undefined;
-}
-
-async function probeClientVersion(client, runtime) {
-  const versionArgv = ["--version"];
-  const executable = await findClientExecutable(client);
-  if (executable === undefined) {
-    return { status: "unavailable", executableName: client, executableDigest: null, versionArgv, outputDigest: null, exitCode: null };
-  }
-  const executableDigest = await sha256File(executable.filename);
-  try {
-    const result = await run(executable.filename, versionArgv, { env: runtime.environment });
-    return {
-      status: "recorded",
-      executableName: executable.name,
-      executableDigest,
-      versionArgv,
-      outputDigest: sha256({ stdout: result.stdout, stderr: result.stderr }),
-      exitCode: 0,
-    };
-  } catch (error) {
-    const failure = error;
-    return {
-      status: "failed",
-      executableName: executable.name,
-      executableDigest,
-      versionArgv,
-      outputDigest: sha256({ stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" }),
-      exitCode: typeof failure.code === "number" ? failure.code : null,
-    };
-  }
-}
-
 async function git(runtime, root, ...args) {
   return run(runtime.gitExecutable, [
     "-c", "user.email=acceptance@example.invalid",
@@ -128,7 +82,7 @@ async function runWspec(root, environment, args) {
   return value.result;
 }
 
-async function prepareSmoke(input) {
+export async function prepareSmoke(input) {
   const root = input.directory === undefined
     ? await mkdtemp(path.join(os.tmpdir(), `wsspeckit-${input.client}-live-`))
     : path.resolve(input.directory);
@@ -144,8 +98,6 @@ async function prepareSmoke(input) {
     timestamp: new Date().toISOString(),
     environmentKeys: cleanEnvironmentKeys,
   });
-  const clientVersionProbe = await probeClientVersion(input.client, runtime);
-  recordInvocation("client.version", clientVersionProbe.exitCode);
   await git(runtime, root, "init", "--quiet");
   recordInvocation("git.init");
   await mkdir(path.join(root, "src"), { recursive: true });
@@ -244,7 +196,6 @@ async function prepareSmoke(input) {
     requirementDigest: await sha256File(path.join(root, "SMOKE_REQUIREMENT.md")),
     driver: driverRelativePath(input.client),
     driverDigest: await sha256File(path.join(root, driverRelativePath(input.client))),
-    clientVersionProbe,
     authorityIdentity: authority.identity,
     createdAt: authority.authority.createdAt,
   };
@@ -267,11 +218,13 @@ async function prepareSmoke(input) {
     baselineTree,
     driverDigest: metadata.driverDigest,
     authorityIdentity: metadata.authorityIdentity,
+    fixtureManifestDigest: sha256(`${JSON.stringify(metadata, null, 2)}\n`),
     createdAt: metadata.createdAt,
     updatedAt: new Date().toISOString(),
     workflowRef: started.workflowRef,
     wsspeckitCommit,
-    clientVersionProbe,
+    hostInvocationStatus: "not-run",
+    hostInvocations: [],
     invocations,
     verifier: null,
     artifactDigests: [],
@@ -302,10 +255,21 @@ async function prepareSmoke(input) {
 
 async function main() {
   const result = await prepareSmoke(parseArguments(process.argv.slice(2)));
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const publicResult = {
+    version: result.version,
+    client: result.client,
+    root: result.root,
+    workItemId: result.workItemId,
+    baselineCommit: result.baselineCommit,
+    driver: result.driver,
+    authorityStatus: "observer-only-unbound",
+  };
+  process.stdout.write(`${JSON.stringify(publicResult)}\n`);
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

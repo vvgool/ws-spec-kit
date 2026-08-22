@@ -11,11 +11,14 @@ import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const prepareScript = path.join(repositoryRoot, "scripts", "acceptance", "prepare-agent-smoke.mjs");
+const runScript = path.join(repositoryRoot, "scripts", "acceptance", "run-agent-smoke.mjs");
 const verifyScript = path.join(repositoryRoot, "scripts", "acceptance", "verify-agent-smoke.mjs");
 const matrixScript = path.join(repositoryRoot, "scripts", "acceptance", "render-agent-live-matrix.mjs");
 const tsxLoader = path.join(repositoryRoot, "node_modules", "tsx", "dist", "loader.mjs");
 process.env.WSSPECKIT_ACCEPTANCE_RUNTIME = "source";
+const prepareModule = "../../scripts/acceptance/prepare-agent-smoke.mjs";
 const verifierModule = "../../scripts/acceptance/verify-agent-smoke.mjs";
+const { prepareSmoke } = await import(prepareModule);
 const { checkedArtifact } = await import(verifierModule);
 
 interface PreparedSmoke {
@@ -29,6 +32,10 @@ interface PreparedSmoke {
   authorityIdentity: string;
 }
 
+interface PublicPreparedSmoke extends Omit<PreparedSmoke, "authorityFile" | "authorityIdentity"> {
+  authorityStatus: "observer-only-unbound";
+}
+
 interface VerificationSummary {
   ok: boolean;
   client: string;
@@ -39,11 +46,7 @@ interface VerificationSummary {
 async function prepare(client: PreparedSmoke["client"]): Promise<PreparedSmoke> {
   const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-live-test-"));
   const root = path.join(parent, "repository");
-  const { stdout } = await execFileAsync(process.execPath, [prepareScript, "--client", client, "--directory", root], {
-    cwd: repositoryRoot,
-    maxBuffer: 2 * 1024 * 1024,
-  });
-  return JSON.parse(stdout) as PreparedSmoke;
+  return prepareSmoke({ client, directory: root }) as Promise<PreparedSmoke>;
 }
 
 async function verify(root: string, client: PreparedSmoke["client"], authorityFile: string, authorityIdentity: string): Promise<{ code: number; summary: VerificationSummary }> {
@@ -114,13 +117,8 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.match(String(runManifest.authorityIdentity), /^sha256:[a-f0-9]{64}$/u);
   assert.equal(runManifest.client, "codex");
   assert.equal(runManifest.status, "prepared");
-  const clientVersionProbe = runManifest.clientVersionProbe as Record<string, unknown>;
-  assert.deepEqual(clientVersionProbe.versionArgv, ["--version"]);
-  assert.ok(["recorded", "unavailable", "failed"].includes(String(clientVersionProbe.status)));
-  if (clientVersionProbe.status === "recorded") {
-    assert.match(String(clientVersionProbe.executableDigest), /^sha256:[a-f0-9]{64}$/u);
-    assert.match(String(clientVersionProbe.outputDigest), /^sha256:[a-f0-9]{64}$/u);
-  }
+  assert.equal(runManifest.hostInvocationStatus, "not-run");
+  assert.deepEqual(runManifest.hostInvocations, []);
   assert.equal(JSON.stringify(runManifest).includes(prepared.root), false);
   assert.equal(JSON.stringify(runManifest).includes(prepared.workItemId), false);
 
@@ -129,14 +127,18 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.doesNotMatch(source, /formatLabelParts/u, "fixture 不得预置目标函数实现");
 });
 
-test("prepare 未指定目录时直接使用 mkdtemp 创建的隔离根目录", async () => {
+test("prepare CLI 未指定目录时创建隔离根目录但不输出 observer authority", async () => {
   const { stdout } = await execFileAsync(process.execPath, [prepareScript, "--client", "claude"], {
     cwd: repositoryRoot,
     maxBuffer: 2 * 1024 * 1024,
   });
-  const prepared = JSON.parse(stdout) as PreparedSmoke;
+  const prepared = JSON.parse(stdout) as PublicPreparedSmoke & Record<string, unknown>;
   try {
     assert.equal(prepared.client, "claude");
+    assert.equal(prepared.authorityStatus, "observer-only-unbound");
+    assert.equal(Object.hasOwn(prepared, "authorityFile"), false);
+    assert.equal(Object.hasOwn(prepared, "authorityIdentity"), false);
+    assert.doesNotMatch(stdout, /authorityFile|authorityIdentity|hmacKey|runNonce|wsspeckit-agent-authority/iu);
     await access(path.join(prepared.root, prepared.driver));
   } finally {
     await rm(prepared.root, { recursive: true, force: true });
@@ -156,6 +158,97 @@ test("prepare 拒绝复用已有目录且不修改其中内容", async () => {
   await assert.rejects(access(path.join(root, ".git")), /ENOENT/u);
 });
 
+test("observer 用显式 canonical executable 记录 auto、explicit、recovery 三阶段签名收据", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-observer-test-"));
+  const root = path.join(parent, "repository");
+  const executable = path.join(parent, "codex");
+  await writeFile(executable, [
+    "#!/usr/bin/env node",
+    "const text = process.argv.slice(2).join(' ');",
+    "const leaked = [...process.argv.slice(2), ...Object.entries(process.env).flat()].some((value) => /authority|hmacKey|wsspeckit-agent-authority/u.test(String(value)));",
+    "if (leaked) process.exit(41);",
+    "const session = text.includes('WSSPECKIT_SMOKE_AUTO') ? 'observer-auto-session' : 'observer-explicit-session';",
+    "console.log(JSON.stringify({ type: 'thread.started', thread_id: session }));",
+    "console.log(JSON.stringify({ type: 'turn.completed', status: 'completed' }));",
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o700 });
+  await chmod(executable, 0o700);
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    runScript,
+    "--client", "codex",
+    "--client-executable", executable,
+    "--directory", root,
+  ], { cwd: repositoryRoot, maxBuffer: 2 * 1024 * 1024 });
+  const observed = JSON.parse(stdout) as PreparedSmoke;
+  const runManifestText = await readFile(path.join(root, ".acceptance", "agent-smoke-run.json"), "utf8");
+  const runManifest = JSON.parse(runManifestText) as { hostInvocations: Array<Record<string, unknown>> };
+  assert.equal(runManifest.hostInvocations.length, 3);
+  assert.deepEqual(runManifest.hostInvocations.map(({ phase }) => phase), ["auto", "explicit", "recovery"]);
+  assert.equal(runManifestText.includes(executable), false);
+  assert.equal(runManifestText.includes("observer-explicit-session"), false);
+
+  const result = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
+  assert.equal(result.summary.checks.find(({ id }) => id === "host.invocations")?.ok, true);
+  await rm(path.join(root, ".acceptance", "agent-smoke-invocation-explicit-receipt.json"));
+  const missing = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
+  assert.equal(missing.summary.checks.find(({ id }) => id === "host.invocations")?.ok, false);
+  await rm(parent, { recursive: true, force: true });
+  await rm(observed.authorityFile, { force: true });
+});
+
+test("observer 禁止 PATH 解析和非 canonical executable 名称，拒绝前不创建 fixture", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-observer-path-"));
+  const fake = path.join(parent, "fake-codex");
+  const root = path.join(parent, "repository");
+  await writeFile(fake, "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o700 });
+  await chmod(fake, 0o700);
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    runScript, "--client", "codex", "--directory", root,
+  ], { cwd: repositoryRoot, env: { ...process.env, PATH: `${parent}${path.delimiter}${process.env.PATH ?? ""}` } }), /client-executable|显式绝对/u);
+  await assert.rejects(access(root), /ENOENT/u);
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    runScript, "--client", "codex", "--client-executable", fake, "--directory", root,
+  ], { cwd: repositoryRoot }), /canonical allowlist/u);
+  await assert.rejects(access(root), /ENOENT/u);
+  await rm(parent, { recursive: true, force: true });
+});
+
+test("observer 拒绝 group/world-writable canonical executable", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-observer-mode-"));
+  const executable = path.join(parent, "codex");
+  const root = path.join(parent, "repository");
+  await writeFile(executable, "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o722 });
+  await chmod(executable, 0o722);
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    runScript, "--client", "codex", "--client-executable", executable, "--directory", root,
+  ], { cwd: repositoryRoot }), /不可 group\/world-write/u);
+  await assert.rejects(access(root), /ENOENT/u);
+  await rm(parent, { recursive: true, force: true });
+});
+
+test("observer 检测 client executable 调用期间的 identity/digest 漂移", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-observer-drift-"));
+  const executable = path.join(parent, "codex");
+  const root = path.join(parent, "repository");
+  await writeFile(executable, [
+    "#!/bin/sh",
+    `printf '%s\\n' '#!/bin/sh' 'exit 0' > ${JSON.stringify(executable)}`,
+    "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"drift-session\"}'",
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o700 });
+  await chmod(executable, 0o700);
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    runScript, "--client", "codex", "--client-executable", executable, "--directory", root,
+  ], { cwd: repositoryRoot, maxBuffer: 2 * 1024 * 1024 }), /调用期间发生漂移/u);
+  await access(path.join(root, ".acceptance", "agent-smoke-run.json"));
+  await rm(parent, { recursive: true, force: true });
+});
+
 test("verifier 对尚无真实 acquire/submit、TDD、Review 和 Close 的 fixture fail closed", async () => {
   const prepared = await prepare("cursor");
   const result = await verify(prepared.root, "cursor", prepared.authorityFile, prepared.authorityIdentity);
@@ -164,7 +257,7 @@ test("verifier 对尚无真实 acquire/submit、TDD、Review 和 Close 的 fixtu
   assert.equal(result.summary.ok, false);
   assert.equal(result.summary.client, "cursor");
   const failed = result.summary.checks.filter(({ ok }) => !ok).map(({ id }) => id);
-  for (const id of ["protocol.acquire-submit", "artifact.compact-plan", "tdd.trusted-red-green", "workflow.review", "workflow.close"]) {
+  for (const id of ["host.invocations", "protocol.acquire-submit", "artifact.compact-plan", "tdd.trusted-red-green", "workflow.review", "workflow.close"]) {
     assert.ok(failed.includes(id), `${id} 必须失败`);
   }
   const runManifestText = await readFile(path.join(prepared.root, ".acceptance", "agent-smoke-run.json"), "utf8");
@@ -192,7 +285,7 @@ test("verifier 拒绝用另一个客户端标签复用 acceptance 状态", async
   assert.equal(result.summary.checks.find(({ id }) => id === "fixture.client")?.ok, false);
 });
 
-test("verifier 从 clean checkout 执行固定行为探针并拒绝空断言或跳过测试", async () => {
+test("verifier 从 clean checkout 执行 private challenges 和双 mutation 并拒绝硬编码、空断言或跳过测试", async () => {
   const prepared = await prepare("codex");
   const worktree = path.join(prepared.root, ".worktrees", prepared.workItemId);
   await writeFile(path.join(worktree, "src", "labels.ts"), [
@@ -215,6 +308,40 @@ test("verifier 从 clean checkout 执行固定行为探针并拒绝空断言或�
   const result = await verify(prepared.root, "codex", prepared.authorityFile, prepared.authorityIdentity);
   const diff = result.summary.checks.find(({ id }) => id === "smoke.behavior-probe");
   assert.equal(diff?.ok, true, diff?.detail);
+
+  await writeFile(path.join(worktree, "src", "labels.ts"), [
+    "export function normalizeLabel(value: string): string { return value.trim().toLowerCase(); }",
+    "export function formatLabelParts(): string { return 'ready / next step'; }",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(path.join(worktree, "tests", "labels.test.ts"), [
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    "import { formatLabelParts } from '../src/labels.ts';",
+    "test('formats the published example', () => { assert.equal(formatLabelParts(), 'ready / next step'); });",
+    "",
+  ].join("\n"), "utf8");
+  await git(worktree, "add", "src/labels.ts", "tests/labels.test.ts");
+  await git(worktree, "commit", "-m", "test: hardcode published smoke example");
+  const hardcoded = await verify(prepared.root, "codex", prepared.authorityFile, prepared.authorityIdentity);
+  assert.equal(hardcoded.summary.checks.find(({ id }) => id === "smoke.behavior-probe")?.ok, false);
+
+  await writeFile(path.join(worktree, "src", "labels.ts"), [
+    "export function normalizeLabel(value: string): string { return value.trim().toLowerCase(); }",
+    "export function formatLabelParts(parts: readonly string[]): string { return parts.map(normalizeLabel).filter(Boolean).join(' / '); }",
+    "",
+  ].join("\n"), "utf8");
+  await writeFile(path.join(worktree, "tests", "labels.test.ts"), [
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    "import { formatLabelParts } from '../src/labels.ts';",
+    "test('formats label parts', () => {",
+    "  assert.equal(formatLabelParts(['  READY  ', '', ' Next Step ']), 'ready / next step');",
+    "});",
+    "",
+  ].join("\n"), "utf8");
+  await git(worktree, "add", "src/labels.ts", "tests/labels.test.ts");
+  await git(worktree, "commit", "-m", "test: restore complete smoke behavior");
 
   await writeFile(path.join(worktree, "tests", "labels.test.ts"), [
     "import test from 'node:test';",
@@ -301,9 +428,9 @@ test("prepare 子进程环境不继承 injected secrets，run manifest 只保留
     },
     maxBuffer: 2 * 1024 * 1024,
   });
-  const prepared = JSON.parse(stdout) as PreparedSmoke;
+  const prepared = JSON.parse(stdout) as PublicPreparedSmoke;
   const commonDirectory = (await execFileAsync("git", ["rev-parse", "--git-common-dir"], { cwd: root })).stdout.trim();
-  const persistedFiles = [...await filesUnder(root), ...await filesUnder(path.resolve(root, commonDirectory)), prepared.authorityFile];
+  const persistedFiles = [...await filesUnder(root), ...await filesUnder(path.resolve(root, commonDirectory))];
   for (const filename of new Set(persistedFiles)) assert.doesNotMatch(await readFile(filename, "utf8").catch(() => ""), new RegExp(secret, "u"), filename);
 
   const runManifest = JSON.parse(await readFile(path.join(root, ".acceptance", "agent-smoke-run.json"), "utf8")) as {
@@ -322,6 +449,8 @@ test("历史 live matrix 由 legacy-unbound manifest 生成且不把观察写成
     assert.equal(history.clients[client]?.authorityStatus, "legacy-unbound");
     assert.match(String(history.clients[client]?.runIdHash), /^sha256:[a-f0-9]{64}$/u);
     assert.match(String(history.clients[client]?.status), /no-go$/u);
+    assert.doesNotMatch(String(history.clients[client]?.status), /partial|pass/iu);
+    assert.equal((history.clients[client]?.hostInvocationEvidence as Record<string, unknown>)?.status, "not-run-legacy-unbound");
     assert.doesNotMatch(JSON.stringify(history.clients[client]), /"pass"/u);
   }
 });

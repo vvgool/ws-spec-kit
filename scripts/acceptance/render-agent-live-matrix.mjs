@@ -56,6 +56,12 @@ function validateHistory(value) {
     }
     if (!text(client.status, `${name}.status`).endsWith("no-go")) throw new Error(`${name}.status 必须保持 NO-GO`);
     if (JSON.stringify(client).includes('"pass"')) throw new Error(`${name} 不能把 legacy observation 标记为 PASS`);
+    const hostEvidence = record(client.hostInvocationEvidence, `${name}.hostInvocationEvidence`);
+    const phases = Array.isArray(hostEvidence.phases) ? hostEvidence.phases : undefined;
+    if (hostEvidence.status !== "not-run-legacy-unbound" || hostEvidence.receiptCount !== 0 || phases?.length !== 0
+      || /partial|pass/iu.test(client.status)) {
+      throw new Error(`${name} 缺少 observer receipts 时只能是 not-run/observed-unverified NO-GO`);
+    }
     const observations = record(client.observations, `${name}.observations`);
     for (const observation of observationNames) text(observations[observation], `${name}.observations.${observation}`);
   }
@@ -69,6 +75,7 @@ function renderClient(value) {
     authorityStatus: value.authorityStatus,
     runIdHash: value.runIdHash,
     runIdBasis: value.runIdBasis,
+    hostInvocations: value.hostInvocationEvidence.status,
     version: value.version,
     executable: value.executable,
     ...Object.fromEntries(observationNames.map((name) => [name, observations[name]])),

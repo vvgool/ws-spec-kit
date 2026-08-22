@@ -21,5 +21,18 @@ API key，也没有继续登录流程。
 `acquire=0`、`submit=0`，compact plan、trusted Red/Green、Review、预期 diff 与 Close 均不存在。
 
 创建本地空 chat ID 的命令可运行，但这不证明已认证模型执行或 Skill 可见，不能计为部分通过。后续必须先让
-真实 headless 调用与 `status` 使用同一有效认证，再重跑本验收。新 verifier 必须同时提供
-`--authority <file>` 和 `--authority-identity <sha256>`；旧 fixture 缺少签名 receipt 时会 fail closed。
+真实 headless 调用与 `status` 使用同一有效认证，再通过 observer 重跑本验收：
+
+```bash
+node scripts/acceptance/run-agent-smoke.mjs \
+  --client cursor --client-executable /absolute/path/to/agent \
+  --directory /absolute/path/to/new-fixture
+```
+
+直接运行 `prepare-agent-smoke.mjs` 只返回 `observer-only-unbound` 的公开 fixture 信息；runner 仅在三个 Host
+child 全部退出后向 observer 调用方返回 authority path/identity。新 verifier 必须同时提供
+`--authority <file>` 和 `--authority-identity <sha256>`，并核对 observer-signed auto/explicit/recovery
+invocation receipts；旧 fixture 缺少签名 receipt 时会 fail closed。
+
+信任边界是 observer process、Host child 的 clean argv/env 和仓库外 mode `0600` authority；不声称抵抗同一
+UID 的主机级扫描、进程附加或文件改写。更强保证需要独立 OS 用户、隔离执行环境或外部 signer。

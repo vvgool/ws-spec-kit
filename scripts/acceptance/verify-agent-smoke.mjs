@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -26,6 +27,12 @@ const [{ loadApplicationState }, { computeArtifactContentHash, readArtifact }, {
 
 const execFileAsync = promisify(execFile);
 const clients = new Set(["codex", "claude", "cursor"]);
+const hostPhases = ["auto", "explicit", "recovery"];
+const hostExecutableNames = {
+  codex: new Set(["codex"]),
+  claude: new Set(["claude"]),
+  cursor: new Set(["agent", "cursor-agent"]),
+};
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const tsxLoader = path.join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
 
@@ -112,6 +119,35 @@ async function runResult(executable, args, options) {
   }
 }
 
+async function runBehaviorChallenges(checkout, runtime) {
+  const token = randomBytes(12).toString("hex");
+  const cases = [
+    [],
+    ["", "   ", "\t\n"],
+    [`  READY-${token.toUpperCase()}  `, "", ` Next-${token.slice(0, 8)} `],
+    [` Alpha-${token.slice(0, 4)} `, ` BETA-${token.slice(4, 8)} `, `gamma-${token.slice(8, 12)}`, ` DELTA-${token.slice(12, 16)} `],
+    [`  Café-${token.slice(0, 6)}!  `, `你好，${token.slice(6, 12)}。`, ` déjà-vu-${token.slice(12, 18)}? `],
+  ];
+  const probe = [
+    `import { formatLabelParts } from ${JSON.stringify(pathToFileURL(path.join(checkout, "src", "labels.ts")).href)};`,
+    `const cases = ${JSON.stringify(cases)};`,
+    "const oracle = (parts) => parts.map((value) => value.trim().toLowerCase()).filter(Boolean).join(' / ');",
+    "if (typeof formatLabelParts !== 'function') process.exit(21);",
+    "for (const parts of cases) {",
+    "  const before = JSON.stringify(parts);",
+    "  const expected = oracle(parts);",
+    "  for (let repeat = 0; repeat < 3; repeat += 1) {",
+    "    if (formatLabelParts(parts) !== expected) process.exit(23);",
+    "    if (JSON.stringify(parts) !== before) process.exit(24);",
+    "  }",
+    "}",
+  ].join("\n");
+  return runResult(process.execPath, ["--import", tsxLoader, "--input-type=module", "--eval", probe], {
+    cwd: checkout,
+    env: runtime.environment,
+  });
+}
+
 async function behaviorProbe(state, runtime) {
   const status = await git(runtime, state.worktree, "status", "--porcelain=v1", "--untracked-files=all", "--", "src/labels.ts", "tests/labels.test.ts");
   if (status.stdout.trim() !== "") throw new Error("目标产品与测试文件必须提交后再验证");
@@ -119,26 +155,30 @@ async function behaviorProbe(state, runtime) {
   const checkout = path.join(temporary, "checkout");
   try {
     await git(runtime, inputSafeCwd(state.worktree), "clone", "--quiet", "--no-local", "--no-hardlinks", state.worktree, checkout);
-    const probe = [
-      `import { formatLabelParts } from ${JSON.stringify(pathToFileURL(path.join(checkout, "src", "labels.ts")).href)};`,
-      "const actual = formatLabelParts(['  READY  ', '', ' Next Step ']);",
-      "if (actual !== 'ready / next step') process.exit(23);",
-    ].join("\n");
-    const exported = await runResult(process.execPath, ["--import", tsxLoader, "--input-type=module", "--eval", probe], {
-      cwd: checkout,
-      env: runtime.environment,
-    });
-    if (exported.code !== 0) throw new Error("formatLabelParts 固定输入输出不匹配");
+    const exported = await runBehaviorChallenges(checkout, runtime);
+    if (exported.code !== 0) throw new Error("formatLabelParts 未通过 verifier-private runtime challenges");
     const originalTests = await runResult(process.execPath, ["--import", tsxLoader, "--test", "tests/labels.test.ts"], { cwd: checkout, env: runtime.environment });
     if (originalTests.code !== 0) throw new Error("目标测试未通过");
-    await writeFile(path.join(checkout, "src", "labels.ts"), [
-      "export function normalizeLabel(value: string): string { return value.trim().toLowerCase(); }",
-      "export function formatLabelParts(): string { return '__WSSPEC_VERIFIER_MUTANT__'; }",
-      "",
-    ].join("\n"), "utf8");
-    const mutant = await runResult(process.execPath, ["--import", tsxLoader, "--test", "tests/labels.test.ts"], { cwd: checkout, env: runtime.environment });
-    if (mutant.code === 0) throw new Error("目标测试未捕获 verifier-owned mutant");
-    return "固定行为与 mutation probe 通过";
+    const mutants = [
+      [
+        "export function normalizeLabel(value: string): string { return value.trim().toLowerCase(); }",
+        "export function formatLabelParts(): string { return '__WSSPEC_VERIFIER_CONSTANT_MUTANT__'; }",
+        "",
+      ].join("\n"),
+      [
+        "export function normalizeLabel(value: string): string { return value.toLowerCase(); }",
+        "export function formatLabelParts(parts: readonly string[]): string { return parts.map(normalizeLabel).join(' / '); }",
+        "",
+      ].join("\n"),
+    ];
+    for (const [index, mutantSource] of mutants.entries()) {
+      await writeFile(path.join(checkout, "src", "labels.ts"), mutantSource, "utf8");
+      const mutantBehavior = await runBehaviorChallenges(checkout, runtime);
+      if (mutantBehavior.code === 0) throw new Error(`行为 oracle 未捕获 verifier-owned mutant ${index + 1}`);
+      const mutantTest = await runResult(process.execPath, ["--import", tsxLoader, "--test", "tests/labels.test.ts"], { cwd: checkout, env: runtime.environment });
+      if (mutantTest.code === 0) throw new Error(`目标测试未捕获 verifier-owned mutant ${index + 1}`);
+    }
+    return "private multi-challenge 与双 mutation probe 通过";
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -146,6 +186,63 @@ async function behaviorProbe(state, runtime) {
 
 function inputSafeCwd(worktree) {
   return path.dirname(worktree);
+}
+
+async function checkedHostInvocations(input, metadata, runManifest) {
+  if (runManifest.hostInvocationStatus !== "recorded" || !Array.isArray(runManifest.hostInvocations)
+    || runManifest.hostInvocations.length !== hostPhases.length) {
+    throw new Error("缺少 observer-signed auto/explicit/recovery invocation receipts");
+  }
+  const invocations = [];
+  for (const [index, phase] of hostPhases.entries()) {
+    const reference = record(runManifest.hostInvocations[index]);
+    const expectedManifest = `.acceptance/agent-smoke-invocation-${phase}.json`;
+    const expectedReceipt = `.acceptance/agent-smoke-invocation-${phase}-receipt.json`;
+    if (reference?.phase !== phase || reference.manifest !== expectedManifest || reference.receipt !== expectedReceipt) {
+      throw new Error(`${phase} invocation reference 无效`);
+    }
+    const signed = await readSignedJson(
+      path.join(input.repo, expectedManifest),
+      path.join(input.repo, expectedReceipt),
+      `wsspeckit-agent-smoke-invocation-${phase}-receipt`,
+      input.authority,
+      input.authorityIdentity,
+    );
+    if (reference.manifestDigest !== signed.manifestDigest || reference.receiptDigest !== sha256(signed.receipt)) {
+      throw new Error(`${phase} invocation receipt digest 不匹配`);
+    }
+    const invocation = record(signed.value);
+    const summary = record(invocation?.stdoutEventSummary);
+    const typeCounts = record(summary?.typeCounts);
+    const started = Date.parse(invocation?.startedAt ?? "");
+    const ended = Date.parse(invocation?.endedAt ?? "");
+    const fieldsValid = invocation?.version === 1 && invocation.kind === "wsspeckit-agent-smoke-invocation"
+      && invocation.phase === phase && invocation.client === input.client && invocation.client === metadata.client
+      && invocation.runIdHash === metadata.runIdHash && invocation.workItemIdHash === sha256(metadata.workItemId)
+      && invocation.fixtureManifestDigest === runManifest.fixtureManifestDigest
+      && invocation.authorityIdentity === input.authorityIdentity
+      && hostExecutableNames[input.client].has(invocation.executableName)
+      && typeof invocation.executableDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.executableDigest)
+      && typeof invocation.executableIdentity === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.executableIdentity)
+      && Number.isFinite(started) && Number.isFinite(ended) && ended >= started && invocation.exitCode === 0
+      && typeof invocation.sessionIdHash === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.sessionIdHash)
+      && typeof invocation.argvTemplateHash === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.argvTemplateHash)
+      && typeof invocation.stdoutDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.stdoutDigest)
+      && typeof invocation.stderrDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(invocation.stderrDigest)
+      && Number.isInteger(summary?.parsedJsonCount) && summary.parsedJsonCount > 0 && typeCounts !== undefined
+      && Array.isArray(invocation.environmentKeys) && JSON.stringify(invocation.environmentKeys) === JSON.stringify(cleanEnvironmentKeys);
+    if (!fieldsValid) throw new Error(`${phase} invocation 字段或 executable binding 无效`);
+    invocations.push(invocation);
+  }
+  const [automatic, explicit, recovery] = invocations;
+  if (automatic.resumedFromSessionIdHash !== null || explicit.resumedFromSessionIdHash !== null
+    || automatic.sessionIdHash === explicit.sessionIdHash
+    || recovery.resumedFromSessionIdHash !== explicit.sessionIdHash || recovery.sessionIdHash !== explicit.sessionIdHash) {
+    throw new Error("observer session/resume chain 无效");
+  }
+  const executableBindings = new Set(invocations.map(({ executableDigest, executableIdentity }) => `${executableDigest}:${executableIdentity}`));
+  if (executableBindings.size !== 1) throw new Error("三阶段 client executable binding 不一致");
+  return `observer-signed ${hostPhases.join("/")} session chain`;
 }
 
 async function verifySmoke(input) {
@@ -196,15 +293,14 @@ async function verifySmoke(input) {
     && runManifest.driverDigest === metadata.driverDigest
     && runManifest.authorityIdentity === input.authorityIdentity
     && runManifest.workflowRef === metadata.workflowRef
-    && runManifest.wsspeckitCommit === metadata.wsspeckitCommit;
+    && runManifest.wsspeckitCommit === metadata.wsspeckitCommit
+    && typeof runManifest.fixtureManifestDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(runManifest.fixtureManifestDigest);
   check("run.binding", runBindingValid, "run manifest 必须绑定 signed fixture、Work Item hash 与 seed baseline");
-  const clientVersionProbe = record(runManifest.clientVersionProbe);
-  const clientProbeValid = clientVersionProbe?.status === "recorded"
-    && typeof clientVersionProbe.executableDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(clientVersionProbe.executableDigest)
-    && Array.isArray(clientVersionProbe.versionArgv) && clientVersionProbe.versionArgv.length > 0
-    && typeof clientVersionProbe.outputDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(clientVersionProbe.outputDigest)
-    && clientVersionProbe.exitCode === 0;
-  check("client.runtime-probe", clientProbeValid, clientProbeValid ? "客户端 binary/version argv 已脱敏记录" : "缺少成功的客户端 binary/version probe");
+  try {
+    check("host.invocations", true, await checkedHostInvocations(input, metadata, runManifest));
+  } catch (error) {
+    check("host.invocations", false, error instanceof Error ? error.message : "Host invocation receipts 无效");
+  }
 
   let state;
   let events = [];

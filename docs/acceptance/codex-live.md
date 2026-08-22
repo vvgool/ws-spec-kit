@@ -2,7 +2,7 @@
 
 ## 结论
 
-状态：**历史观察 PARTIAL / NO-GO；证据 authority 为 `legacy-unbound`**。
+状态：**历史观察 `observed-unverified / NO-GO`；证据 authority 为 `legacy-unbound`**。
 
 本页记录发生在外部 authority、签名 fixture receipt 和签名 run manifest 引入之前，无法事后补签或证明原始
 客户端身份。因此下述正向结果只保留为 `observed-unverified`，不是发布 PASS，也不能用于推进真实 Host GO。
@@ -17,8 +17,8 @@
 
 第一次全新会话只描述隔离仓库内的 Smoke 目标，没有点名 Driver。Host 读取项目级 Skill 后执行
 `inspect -> acquire -> submit`：`intake` 最终提交成功，并返回 `explore` Work Package。CLI 没有提供独立的
-Skill-trigger telemetry，因此自动触发只能由真实行为链佐证，记为 `partial`，不扩大为可审计的自动发现
-PASS。
+Skill-trigger telemetry，也没有 observer-signed auto/explicit/recovery invocation receipts；因此这条只能保留
+为 `observed-unverified`，不能标为 partial 或可审计的自动发现 PASS。
 
 第二次全新会话显式调用 `wsspeckit-driver`，使用新 actor 执行 `inspect -> acquire`，取得同一 Work Item 的
 `explore` Work Package 后按要求在 submit 前停止。显式调用与 fresh-session recovery 均为未认证历史观察。
@@ -40,14 +40,28 @@ Issue Close 按合同跳过。以下必需项未达到：compact plan、同一 `
 预期代码与测试 diff、Work Item Close。原运行没有可回读的 event/verifier digest，manifest 中明确记录为
 `null`，不做推测。
 
-新流程必须使用 `prepare` 返回、保存在仓库外且 mode 为 `0600` 的 authority；verifier 缺少任一 authority
-参数都会 fail closed：
+新流程必须由 `run-agent-smoke.mjs` observer 持有仓库外 mode `0600` 的 authority，并用显式 canonical
+`--client-executable` 启动 auto、explicit、recovery 三阶段。Host child 的 argv/env 不包含 authority path/key；
+直接运行 `prepare-agent-smoke.mjs` 只返回 `observer-only-unbound` 的公开 fixture 信息，不返回 authority。完整入口为：
+
+```bash
+node scripts/acceptance/run-agent-smoke.mjs \
+  --client codex --client-executable /absolute/path/to/codex \
+  --directory /absolute/path/to/new-fixture
+```
+
+runner 仅在三个 Host child 全部退出后，才向 observer 调用方返回 verifier 所需的 authority path/identity。
+verifier 缺少任一 authority 参数或任一阶段 signed receipt 都会 fail closed：
 
 ```bash
 node scripts/acceptance/verify-agent-smoke.mjs \
   --client codex --repo <fixture-repo> \
   --authority <authority-file> --authority-identity <sha256>
 ```
+
+此边界防止 authority 经 observer 启动的 Host child argv/env 泄露，并以仓库外 `0600` 文件约束普通读取；它不
+声称能够抵抗同一 UID 下可扫描临时目录、附加进程或改写 observer 文件的主机级攻击。更强保证需要独立 OS
+用户、隔离执行环境或外部 signer。
 
 因此本轮只留下真实 Codex 项目 Skill 行为、显式调用、协议入口与跨会话恢复的未认证历史观察；不证明完整
 交付闭环，保持 NO-GO。只有重新运行新 authority 流程并通过签名 verifier 才能产生可发布 PASS。
