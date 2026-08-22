@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
-import { readFile, realpath } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
+
+import {
+  cleanEnvironment,
+  cleanEnvironmentKeys,
+  readSignedJson,
+  sha256,
+  sha256File,
+  writeSignedJson,
+} from "./lib/evidence.mjs";
 
 const runtimeDirectory = process.env.WSSPECKIT_ACCEPTANCE_RUNTIME === "source" ? "../../src" : "../../dist";
 const [{ loadApplicationState }, { computeArtifactContentHash, readArtifact }, { parseTddCycleEvidence, parseTrustedEvidence }, { readEvents }] = await Promise.all([
@@ -17,22 +26,30 @@ const [{ loadApplicationState }, { computeArtifactContentHash, readArtifact }, {
 
 const execFileAsync = promisify(execFile);
 const clients = new Set(["codex", "claude", "cursor"]);
+const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const tsxLoader = path.join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
 
 function parseArguments(argv) {
   const values = {};
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
-    if (!["--client", "--repo"].includes(name) || value === undefined || value.startsWith("--")) {
-      throw new Error("用法：verify-agent-smoke.mjs --client <codex|claude|cursor> --repo <目录>");
+    if (!["--client", "--repo", "--authority", "--authority-identity"].includes(name) || value === undefined || value.startsWith("--")) {
+      throw new Error("用法：verify-agent-smoke.mjs --client <codex|claude|cursor> --repo <目录> --authority <文件> --authority-identity <sha256>");
     }
     if (values[name] !== undefined) throw new Error(`重复参数：${name}`);
     values[name] = value;
   }
-  if (!clients.has(values["--client"]) || values["--repo"] === undefined) {
-    throw new Error("必须提供有效的 --client 和 --repo");
+  if (!clients.has(values["--client"]) || values["--repo"] === undefined || values["--authority"] === undefined
+    || !/^sha256:[a-f0-9]{64}$/u.test(values["--authority-identity"] ?? "")) {
+    throw new Error("必须提供有效的 --client、--repo、--authority 和 --authority-identity");
   }
-  return { client: values["--client"], repo: path.resolve(values["--repo"]) };
+  return {
+    client: values["--client"],
+    repo: path.resolve(values["--repo"]),
+    authority: path.resolve(values["--authority"]),
+    authorityIdentity: values["--authority-identity"],
+  };
 }
 
 function record(value) {
@@ -76,20 +93,118 @@ export async function checkedArtifact(worktree, reference) {
   return artifact;
 }
 
-async function git(repo, ...args) {
-  return execFileAsync("git", args, { cwd: repo, maxBuffer: 2 * 1024 * 1024 });
+async function git(runtime, repo, ...args) {
+  return execFileAsync(runtime.gitExecutable, [
+    "-c", "commit.gpgsign=false",
+    "-c", "tag.gpgsign=false",
+    "-c", "core.hooksPath=/dev/null",
+    ...args,
+  ], { cwd: repo, env: runtime.environment, maxBuffer: 2 * 1024 * 1024 });
+}
+
+async function runResult(executable, args, options) {
+  try {
+    const result = await execFileAsync(executable, args, { ...options, maxBuffer: 2 * 1024 * 1024 });
+    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    const failure = error;
+    return { code: typeof failure?.code === "number" ? failure.code : 1, stdout: failure?.stdout ?? "", stderr: failure?.stderr ?? "" };
+  }
+}
+
+async function behaviorProbe(state, runtime) {
+  const status = await git(runtime, state.worktree, "status", "--porcelain=v1", "--untracked-files=all", "--", "src/labels.ts", "tests/labels.test.ts");
+  if (status.stdout.trim() !== "") throw new Error("目标产品与测试文件必须提交后再验证");
+  const temporary = await mkdtemp(path.join(runtime.environment.TMPDIR, "behavior-probe-"));
+  const checkout = path.join(temporary, "checkout");
+  try {
+    await git(runtime, inputSafeCwd(state.worktree), "clone", "--quiet", "--no-local", "--no-hardlinks", state.worktree, checkout);
+    const probe = [
+      `import { formatLabelParts } from ${JSON.stringify(pathToFileURL(path.join(checkout, "src", "labels.ts")).href)};`,
+      "const actual = formatLabelParts(['  READY  ', '', ' Next Step ']);",
+      "if (actual !== 'ready / next step') process.exit(23);",
+    ].join("\n");
+    const exported = await runResult(process.execPath, ["--import", tsxLoader, "--input-type=module", "--eval", probe], {
+      cwd: checkout,
+      env: runtime.environment,
+    });
+    if (exported.code !== 0) throw new Error("formatLabelParts 固定输入输出不匹配");
+    const originalTests = await runResult(process.execPath, ["--import", tsxLoader, "--test", "tests/labels.test.ts"], { cwd: checkout, env: runtime.environment });
+    if (originalTests.code !== 0) throw new Error("目标测试未通过");
+    await writeFile(path.join(checkout, "src", "labels.ts"), [
+      "export function normalizeLabel(value: string): string { return value.trim().toLowerCase(); }",
+      "export function formatLabelParts(): string { return '__WSSPEC_VERIFIER_MUTANT__'; }",
+      "",
+    ].join("\n"), "utf8");
+    const mutant = await runResult(process.execPath, ["--import", tsxLoader, "--test", "tests/labels.test.ts"], { cwd: checkout, env: runtime.environment });
+    if (mutant.code === 0) throw new Error("目标测试未捕获 verifier-owned mutant");
+    return "固定行为与 mutation probe 通过";
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+function inputSafeCwd(worktree) {
+  return path.dirname(worktree);
 }
 
 async function verifySmoke(input) {
-  let metadata = {};
-  try {
-    metadata = JSON.parse(await readFile(path.join(input.repo, ".acceptance", "agent-smoke.json"), "utf8"));
-  } catch {}
-  const workItemId = typeof metadata.workItemId === "string" ? metadata.workItemId : "unknown";
+  const runtime = await cleanEnvironment(input.repo);
   const checks = [];
   const check = (id, ok, detail) => checks.push({ id, ok, detail });
+  let metadata;
+  let authority;
+  let runManifest;
+  try {
+    const fixture = await readSignedJson(
+      path.join(input.repo, ".acceptance", "agent-smoke.json"),
+      path.join(input.repo, ".acceptance", "agent-smoke-receipt.json"),
+      "wsspeckit-agent-smoke-fixture-receipt",
+      input.authority,
+      input.authorityIdentity,
+    );
+    const run = await readSignedJson(
+      path.join(input.repo, ".acceptance", "agent-smoke-run.json"),
+      path.join(input.repo, ".acceptance", "agent-smoke-run-receipt.json"),
+      "wsspeckit-agent-smoke-run-receipt",
+      input.authority,
+      input.authorityIdentity,
+    );
+    metadata = fixture.value;
+    authority = fixture.authority;
+    runManifest = run.value;
+    check("fixture.authority", true, fixture.manifestDigest);
+    check("run.manifest", true, run.manifestDigest);
+  } catch (error) {
+    check("fixture.authority", false, error instanceof Error ? error.message : "authority 不可验证");
+    return { version: 1, ok: false, client: input.client, workItemId: "unknown", checks };
+  }
+  const workItemId = typeof metadata.workItemId === "string" ? metadata.workItemId : "unknown";
   check("fixture.client", metadata.kind === "wsspeckit-agent-smoke" && metadata.client === input.client, metadata.client === input.client ? "匹配" : "客户端不匹配");
-  check("fixture.workflow", metadata.workflowRef === "builtin://workflows/feature-delivery" && metadata.profile === "quick", "必须是内置 Quick 功能 Workflow");
+  let requirementValid = false;
+  try {
+    requirementValid = await sha256File(path.join(input.repo, "SMOKE_REQUIREMENT.md")) === metadata.requirementDigest;
+  } catch {}
+  check("fixture.requirement", requirementValid, "固定 Smoke requirement 必须匹配 signed digest");
+  const runBindingValid = runManifest.kind === "wsspeckit-agent-smoke-run"
+    && runManifest.client === metadata.client
+    && runManifest.runIdHash === metadata.runIdHash
+    && runManifest.workItemIdHash === sha256(metadata.workItemId)
+    && runManifest.requirementDigest === metadata.requirementDigest
+    && runManifest.baselineCommit === metadata.baselineCommit
+    && runManifest.baselineTree === metadata.baselineTree
+    && runManifest.driverDigest === metadata.driverDigest
+    && runManifest.authorityIdentity === input.authorityIdentity
+    && runManifest.workflowRef === metadata.workflowRef
+    && runManifest.wsspeckitCommit === metadata.wsspeckitCommit;
+  check("run.binding", runBindingValid, "run manifest 必须绑定 signed fixture、Work Item hash 与 seed baseline");
+  const clientVersionProbe = record(runManifest.clientVersionProbe);
+  const clientProbeValid = clientVersionProbe?.status === "recorded"
+    && typeof clientVersionProbe.executableDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(clientVersionProbe.executableDigest)
+    && Array.isArray(clientVersionProbe.versionArgv) && clientVersionProbe.versionArgv.length > 0
+    && typeof clientVersionProbe.outputDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(clientVersionProbe.outputDigest)
+    && clientVersionProbe.exitCode === 0;
+  check("client.runtime-probe", clientProbeValid, clientProbeValid ? "客户端 binary/version argv 已脱敏记录" : "缺少成功的客户端 binary/version probe");
 
   let state;
   let events = [];
@@ -102,6 +217,35 @@ async function verifySmoke(input) {
   }
 
   if (state !== undefined) {
+    check(
+      "fixture.workflow",
+      metadata.workflowRef === "builtin://workflows/feature-delivery" && metadata.profile === "quick"
+        && state.snapshot.workflowRef === metadata.workflowRef && state.snapshot.selectedProfile === metadata.profile,
+      "signed fixture 与 Application snapshot 必须绑定内置 Quick 功能 Workflow",
+    );
+    check(
+      "fixture.provider",
+      state.snapshot.skillResolution.provider === metadata.client && state.snapshot.skillResolution.provider === input.client,
+      `snapshotProvider=${state.snapshot.skillResolution.provider}`,
+    );
+    let baselineValid = false;
+    try {
+      const tree = (await git(runtime, input.repo, "rev-parse", `${metadata.baselineCommit}^{tree}`)).stdout.trim();
+      await git(runtime, state.worktree, "merge-base", "--is-ancestor", metadata.baselineCommit, "HEAD");
+      baselineValid = tree === metadata.baselineTree;
+    } catch {}
+    check("fixture.baseline", baselineValid, "baseline commit/tree 必须存在且为 Work Item HEAD ancestor");
+    let driverValid = false;
+    try {
+      driverValid = await sha256File(path.join(input.repo, metadata.driver)) === metadata.driverDigest;
+    } catch {}
+    check("fixture.driver", driverValid, "Driver 安装目标必须匹配 signed digest");
+    let wsspeckitValid = false;
+    try {
+      wsspeckitValid = (await git(runtime, sourceRoot, "rev-parse", "HEAD")).stdout.trim() === metadata.wsspeckitCommit;
+    } catch {}
+    check("fixture.wsspeckit", wsspeckitValid, "verifier checkout 必须匹配 signed WSSpecKit commit");
+
     const acquired = events.filter(({ eventType }) => eventType === "attempt.acquired").length;
     const submitted = events.filter(({ eventType }) => eventType === "attempt.submitted").length;
     check("protocol.acquire-submit", acquired >= 1 && submitted >= 1, `acquire=${acquired}, submit=${submitted}`);
@@ -168,19 +312,60 @@ async function verifySmoke(input) {
     let changed = [];
     let diffClean = false;
     try {
-      changed = (await git(state.worktree, "diff", "--name-only", `${metadata.baselineCommit}..HEAD`, "--")).stdout.trim().split("\n").filter(Boolean);
-      const uncommitted = (await git(state.worktree, "diff", "--name-only", metadata.baselineCommit, "--")).stdout.trim().split("\n").filter(Boolean);
+      changed = (await git(runtime, state.worktree, "diff", "--name-only", `${metadata.baselineCommit}..HEAD`, "--")).stdout.trim().split("\n").filter(Boolean);
+      const uncommitted = (await git(runtime, state.worktree, "diff", "--name-only", metadata.baselineCommit, "--")).stdout.trim().split("\n").filter(Boolean);
       changed = [...new Set([...changed, ...uncommitted])];
-      await git(state.worktree, "diff", "--check", metadata.baselineCommit, "--");
+      await git(runtime, state.worktree, "diff", "--check", metadata.baselineCommit, "--");
       diffClean = true;
     } catch {}
     check("git.expected-diff", diffClean && changed.includes("src/labels.ts") && changed.includes("tests/labels.test.ts"), `changed=${changed.sort().join(",")}`);
+    try {
+      check("smoke.behavior-probe", true, await behaviorProbe(state, runtime));
+    } catch (error) {
+      check("smoke.behavior-probe", false, error instanceof Error ? error.message : "行为探针失败");
+    }
   } else {
-    for (const id of ["protocol.acquire-submit", "artifact.compact-plan", "tdd.trusted-red-green", "workflow.review", "workflow.external-close", "workflow.close", "git.expected-diff"]) {
+    for (const id of ["fixture.workflow", "fixture.provider", "fixture.baseline", "fixture.driver", "fixture.wsspeckit", "protocol.acquire-submit", "artifact.compact-plan", "tdd.trusted-red-green", "workflow.review", "workflow.external-close", "workflow.close", "git.expected-diff", "smoke.behavior-probe"]) {
       check(id, false, "控制面不可验证");
     }
   }
-  return { version: 1, ok: checks.every(({ ok }) => ok), client: input.client, workItemId, checks };
+  const summary = { version: 1, ok: checks.every(({ ok }) => ok), client: input.client, workItemId, checks };
+  const references = state === undefined ? [] : artifactReferences(state.projection);
+  const evidence = state === undefined ? [] : Object.values(state.projection.evidence);
+  const failed = checks.filter(({ ok }) => !ok).map(({ id }) => id);
+  const updatedRunManifest = {
+    ...runManifest,
+    updatedAt: new Date().toISOString(),
+    invocations: [...runManifest.invocations, {
+      sequence: runManifest.invocations.length + 1,
+      operation: "verifier",
+      exitCode: summary.ok ? 0 : 1,
+      timestamp: new Date().toISOString(),
+      environmentKeys: cleanEnvironmentKeys,
+    }],
+    verifier: Object.fromEntries(checks.map(({ id, ok }) => [id, ok])),
+    verifierDigest: sha256(checks),
+    eventDigest: sha256(events),
+    eventReferences: events.map(({ sequence, eventType, eventId, eventHash }) => ({
+      sequence,
+      eventType,
+      eventIdHash: sha256(eventId),
+      eventHash,
+    })),
+    artifactDigests: references.map(({ contentHash }) => contentHash).filter((value) => typeof value === "string").sort(),
+    evidenceDigests: evidence.map((value) => sha256(value)).sort(),
+    status: summary.ok ? "pass" : "no-go",
+    reason: summary.ok ? "verified" : failed.join(","),
+  };
+  await writeSignedJson(
+    path.join(input.repo, ".acceptance", "agent-smoke-run.json"),
+    path.join(input.repo, ".acceptance", "agent-smoke-run-receipt.json"),
+    "wsspeckit-agent-smoke-run-receipt",
+    updatedRunManifest,
+    authority,
+    input.authorityIdentity,
+  );
+  return summary;
 }
 
 async function main() {

@@ -2,7 +2,11 @@
 
 ## 结论
 
-状态：**not_run / NO-GO**。
+状态：**历史观察 `not-run / NO-GO`；证据 authority 为 `legacy-unbound`**。
+
+本页记录发生在外部 authority、签名 fixture receipt 和签名 run manifest 引入之前，无法事后补签。下述
+launcher、认证状态和 Driver 安装结果仅为 `observed-unverified`，不是发布 PASS。机器可读记录中的
+`runIdHash` 只关联 sanitized legacy record，不冒充已丢失的原始 session/run ID。
 
 2026-08-22 在 macOS 26.6.2 arm64 上预检。WSSpecKit 基线为 `3d0175b7`，脱敏 Work Item 为
 `WSS-...W2GV6`。`cursor` launcher 明确报告没有可用 Cursor IDE，并提示改用 Cursor Agent。canonical
@@ -17,4 +21,5 @@ API key，也没有继续登录流程。
 `acquire=0`、`submit=0`，compact plan、trusted Red/Green、Review、预期 diff 与 Close 均不存在。
 
 创建本地空 chat ID 的命令可运行，但这不证明已认证模型执行或 Skill 可见，不能计为部分通过。后续必须先让
-真实 headless 调用与 `status` 使用同一有效认证，再重跑本验收。
+真实 headless 调用与 `status` 使用同一有效认证，再重跑本验收。新 verifier 必须同时提供
+`--authority <file>` 和 `--authority-identity <sha256>`；旧 fixture 缺少签名 receipt 时会 fail closed。
