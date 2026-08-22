@@ -1,0 +1,54 @@
+version: 1
+date: 2026-08-22
+platform: macOS-26.6.2-arm64
+wsspeckitCommit: 3d0175b7
+overall: no-go
+clients:
+  codex:
+    version: 0.148.0-alpha.21
+    executable: canonical
+    authentication: pass
+    modelCall: pass
+    driverInstall: pass
+    automaticTrigger: partial
+    explicitDriver: pass
+    freshSessionRecovery: pass
+    protocolAcquireSubmit: pass
+    compactPlan: fail
+    trustedRedGreen: fail
+    review: fail
+    externalClose: skipped-no-binding
+    workItemClose: fail
+    verifier: fail
+    status: partial-no-go
+    blocker: missing-public-artifact-authoring-contract-and-short-attempt-lease
+  claude:
+    version: 1.28929.0-desktop
+    executable: gui-only
+    authentication: not_run
+    modelCall: not_run
+    driverInstall: not_run
+    automaticTrigger: not_run
+    explicitDriver: not_run
+    freshSessionRecovery: not_run
+    verifier: not_run
+    status: not_run-no-go
+    blocker: claude-code-cli-unavailable
+  cursor:
+    version: 2025.10.28-0a91dc2-agent
+    executable: agent-cli
+    authentication: fail-runtime-status-inconsistent
+    modelCall: not_run
+    driverInstall: pass
+    automaticTrigger: not_run
+    explicitDriver: not_run
+    freshSessionRecovery: not_run
+    protocolAcquireSubmit: fail
+    compactPlan: fail
+    trustedRedGreen: fail
+    review: fail
+    externalClose: skipped-no-binding
+    workItemClose: fail
+    verifier: fail
+    status: not_run-no-go
+    blocker: headless-agent-requires-authentication
