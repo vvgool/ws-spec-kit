@@ -61,8 +61,8 @@ function parseSkillBinding(value: unknown): WorkflowSkillBinding {
 function parseArtifactInput(value: unknown): string | WorkflowArtifactInput {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
   if (typeof value === "string") return string(value, code, "Step input");
-  const source = record(value, code, "Step artifact input", ["artifact", "required"]);
-  const result: WorkflowArtifactInput = { artifact: string(source.artifact, code, "Step artifact input.artifact") };
+  const source = record(value, code, "Step artifact input", ["outputId", "required"]);
+  const result: WorkflowArtifactInput = { outputId: string(source.outputId, code, "Step artifact input.outputId") };
   if (source.required !== undefined) result.required = boolean(source.required, code, "Step artifact input.required");
   return result;
 }
@@ -77,6 +77,16 @@ function parseLoop(value: unknown): WorkflowLoop {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
   const source = record(value, code, "Step loop", ["until", "maxIterations"]);
   return { until: string(source.until, code, "Step loop.until"), maxIterations: positiveInteger(source.maxIterations, code, "Step loop.maxIterations") };
+}
+
+function parseArtifactOutput(value: unknown): NonNullable<WorkflowStep["outputs"]>[number] {
+  const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
+  if (typeof value === "string") return string(value, code, "Step output");
+  const source = record(value, code, "Step output", ["outputId", "artifactType"]);
+  return {
+    outputId: string(source.outputId, code, "Step output.outputId"),
+    artifactType: string(source.artifactType, code, "Step output.artifactType"),
+  };
 }
 
 function parseStep(value: unknown): WorkflowStep {
@@ -101,7 +111,10 @@ function parseStep(value: unknown): WorkflowStep {
     if (!Array.isArray(source.inputs)) error(code, "Step inputs 必须是数组。");
     result.inputs = source.inputs.map(parseArtifactInput);
   }
-  if (source.outputs !== undefined) result.outputs = strings(source.outputs, code, "Step outputs");
+  if (source.outputs !== undefined) {
+    if (!Array.isArray(source.outputs)) error(code, "Step outputs 必须是数组。");
+    result.outputs = source.outputs.map(parseArtifactOutput);
+  }
   if (source.skills !== undefined) {
     if (!Array.isArray(source.skills)) error(code, "Step skills 必须是绑定对象数组。");
     result.skills = source.skills.map(parseSkillBinding);

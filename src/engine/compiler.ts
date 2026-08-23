@@ -209,11 +209,12 @@ function validateProfileSafety(packageRef: string, workflowId: string, sourceSte
       if (lowerIterations !== undefined && (higherIterations === undefined || higherIterations < lowerIterations)) profileSafetyFailure(higher.id, `/steps/${step.id}/maxIterations`, "高强度 Profile 不能降低循环上限。");
       if (lower.profile.steps[step.id]?.independentReviewActor === true && higher.profile.steps[step.id]?.independentReviewActor !== true) profileSafetyFailure(higher.id, `/steps/${step.id}/independentReviewActor`, "高强度 Profile 不能关闭独立执行主体要求。");
       if (!isSubset(lower.profile.steps[step.id]?.gates ?? [], higher.profile.steps[step.id]?.gates ?? [])) profileSafetyFailure(higher.id, `/steps/${step.id}/gates`, "高强度 Profile 必须保留低强度 Profile 的 Gate。");
-      for (const artifact of step.outputs ?? []) {
-        const lowerArtifact = lower.profile.steps[step.id]?.artifacts?.[artifact];
-        const higherArtifact = higher.profile.steps[step.id]?.artifacts?.[artifact];
-        if ((lowerArtifact?.required ?? true) && !(higherArtifact?.required ?? true)) profileSafetyFailure(higher.id, `/steps/${step.id}/artifacts/${artifact}/required`, "高强度 Profile 不能降低 Artifact 必需性。");
-        if (contentLevel(lowerArtifact?.contentLevel) > contentLevel(higherArtifact?.contentLevel)) profileSafetyFailure(higher.id, `/steps/${step.id}/artifacts/${artifact}/contentLevel`, "高强度 Profile 不能降低 Artifact 内容级别。");
+      for (const output of step.outputs ?? []) {
+        const outputId = typeof output === "string" ? output : output.outputId;
+        const lowerArtifact = lower.profile.steps[step.id]?.artifacts?.[outputId];
+        const higherArtifact = higher.profile.steps[step.id]?.artifacts?.[outputId];
+        if ((lowerArtifact?.required ?? true) && !(higherArtifact?.required ?? true)) profileSafetyFailure(higher.id, `/steps/${step.id}/artifacts/${outputId}/required`, "高强度 Profile 不能降低 Artifact 必需性。");
+        if (contentLevel(lowerArtifact?.contentLevel) > contentLevel(higherArtifact?.contentLevel)) profileSafetyFailure(higher.id, `/steps/${step.id}/artifacts/${outputId}/contentLevel`, "高强度 Profile 不能降低 Artifact 内容级别。");
       }
     }
     for (const field of ["issueRequired", "knowledgeRequired", "readBackRequired"] as const) {
@@ -318,8 +319,14 @@ function executorContractFor(step: Pick<WorkflowStep, "uses" | "action">, path: 
 
 function normalizeInput(input: NonNullable<WorkflowStep["inputs"]>[number]): ArtifactRequirement {
   return typeof input === "string"
-    ? { artifact: input, required: true }
-    : { artifact: input.artifact, required: input.required ?? true };
+    ? { outputId: input, required: true }
+    : { outputId: input.outputId, required: input.required ?? true };
+}
+
+function normalizeOutput(output: NonNullable<WorkflowStep["outputs"]>[number]): { outputId: string; artifactType: string } {
+  return typeof output === "string"
+    ? { outputId: output, artifactType: output }
+    : { outputId: output.outputId, artifactType: output.artifactType };
 }
 
 function validateResolvedSkill(skill: ResolvedSkill, index: number): void {
@@ -346,14 +353,19 @@ function resolveStepSkills(step: WorkflowStep, available: readonly ResolvedSkill
 function compileStep(step: WorkflowStep, overlays: Readonly<Record<string, ProfileDefinition["steps"][string]>>, availableSkills: readonly ResolvedSkill[], path: string): CompiledStep {
   const overlay = overlays[step.id];
   const executor = executorContractFor(step, path);
-  const declaredOutputs = new Set(step.outputs ?? []);
+  const normalizedOutputs = (step.outputs ?? []).map(normalizeOutput);
+  const declaredOutputs = new Set(normalizedOutputs.map(({ outputId }) => outputId));
+  if (declaredOutputs.size !== normalizedOutputs.length) {
+    fail("WSSPEC_COMPILE_STEP_INVALID", `${path}/outputs`, "Step outputId 必须唯一。");
+  }
   for (const artifact of Object.keys(overlay?.artifacts ?? {})) {
     if (!declaredOutputs.has(artifact)) fail("WSSPEC_COMPILE_PROFILE_ARTIFACT_UNKNOWN", `${path}/outputs/${artifact}`, "Profile 引用了 Step 未声明的输出。");
   }
-  const outputs: ArtifactDeclaration[] = (step.outputs ?? []).map((artifact) => {
-    const artifactOverlay = overlay?.artifacts?.[artifact];
+  const outputs: ArtifactDeclaration[] = normalizedOutputs.map(({ outputId, artifactType }) => {
+    const artifactOverlay = overlay?.artifacts?.[outputId];
     return {
-      artifact,
+      outputId,
+      artifact: artifactType,
       required: artifactOverlay?.required ?? true,
       ...(artifactOverlay?.contentLevel === undefined ? {} : { contentLevel: artifactOverlay.contentLevel }),
     };
@@ -427,7 +439,7 @@ function dependencyClosure(id: string, byId: ReadonlyMap<string, CompiledStep>):
 }
 
 interface ProducedArtifact {
-  artifact: string;
+  outputId: string;
   enabled: boolean;
   guaranteed: boolean;
 }
@@ -436,7 +448,7 @@ function producedArtifacts(step: CompiledStep, parentEnabled = true, parentGuara
   const enabled = parentEnabled && step.enabled;
   const guaranteedPath = parentGuaranteed && enabled && step.when === undefined;
   return [
-    ...step.outputs.map(({ artifact, required }) => ({ artifact, enabled, guaranteed: guaranteedPath && required })),
+    ...step.outputs.map(({ outputId, required }) => ({ outputId, enabled, guaranteed: guaranteedPath && required })),
     ...step.steps.flatMap((child) => producedArtifacts(child, enabled, guaranteedPath)),
   ];
 }
@@ -449,12 +461,12 @@ function validateArtifactDependencies(steps: readonly CompiledStep[], path: stri
     const produced = [...ancestors].flatMap((id) => producedArtifacts(byId.get(id)!));
     for (const input of current.inputs) {
       if (!input.required) continue;
-      if (input.artifact === "requirement-source") continue;
-      const candidates = produced.filter(({ artifact }) => artifact === input.artifact);
+      if (input.outputId === "requirement-source") continue;
+      const candidates = produced.filter(({ outputId }) => outputId === input.outputId);
       if (candidates.some(({ guaranteed }) => guaranteed)) continue;
-      if (candidates.some(({ enabled }) => enabled)) fail("WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED", `${path}/${current.id}/inputs/${input.artifact}`, "必需输入只能由无条件且必需的输出满足。");
-      if (candidates.length > 0) fail("WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED", `${path}/${current.id}/inputs/${input.artifact}`, "启用 Step 消费了已跳过 Step 的必需输出。");
-      fail("WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER", `${path}/${current.id}/inputs/${input.artifact}`, "必需输入没有依赖闭包内的生产者。");
+      if (candidates.some(({ enabled }) => enabled)) fail("WSSPEC_COMPILE_OUTPUT_NOT_GUARANTEED", `${path}/${current.id}/inputs/${input.outputId}`, "必需输入只能由无条件且必需的输出满足。");
+      if (candidates.length > 0) fail("WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED", `${path}/${current.id}/inputs/${input.outputId}`, "启用 Step 消费了已跳过 Step 的必需输出。");
+      fail("WSSPEC_COMPILE_MISSING_ARTIFACT_PRODUCER", `${path}/${current.id}/inputs/${input.outputId}`, "必需输入没有依赖闭包内的生产者。");
     }
     validateArtifactDependencies(current.steps, `${path}/${current.id}/steps`);
   }
@@ -462,10 +474,10 @@ function validateArtifactDependencies(steps: readonly CompiledStep[], path: stri
 
 type ExpressionValueType = "boolean" | "number" | "string" | "null";
 
-function artifactPropertyType(root: string, property: string): ExpressionValueType | undefined {
+function artifactPropertyType(artifactType: string | undefined, property: string): ExpressionValueType | undefined {
   if (property === "exists") return "boolean";
   if (property === "status" || property === "digest") return "string";
-  if (root === "review-result" && property === "approved") return "boolean";
+  if (artifactType === "review-result" && property === "approved") return "boolean";
   return undefined;
 }
 
@@ -473,7 +485,7 @@ function effectiveOutputs(step: CompiledStep, parentEnabled: boolean): Set<strin
   const enabled = parentEnabled && step.enabled;
   if (!enabled) return new Set();
   return new Set([
-    ...step.outputs.map(({ artifact }) => artifact),
+    ...step.outputs.map(({ outputId }) => outputId),
     ...step.steps.flatMap((child) => [...effectiveOutputs(child, enabled)]),
   ]);
 }
@@ -483,7 +495,9 @@ function addAll(target: Set<string>, values: Iterable<string>): void {
 }
 
 function validateExpressions(sourceSteps: readonly WorkflowStep[], compiledSteps: readonly CompiledStep[]): void {
-  const declaredOutputs = new Set(flatten(compiledSteps).flatMap((step) => step.outputs.map(({ artifact }) => artifact)));
+  const declaredOutputs = new Map(flatten(compiledSteps).flatMap((step) => {
+    return step.outputs.map(({ outputId, artifact }) => [outputId, artifact] as const);
+  }));
   const declaredSteps = new Set(flatten(compiledSteps).map((step) => step.id));
   const validate = (expression: string, path: string, availableArtifacts: ReadonlySet<string>, availableSteps: ReadonlySet<string>, allSteps: ReadonlySet<string>): void => {
     let ast: ExpressionAst;
@@ -519,7 +533,7 @@ function validateExpressions(sourceSteps: readonly WorkflowStep[], compiledSteps
       if (node.root === "artifacts") {
         if (!declaredOutputs.has(target)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNKNOWN", path, `表达式引用了未声明输出 ${target}。`);
         if (!availableArtifacts.has(target)) fail("WSSPEC_COMPILE_EXPRESSION_REFERENCE_UNAVAILABLE", path, `表达式引用了当前 Step 不可达或未启用的输出 ${target}。`);
-        const valueType = artifactPropertyType(target, property);
+        const valueType = artifactPropertyType(declaredOutputs.get(target), property);
         if (valueType === undefined) fail("WSSPEC_COMPILE_EXPRESSION_PROPERTY_UNKNOWN", path, `输出 ${target} 没有属性 ${property}。`);
         return valueType;
       }
@@ -641,9 +655,9 @@ function validateFeatureSafety(workflow: WorkflowPackage["workflow"], packageRef
   const verifyGreen = safetySteps.get("verify-green")!;
   if (writeTests.uses !== "agent.execute" || !writeTests.skills.some(({ requestedRef }) => requestedRef === "builtin://skills/tdd-implementation")) fail("WSSPEC_COMPILE_TDD_REQUIRED", "/steps/write-tests", "write-tests 必须绑定 TDD Skill。");
   if (!hasAncestor("verify-red", "write-tests", byId) || verifyRed.uses !== "command.execute" || verifyRed.action !== "quality.test" || verifyRed.expectedOutcome !== "test-failure" || !verifyRed.outputs.some(({ artifact, required }) => artifact === "red-evidence" && required)) fail("WSSPEC_COMPILE_TDD_REQUIRED", "/steps/verify-red", "verify-red 必须在 write-tests 后形成可信 Red Evidence。");
-  if (!implement.inputs.some(({ artifact, required }) => artifact === "tasks" && required)) fail("WSSPEC_COMPILE_PLAN_REQUIRED", "/steps/implement/inputs", "implement 必须显式消费 tasks。");
+  if (!implement.inputs.some(({ outputId, required }) => outputId === "tasks" && required)) fail("WSSPEC_COMPILE_PLAN_REQUIRED", "/steps/implement/inputs", "implement 必须显式消费 tasks。");
   if (!hasAncestor("implement", "verify-red", byId) || implement.uses !== "agent.execute" || !implement.skills.some(({ requestedRef }) => requestedRef === "builtin://skills/tdd-implementation")) fail("WSSPEC_COMPILE_TDD_REQUIRED", "/steps/implement", "implement 必须位于有效 Red Evidence 之后并绑定 TDD Skill。");
-  if (!hasAncestor("verify-green", "implement", byId) || verifyGreen.uses !== "command.execute" || verifyGreen.action !== "quality.test" || verifyGreen.expectedOutcome !== "success" || !verifyGreen.inputs.some(({ artifact, required }) => artifact === "red-evidence" && required) || !verifyGreen.outputs.some(({ artifact, required }) => artifact === "tdd-evidence" && required) || !verifyGreen.gates.includes("test")) fail("WSSPEC_COMPILE_TDD_REQUIRED", "/steps/verify-green", "verify-green 必须绑定 Red Evidence、可信 test Gate 和 TDD Evidence。");
+  if (!hasAncestor("verify-green", "implement", byId) || verifyGreen.uses !== "command.execute" || verifyGreen.action !== "quality.test" || verifyGreen.expectedOutcome !== "success" || !verifyGreen.inputs.some(({ outputId, required }) => outputId === "red-evidence" && required) || !verifyGreen.outputs.some(({ artifact, required }) => artifact === "tdd-evidence" && required) || !verifyGreen.gates.includes("test")) fail("WSSPEC_COMPILE_TDD_REQUIRED", "/steps/verify-green", "verify-green 必须绑定 Red Evidence、可信 test Gate 和 TDD Evidence。");
   const gates = new Map(workflow.gates.map((gate) => [gate.id, gate]));
   for (const gate of ["test", "verify-red", "verify-green"]) if (gates.get(gate)?.evidence !== "trusted") fail("WSSPEC_COMPILE_TDD_REQUIRED", `/gates/${gate}`, "功能 Workflow 缺少可信 Red/Green Gate。");
   if (profileId === "quick" && packageRef === "builtin://workflows/feature-delivery") {

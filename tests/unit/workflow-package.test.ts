@@ -133,8 +133,8 @@ steps:
     skills: [{ ref: builtin://skills/task-planning, required: true }]
     outputs: [tasks]
     inputs:
-      - { artifact: specification, required: true }
-      - { artifact: design, required: false }
+      - { outputId: specification, required: true }
+      - { outputId: design, required: false }
   - id: write-tests
     uses: agent.execute
     needs: [plan]
@@ -378,7 +378,7 @@ test("递归拒绝 Workflow 与 Profile 嵌套对象的未知字段和错误类�
     "retry: { maxAttempts: 2, typo: true }",
     "retry: { maxAttempts: wrong }",
     "skills: [{ ref: package://skills/review, required: wrong }]",
-    "inputs: [{ artifact: specification, required: wrong }]",
+    "inputs: [{ outputId: specification, required: wrong }]",
     "steps: [{ id: nested, uses: agent.execute, skills: [], typo: true }]",
   ];
   for (const fragment of workflowCases) {

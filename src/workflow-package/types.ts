@@ -13,7 +13,8 @@ export interface WorkflowManifest {
 export interface WorkflowIdentity { id: string; version: 1 }
 export interface WorkflowInputDefinition { accepts: string[] }
 export interface WorkflowSkillBinding { ref: string; required?: boolean; fallback?: string }
-export interface WorkflowArtifactInput { artifact: string; required?: boolean }
+export interface WorkflowArtifactInput { outputId: string; required?: boolean }
+export interface WorkflowArtifactOutput { outputId: string; artifactType: string }
 export interface WorkflowRetry { maxAttempts: number }
 export interface WorkflowLoop { until: string; maxIterations: number }
 export type WorkflowActorRole = "implementation" | "review" | "fix";
@@ -27,7 +28,7 @@ export interface WorkflowStep {
   loop?: WorkflowLoop;
   approval?: boolean | "required";
   inputs?: Array<string | WorkflowArtifactInput>;
-  outputs?: string[];
+  outputs?: Array<string | WorkflowArtifactOutput>;
   skills?: WorkflowSkillBinding[];
   action?: string;
   objective?: string;

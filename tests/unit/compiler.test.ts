@@ -106,10 +106,10 @@ test("Quick skips only independent design while keeping a compact plan consumed 
   assert.equal(compiled.steps.find(({ id }) => id === "plan")?.enabled, true);
   assert.equal(compiled.steps.find(({ id }) => id === "plan")?.artifactLevel, "compact");
   assert.deepEqual(compiled.steps.find(({ id }) => id === "plan")?.inputs, [
-    { artifact: "specification", required: true },
-    { artifact: "design", required: false },
+    { outputId: "specification", required: true },
+    { outputId: "design", required: false },
   ]);
-  assert.deepEqual(compiled.steps.find(({ id }) => id === "implement")?.inputs, [{ artifact: "tasks", required: true }]);
+  assert.deepEqual(compiled.steps.find(({ id }) => id === "implement")?.inputs, [{ outputId: "tasks", required: true }]);
 });
 
 test("rejects duplicate Step IDs including nested control Steps", async () => {
@@ -117,6 +117,16 @@ test("rejects duplicate Step IDs including nested control Steps", async () => {
   step(pkg, "review-fix").steps?.push({ id: "plan", uses: "agent.execute" });
 
   expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_DUPLICATE_STEP");
+});
+
+test("rejects duplicate output ids even when Artifact types differ", async () => {
+  const { pkg, profile } = await fixture();
+  step(pkg, "explore").outputs = [
+    { outputId: "report", artifactType: "exploration-report" },
+    { outputId: "report", artifactType: "review-result" },
+  ];
+
+  expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_STEP_INVALID");
 });
 
 test("rejects nested control.loop before completed Submit can bypass its until condition", async () => {
@@ -170,13 +180,16 @@ test("rejects malformed expressions and references to undeclared outputs", async
 
 test("compiler 与 runtime 共用受限 AST，并接受复合 Binding 和 Artifact 条件", async () => {
   const { pkg, profile: selected } = await fixture();
+  step(pkg, "review").outputs = [{ outputId: "primary-review", artifactType: "review-result" }];
+  step(pkg, "review-fix").until = "${artifacts.primary-review.approved}";
+  step(pkg, "fix").when = "${artifacts.primary-review.approved == false}";
   step(pkg, "update-issue").when = "${bindings.issue.exists && (bindings.knowledge.exists == false)}";
-  step(pkg, "commit").when = "${artifacts.review-result.approved == true || bindings.issue.exists}";
+  step(pkg, "commit").when = "${artifacts.primary-review.approved == true || bindings.issue.exists}";
 
   const compiled = compileWorkflow(pkg, selected);
 
   assert.equal(compiled.steps.find(({ id }) => id === "update-issue")?.when, "${bindings.issue.exists && (bindings.knowledge.exists == false)}");
-  assert.equal(compiled.steps.find(({ id }) => id === "commit")?.when, "${artifacts.review-result.approved == true || bindings.issue.exists}");
+  assert.equal(compiled.steps.find(({ id }) => id === "commit")?.when, "${artifacts.primary-review.approved == true || bindings.issue.exists}");
 });
 
 test("嵌套 Step 条件可引用父级可达依赖，并区分未来与未知 Step", async () => {
@@ -229,7 +242,7 @@ test("rejects missing required Skills and Skill attempts to expand allowed paths
 
 test("rejects required inputs produced only by a disabled Step", async () => {
   const { pkg, profile: selected } = await fixture("feature-delivery", "quick");
-  step(pkg, "plan").inputs = [{ artifact: "specification", required: true }, { artifact: "design", required: true }];
+  step(pkg, "plan").inputs = [{ outputId: "specification", required: true }, { outputId: "design", required: true }];
 
   expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_DISABLED_OUTPUT_REQUIRED");
 });

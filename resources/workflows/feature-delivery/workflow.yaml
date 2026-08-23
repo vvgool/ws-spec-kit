@@ -49,9 +49,9 @@ steps:
         required: true
     outputs: [tasks]
     inputs:
-      - artifact: specification
+      - outputId: specification
         required: true
-      - artifact: design
+      - outputId: design
         required: false
   - id: write-tests
     uses: agent.execute

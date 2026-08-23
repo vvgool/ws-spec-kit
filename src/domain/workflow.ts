@@ -5,11 +5,12 @@ export type SecurityClass = "agent" | "local-read" | "local-write" | "external-r
 export type ProfileId = "quick" | "standard" | "governed";
 
 export interface ArtifactRequirement {
-  artifact: string;
+  outputId: string;
   required: boolean;
 }
 
 export interface ArtifactDeclaration {
+  outputId: string;
   artifact: string;
   required: boolean;
   contentLevel?: string;
