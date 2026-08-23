@@ -37,6 +37,7 @@ import { loadApplicationState, selectedProfile } from "./state.js";
 import type { ExternalActionExecutor, ExternalActionRejection } from "./external-action.js";
 import { externalActionApprovalSummary, externalActionRejectionKey } from "./external-action.js";
 import { readEvents } from "../storage/events.js";
+import { workPackageIdentityDigest } from "../domain/work-package-identity.js";
 
 export interface AcquireDependencies {
   now(): Date;
@@ -202,6 +203,7 @@ async function activeClaimContext(input: {
       && workPackage.attemptId === rawClaim.attemptId
       && workPackage.lease.token === rawClaim.claimToken
       && workPackage.lease.expiresAt === rawClaim.expiresAt
+      && rawClaim.workPackageDigest === workPackageIdentityDigest(workPackage)
       && sameStrings(workPackage.constraints.allowedPaths, rawClaim.allowedPaths);
     if (!valid || step === undefined) throw new Error("active Claim binding is invalid");
     return { context: { ...context, workPackage }, step };
@@ -236,10 +238,16 @@ async function reacquireActiveClaim(input: {
   });
   const token = crypto.randomUUID();
   const expiresAt = new Date(input.now.getTime() + input.state.snapshot.leaseTtlSeconds * 1000).toISOString();
-  const claim = { ...input.claim, claimToken: token, claimedAt: input.now.toISOString(), expiresAt };
   const workPackage: WorkPackage = {
     ...context.workPackage,
     lease: { token, expiresAt },
+  };
+  const claim = {
+    ...input.claim,
+    claimToken: token,
+    claimedAt: input.now.toISOString(),
+    expiresAt,
+    workPackageDigest: workPackageIdentityDigest(workPackage),
   };
   input.dependencies.executors.assertStep(step as unknown as CompiledStepShape);
   const projection = {
@@ -443,19 +451,19 @@ function inputArtifacts(input: {
   const selected: ArtifactReference[] = [];
   const seen = new Set<string>();
   for (const requirement of input.step.inputs) {
-    if (seen.has(requirement.artifact)) continue;
-    seen.add(requirement.artifact);
-    if (requirement.artifact === "red-evidence") {
+    if (seen.has(requirement.outputId)) continue;
+    seen.add(requirement.outputId);
+    if (requirement.outputId === "red-evidence") {
       const red = input.projection.evidence[tddRedEvidenceKey(input.projection.workItemId)] as TrustedEvidence | undefined;
       if (red?.level === "trusted" && red.phase === "red" && red.taskId === input.projection.workItemId) continue;
     }
-    if (requirement.artifact === "red-test-result" && input.step.id === "verify-red") {
+    if (requirement.outputId === "red-test-result" && input.step.id === "verify-red") {
       const writeTests = input.projection.contexts["write-tests"] as { result?: { modifiedFiles?: unknown } } | undefined;
       const modifiedFiles = writeTests?.result?.modifiedFiles;
       if (Array.isArray(modifiedFiles) && modifiedFiles.length > 0 && modifiedFiles.every((filename) => typeof filename === "string")) continue;
     }
     let artifact: ArtifactReference | undefined;
-    if (requirement.artifact === "requirement-source") {
+    if (requirement.outputId === "requirement-source") {
       artifact = input.snapshot.source;
     } else {
       const candidates = [...ancestors].flatMap((stepId) => {
@@ -463,7 +471,7 @@ function inputArtifacts(input: {
         if (stage?.status !== "succeeded" && stage?.status !== "succeeded_with_warnings") return [];
         return completedResults(input.projection, stepId).flatMap((result) => result.status !== "completed" ? [] : result.artifacts
           .map((candidate, artifactIndex) => ({ candidate, artifactIndex, stepIndex: order.get(stepId) ?? -1 }))
-          .filter(({ candidate }) => candidate.artifactType === requirement.artifact));
+          .filter(({ candidate }) => candidate.outputId === requirement.outputId));
       });
       candidates.sort((left, right) => (right.candidate.revision ?? 0) - (left.candidate.revision ?? 0)
         || right.stepIndex - left.stepIndex
@@ -472,7 +480,7 @@ function inputArtifacts(input: {
     }
     if (artifact !== undefined) selected.push(artifact);
     else if (requirement.required) {
-      throw new ApplicationAcquireError("WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING", `步骤 ${input.step.id} 缺少必需输入 Artifact ${requirement.artifact}。`);
+      throw new ApplicationAcquireError("WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING", `步骤 ${input.step.id} 缺少必需输入 Artifact output ${requirement.outputId}。`);
     }
   }
   return selected;
@@ -494,6 +502,7 @@ function workPackageFor(input: {
   const requiredOutputs = input.step.outputs.filter((output) => output.required).map((output) => {
     return {
       artifactType: output.artifact,
+      ...(output.artifact === "requirement-source" ? {} : { outputId: output.outputId }),
       schemaVersion: 1,
       ...(output.contentLevel === undefined ? {} : { contentLevel: output.contentLevel }),
     } as const;
@@ -513,6 +522,11 @@ function workPackageFor(input: {
       forbiddenActions: ["push", "merge", "release", "unapproved-external-write"],
     },
     requiredOutputs,
+    artifactAuthoring: {
+      version: 1,
+      maxContentBytes: 1_048_576,
+      draftRoots: [".acceptance", `.wsspec/work-items/${input.workItemId}/drafts`],
+    },
     gates: input.step.gates.map((id) => ({ id, evidence: gatesById.get(id)?.evidence ?? "trusted", required: true })),
     resultSchema: "builtin.submit-result.v1",
   };
@@ -615,17 +629,6 @@ async function acquireExecutableStep(input: {
   const attemptId = `attempt-${crypto.randomUUID()}`;
   const token = crypto.randomUUID();
   const expiresAt = new Date(input.now.getTime() + input.state.snapshot.leaseTtlSeconds * 1000).toISOString();
-  const claim: RuntimeClaim = {
-    stageId: input.stepInstanceId,
-    attemptId,
-    claimToken: token,
-    actor: input.actor,
-    claimedAt: input.now.toISOString(),
-    expiresAt,
-    inputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(input.state.worktree),
-    allowedPaths: [...input.state.snapshot.changePolicy.allowedPaths],
-    workspaceSnapshot: await computeWorkspaceSnapshot(input.state.worktree),
-  };
   const workPackage = workPackageFor({
     workItemId: input.state.item.workItemId,
     step: input.step,
@@ -638,6 +641,18 @@ async function acquireExecutableStep(input: {
     stepInstanceId: input.stepInstanceId,
     ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
   });
+  const claim: RuntimeClaim = {
+    stageId: input.stepInstanceId,
+    attemptId,
+    claimToken: token,
+    actor: input.actor,
+    claimedAt: input.now.toISOString(),
+    expiresAt,
+    inputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(input.state.worktree),
+    allowedPaths: [...input.state.snapshot.changePolicy.allowedPaths],
+    workspaceSnapshot: await computeWorkspaceSnapshot(input.state.worktree),
+    workPackageDigest: workPackageIdentityDigest(workPackage),
+  };
   let projection: RuntimeProjection = {
     ...input.projection,
     stages: {

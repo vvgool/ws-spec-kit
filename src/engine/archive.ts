@@ -15,7 +15,7 @@ import {
 import { parseTddCycleEvidence, parseTrustedEvidence, testAssetScopeManifest, testFileManifest, trustedTestAssetFiles } from "./tdd/red-gate.js";
 import type { TrustedEvidence } from "./tdd/types.js";
 import type { ApplicationSnapshot, SnapshotProfile, SnapshotStep } from "../application/state.js";
-import { verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
+import { artifactOutputId, verifyArtifact, type ArtifactReference } from "../domain/artifacts.js";
 import { externalReceiptMatches } from "../domain/external-receipt.js";
 import { verifySourceArtifact, type SourceArtifactReference } from "../registry/connectors/requirement-source.js";
 import type { ProjectGatePolicy } from "./compiler.js";
@@ -54,6 +54,7 @@ interface AttemptRecord {
     status?: string;
     artifacts?: Array<{
       artifactType?: string;
+      outputId?: string;
       artifactId?: string;
       schemaVersion?: number;
       path?: string;
@@ -123,10 +124,23 @@ function completedArtifacts(instance: EffectiveStepInstance): NonNullable<NonNul
   return instance.context?.result?.status === "completed" ? instance.context.result.artifacts ?? [] : [];
 }
 
+function matchesOutput(
+  reference: { artifactType?: string; outputId?: string },
+  output: Pick<SnapshotStep["outputs"][number], "artifact" | "outputId">,
+): boolean {
+  return typeof reference.artifactType === "string"
+    && reference.artifactType === output.artifact
+    && artifactOutputId({
+      artifactType: reference.artifactType,
+      ...(reference.outputId === undefined ? {} : { outputId: reference.outputId }),
+    }) === output.outputId;
+}
+
 type ApprovalArtifact = NonNullable<RuntimeApproval["artifacts"]>[number] & { artifactId?: string };
 
 function approvalArtifact(value: NonNullable<NonNullable<AttemptRecord["result"]>["artifacts"]>[number]): ApprovalArtifact | undefined {
   if (typeof value.artifactType !== "string"
+    || (value.outputId !== undefined && typeof value.outputId !== "string")
     || (value.artifactId !== undefined && typeof value.artifactId !== "string")
     || typeof value.schemaVersion !== "number"
     || typeof value.path !== "string"
@@ -135,6 +149,7 @@ function approvalArtifact(value: NonNullable<NonNullable<AttemptRecord["result"]
     || (value.mediaType !== undefined && typeof value.mediaType !== "string")) return undefined;
   return {
     artifactType: value.artifactType,
+    ...(value.outputId === undefined ? {} : { outputId: value.outputId }),
     ...(value.artifactId === undefined ? {} : { artifactId: value.artifactId }),
     schemaVersion: value.schemaVersion,
     path: value.path,
@@ -164,6 +179,7 @@ function sameArtifacts(left: readonly ApprovalArtifact[], right: readonly Approv
     const candidate = right[index];
     return candidate !== undefined
       && artifact.artifactType === candidate.artifactType
+      && artifact.outputId === candidate.outputId
       && artifact.artifactId === candidate.artifactId
       && artifact.schemaVersion === candidate.schemaVersion
       && artifact.path === candidate.path
@@ -349,8 +365,8 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
     for (const output of instance.step.outputs.filter(({ required }) => required)) {
       if (output.artifact === "red-evidence" && closeRedEvidence(input) !== undefined) continue;
       if (output.artifact === "tdd-evidence" && completeTddCycle(input)) continue;
-      if (!artifacts.some(({ artifactType }) => artifactType === output.artifact)) {
-        addMissing("artifact", output.artifact);
+      if (!artifacts.some((artifact) => matchesOutput(artifact, output))) {
+        addMissing("artifact", output.outputId);
       }
     }
     if (instance.step.approval && !approvalSatisfied(input.projection, instance)) {
@@ -375,6 +391,7 @@ export function closeChecklist(input: CloseChecklistInput): CloseDecision {
 
 function sameArtifactReference(actual: ArtifactReference, expected: ApprovalArtifact): boolean {
   return actual.artifactType === expected.artifactType
+    && actual.outputId === expected.outputId
     && actual.schemaVersion === expected.schemaVersion
     && actual.path === expected.path
     && actual.revision === expected.revision
@@ -397,18 +414,26 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
   for (const instance of effectiveStepInstances(input.profile, input.projection)) {
     const attempt = instance.context;
     if (attempt?.result?.status !== "completed" || typeof attempt.workPackage?.attemptId !== "string") continue;
-    const requiredTypes = new Set(instance.step.outputs.filter(({ required }) => required).map(({ artifact }) => artifact));
+    const requiredOutputs = instance.step.outputs.filter(({ required }) => required);
+    const requiredOutputIds = new Set(requiredOutputs.map(({ outputId }) => outputId));
     const approvalBound = approvalSatisfied(input.projection, instance);
     const references = attempt.result.artifacts ?? [];
     const verified: ApprovalArtifact[] = [];
-    const invalidRequiredTypes = new Set<string>();
+    const invalidRequiredOutputIds = new Set<string>();
     for (const value of references) {
       const reference = approvalArtifact(value);
       if (reference === undefined) {
-        if (typeof value.artifactType === "string" && requiredTypes.has(value.artifactType)) invalidRequiredTypes.add(value.artifactType);
+        if (typeof value.artifactType === "string") {
+          const outputId = artifactOutputId({
+            artifactType: value.artifactType,
+            ...(typeof value.outputId === "string" ? { outputId: value.outputId } : {}),
+          });
+          if (outputId !== undefined && requiredOutputIds.has(outputId)) invalidRequiredOutputIds.add(outputId);
+        }
         continue;
       }
-      const targeted = requiredTypes.has(reference.artifactType) || approvalBound;
+      const outputId = artifactOutputId(reference);
+      const targeted = (outputId !== undefined && requiredOutputIds.has(outputId)) || approvalBound;
       if (!targeted) {
         verified.push(reference);
         continue;
@@ -424,7 +449,7 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
           await verifySourceArtifact(input.worktree, input.projection.workItemId, source);
           verified.push(reference);
         } catch {
-          if (requiredTypes.has(reference.artifactType)) invalidRequiredTypes.add(reference.artifactType);
+          if (outputId !== undefined && requiredOutputIds.has(outputId)) invalidRequiredOutputIds.add(outputId);
         }
         continue;
       }
@@ -439,10 +464,13 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
         if (!sameArtifactReference(actual, reference)) throw new Error("Artifact reference mismatch");
         verified.push(reference);
       } catch {
-        if (requiredTypes.has(reference.artifactType)) invalidRequiredTypes.add(reference.artifactType);
+        if (outputId !== undefined && requiredOutputIds.has(outputId)) invalidRequiredOutputIds.add(outputId);
       }
     }
-    const filtered = verified.filter(({ artifactType }) => !invalidRequiredTypes.has(artifactType));
+    const filtered = verified.filter((reference) => {
+      const outputId = artifactOutputId(reference);
+      return outputId === undefined || !invalidRequiredOutputIds.has(outputId);
+    });
     contexts[instance.stepInstanceId] = {
       ...attempt,
       result: { ...attempt.result, artifacts: filtered },

@@ -58,6 +58,7 @@ function normalizedArtifacts(artifacts: readonly ArtifactReference[]): ArtifactR
   }
   return artifacts.map((artifact) => ({
     artifactType: artifact.artifactType,
+    ...(artifact.outputId === undefined ? {} : { outputId: artifact.outputId }),
     schemaVersion: artifact.schemaVersion,
     ...(artifact.path === undefined ? {} : { path: artifact.path.replaceAll("\\", "/") }),
     ...(artifact.revision === undefined ? {} : { revision: artifact.revision }),

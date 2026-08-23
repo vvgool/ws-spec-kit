@@ -115,7 +115,7 @@ function profile(id: "quick" | "standard" | "governed", gates: string[]): Snapsh
     steps: [
       {
         id: "author-proposal", uses: "agent.execute", securityClass: "agent", needs: [], enabled: true,
-        skills: [], inputs: [], outputs: [{ artifact: "proposal", required: true }], gates: [], approval: true,
+        skills: [], inputs: [], outputs: [{ outputId: "proposal", artifact: "proposal", required: true }], gates: [], approval: true,
         authorizationRequired: false, steps: [],
       },
       {
@@ -139,6 +139,7 @@ function profile(id: "quick" | "standard" | "governed", gates: string[]): Snapsh
 
 const proposalArtifact = {
   artifactType: "proposal",
+  outputId: "proposal",
   schemaVersion: 1,
   path: "proposal.md",
   revision: 1,
@@ -468,12 +469,12 @@ test("Close requires a schema-valid linked Red and Green TDD evidence chain", ()
   selected.steps = [
     {
       id: "verify-red", uses: "command.execute", securityClass: "local-write", needs: [], enabled: true,
-      skills: [], inputs: [], outputs: [{ artifact: "red-evidence", required: true }], gates: [], approval: false,
+      skills: [], inputs: [], outputs: [{ outputId: "red-evidence", artifact: "red-evidence", required: true }], gates: [], approval: false,
       authorizationRequired: false, action: "quality.test", expectedOutcome: "test-failure", steps: [],
     },
     {
       id: "verify-green", uses: "command.execute", securityClass: "local-write", needs: ["verify-red"], enabled: true,
-      skills: [], inputs: [{ artifact: "red-evidence", required: true }], outputs: [{ artifact: "tdd-evidence", required: true }],
+      skills: [], inputs: [{ outputId: "red-evidence", required: true }], outputs: [{ outputId: "tdd-evidence", artifact: "tdd-evidence", required: true }],
       gates: [], approval: false, authorizationRequired: false, action: "quality.test", expectedOutcome: "success", steps: [],
     },
     {
@@ -582,12 +583,12 @@ test("Close rejects drift in a sibling snapshot automatically bound by a nested 
   selected.steps = [
     {
       id: "verify-red", uses: "command.execute", securityClass: "local-write", needs: [], enabled: true,
-      skills: [], inputs: [], outputs: [{ artifact: "red-evidence", required: true }], gates: [], approval: false,
+      skills: [], inputs: [], outputs: [{ outputId: "red-evidence", artifact: "red-evidence", required: true }], gates: [], approval: false,
       authorizationRequired: false, action: "quality.test", expectedOutcome: "test-failure", steps: [],
     },
     {
       id: "verify-green", uses: "command.execute", securityClass: "local-write", needs: ["verify-red"], enabled: true,
-      skills: [], inputs: [{ artifact: "red-evidence", required: true }], outputs: [{ artifact: "tdd-evidence", required: true }],
+      skills: [], inputs: [{ outputId: "red-evidence", required: true }], outputs: [{ outputId: "tdd-evidence", artifact: "tdd-evidence", required: true }],
       gates: [], approval: false, authorizationRequired: false, action: "quality.test", expectedOutcome: "success", steps: [],
     },
     {
@@ -759,6 +760,31 @@ test("Close 比较 Approval 与 Attempt 的 Artifact 身份", () => {
   ]);
 });
 
+test("Close 保留 Approval 与 Attempt 的 Artifact output 身份", () => {
+  const attempted = { ...proposalArtifact, outputId: "primary-proposal" };
+  const current = approvalReadyProjection({
+    artifacts: [attempted],
+    contentHash: approvalBindingDigest({
+      stageId: "author-proposal",
+      attemptId: "attempt-author",
+      artifacts: [attempted],
+    }),
+  });
+  const context = current.contexts["author-proposal"] as { result: { artifacts: unknown[] } };
+  context.result.artifacts = [attempted];
+
+  const decision = closeChecklist({
+    profile: profile("quick", []),
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+  });
+
+  assert.deepEqual(decision.missing.filter(({ category }) => category === "approval"), []);
+});
+
 test("Close 对 Approval 已规范化的多 Artifact 顺序不产生伪差异", () => {
   const supportingArtifact = {
     artifactType: "supporting",
@@ -822,6 +848,7 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
   const body = "# Proposal\n\nApproved content.\n";
   const metadata = {
     artifactType: "proposal",
+    outputId: "proposal",
     schemaVersion: 1 as const,
     workItemId: "WSS-CLOSE",
     stageId: "author-proposal",
@@ -830,6 +857,7 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
   };
   const reference = {
     artifactType: "proposal",
+    outputId: "proposal",
     schemaVersion: 1,
     path: ".wsspec/work-items/WSS-CLOSE/artifacts/proposal.md",
     revision: 1,
@@ -838,7 +866,7 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
   };
   const filename = path.join(worktree, reference.path);
   await mkdir(path.dirname(filename), { recursive: true });
-  const validArtifact = `---\nartifactType: proposal\nschemaVersion: 1\nworkItemId: WSS-CLOSE\nstageId: author-proposal\nattemptId: attempt-author\nrevision: 1\ncontentHash: ${reference.contentHash}\n---\n${body}`;
+  const validArtifact = `---\nartifactType: proposal\noutputId: proposal\nschemaVersion: 1\nworkItemId: WSS-CLOSE\nstageId: author-proposal\nattemptId: attempt-author\nrevision: 1\ncontentHash: ${reference.contentHash}\n---\n${body}`;
   await writeFile(filename, validArtifact, "utf8");
   const current = approvalReadyProjection({
     artifacts: [reference],
@@ -886,6 +914,87 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
   assert.equal((await closeChecklistForWorktree(input)).allowed, false);
 });
 
+test("Close 按 outputId 分别验证同类型 required outputs", async () => {
+  const worktree = await mkdtemp(path.join(os.tmpdir(), "wsspec-close-output-id-"));
+  const selected = profile("quick", []);
+  const author = selected.steps.find(({ id }) => id === "author-proposal")!;
+  author.approval = false;
+  author.outputs = [
+    { outputId: "primary-review", artifact: "review-result", required: true },
+    { outputId: "security-review", artifact: "review-result", required: true },
+  ];
+  const body = "# Findings\n\n```yaml\nfindings: []\n```\n";
+  const metadata = {
+    artifactType: "review-result",
+    outputId: "primary-review",
+    schemaVersion: 1 as const,
+    workItemId: "WSS-CLOSE",
+    stageId: "author-proposal",
+    attemptId: "attempt-author",
+    revision: 1,
+  };
+  const reference = {
+    artifactType: "review-result",
+    outputId: "primary-review",
+    schemaVersion: 1,
+    path: ".wsspec/work-items/WSS-CLOSE/artifacts/primary-review.md",
+    revision: 1,
+    contentHash: computeArtifactContentHash(metadata, body),
+    mediaType: "text/markdown",
+  };
+  const filename = path.join(worktree, reference.path);
+  await mkdir(path.dirname(filename), { recursive: true });
+  await writeFile(filename, [
+    "---",
+    "artifactType: review-result",
+    "outputId: primary-review",
+    "schemaVersion: 1",
+    "workItemId: WSS-CLOSE",
+    "stageId: author-proposal",
+    "attemptId: attempt-author",
+    "revision: 1",
+    `contentHash: ${reference.contentHash}`,
+    "---",
+    body,
+  ].join("\n"), "utf8");
+  const current = projection({
+    stages: {
+      "author-proposal": { status: "succeeded" },
+      "quality-check": { status: "succeeded" },
+      "publish-result": { status: "succeeded" },
+      "seal-work": { status: "ready" },
+    },
+    contexts: {
+      "author-proposal": {
+        workPackage: { attemptId: "attempt-author" },
+        result: { status: "completed", artifacts: [reference] },
+      },
+    },
+  });
+  const decision = await closeChecklistForWorktree({
+    profile: selected,
+    projection: current,
+    gatePolicy: { requiredGateIds: [], configuredGateIds: [] },
+    gates: [],
+    workspaceTreeDigest: "sha256:workspace",
+    configDigest: "sha256:config",
+    worktree,
+    source: {
+      artifactType: "requirement-source",
+      schemaVersion: 1,
+      artifactId: "source-WSS-CLOSE",
+      path: ".wsspec/sources/source-WSS-CLOSE.json",
+      revision: 1,
+      contentHash: "sha256:source",
+      mediaType: "application/json",
+    },
+  });
+
+  assert.deepEqual(decision.missing.filter(({ category }) => category === "artifact"), [
+    { category: "artifact", id: "security-review" },
+  ]);
+});
+
 test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", async () => {
   const fixture = await controlRuntimeFixture();
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "Immutable source" }, profile: "quick" });
@@ -897,7 +1006,7 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
   selected.steps = [
     {
       id: "intake", uses: "connector.execute", securityClass: "external-read", needs: [], enabled: true,
-      skills: [], inputs: [], outputs: [{ artifact: "requirement-source", required: true }], gates: [], approval: false,
+      skills: [], inputs: [], outputs: [{ outputId: "requirement-source", artifact: "requirement-source", required: true }], gates: [], approval: false,
       authorizationRequired: false, action: "requirement.capture", steps: [],
     },
     {
@@ -983,7 +1092,7 @@ test("Close 不要求循环内已跳过条件 Step 的 Artifact 或 Approval", (
     enabled: true,
     skills: [],
     inputs: [],
-    outputs: [{ artifact: "conditional-result", required: true }],
+    outputs: [{ outputId: "conditional-result", artifact: "conditional-result", required: true }],
     gates: [],
     approval: true,
     authorizationRequired: false,
@@ -1032,7 +1141,7 @@ test("PARENT_SKIP: Close 不要求已跳过父循环的子 Artifact、Approval �
       enabled: true,
       skills: [],
       inputs: [],
-      outputs: [{ artifact: "child-output", required: true }],
+      outputs: [{ outputId: "child-output", artifact: "child-output", required: true }],
       gates: ["child-gate"],
       approval: true,
       authorizationRequired: false,
@@ -1251,7 +1360,7 @@ test("Close 对相同 category/id 的缺失项只报告一次", () => {
     enabled: true,
     skills: [],
     inputs: [],
-    outputs: [{ artifact: "proposal", required: true }],
+    outputs: [{ outputId: "proposal", artifact: "proposal", required: true }],
     gates: [],
     approval: false,
     authorizationRequired: false,

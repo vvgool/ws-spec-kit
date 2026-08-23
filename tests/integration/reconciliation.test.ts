@@ -225,12 +225,12 @@ test("Governed issue.close rejects a custom Workflow that omits required knowled
     profile.steps = [
       {
         id: "update-issue", uses: "connector.execute", action: "issue.update", securityClass: "external-write",
-        needs: [], enabled: true, skills: [], inputs: [{ artifact: "requirement-source", required: true }],
+        needs: [], enabled: true, skills: [], inputs: [{ outputId: "requirement-source", required: true }],
         outputs: [], gates: [], approval: false, authorizationRequired: true, steps: [],
       },
       {
         id: "close-issue", uses: "connector.execute", action: "issue.close", securityClass: "external-write",
-        needs: ["update-issue"], enabled: true, skills: [], inputs: [{ artifact: "requirement-source", required: true }],
+        needs: ["update-issue"], enabled: true, skills: [], inputs: [{ outputId: "requirement-source", required: true }],
         outputs: [], gates: [], approval: false, authorizationRequired: true, steps: [],
       },
     ];

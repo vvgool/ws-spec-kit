@@ -10,6 +10,7 @@ import {
 import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
 import { sha256 } from "../../../src/domain/digests.js";
 import { createExternalBinding } from "../../../src/domain/external-receipt.js";
+import { workPackageIdentityDigest } from "../../../src/domain/work-package-identity.js";
 import { mutateControlPlane } from "../../../src/engine/scheduler.js";
 import { canonicalDigest } from "../../../src/engine/external-effects/idempotency.js";
 import type { SubmitResult } from "../../../src/protocol/application.js";
@@ -88,8 +89,8 @@ export async function applicationExternalActionFixture(
       enabled: true,
       skills: [],
       inputs: [
-        { artifact: "requirement-source", required: true },
-        ...(action === "knowledge.publish" ? [{ artifact: "knowledge-entry", required: false }] : []),
+        { outputId: "requirement-source", required: true },
+        ...(action === "knowledge.publish" ? [{ outputId: "knowledge-entry", required: false }] : []),
       ],
       outputs: [],
       gates: [],
@@ -124,6 +125,7 @@ export async function applicationExternalActionFixture(
     const body = "# Approved release summary\n\nFixture knowledge content.\n";
     const metadata = {
       artifactType: "knowledge-entry",
+      outputId: "knowledge-entry",
       schemaVersion: 1 as const,
       workItemId: started.workItemId,
       stageId: workPackage.stepId,
@@ -133,6 +135,7 @@ export async function applicationExternalActionFixture(
     const contentHash = computeArtifactContentHash(metadata, body);
     const reference: ArtifactReference = {
       artifactType: metadata.artifactType,
+      outputId: metadata.outputId,
       schemaVersion: 1,
       path: `.wsspec/work-items/${started.workItemId}/artifacts/knowledge-entry.md`,
       revision: metadata.revision,
@@ -144,6 +147,7 @@ export async function applicationExternalActionFixture(
     await writeFile(path.join(worktree, reference.path!), [
       "---",
       `artifactType: ${metadata.artifactType}`,
+      `outputId: ${metadata.outputId}`,
       `schemaVersion: ${metadata.schemaVersion}`,
       `workItemId: ${metadata.workItemId}`,
       `stageId: ${metadata.stageId}`,
@@ -163,9 +167,15 @@ export async function applicationExternalActionFixture(
         const context = projection.contexts[stepId] as { workPackage?: WorkPackage } | undefined;
         assert.ok(context?.workPackage);
         const updated = { ...context.workPackage, artifacts: [...context.workPackage.artifacts, reference] };
+        const claim = projection.claims[stepId];
+        assert.ok(claim);
         return {
           projection: {
             ...projection,
+            claims: {
+              ...projection.claims,
+              [stepId]: { ...claim, workPackageDigest: workPackageIdentityDigest(updated) },
+            },
             contexts: { ...projection.contexts, [stepId]: { ...context, workPackage: updated } },
           },
           value: updated,
@@ -222,7 +232,7 @@ export async function applicationGitActionFixture(executor: ExternalActionExecut
       needs: [],
       enabled: true,
       skills: [],
-      inputs: [{ artifact: "requirement-source", required: true }],
+      inputs: [{ outputId: "requirement-source", required: true }],
       outputs: [],
       gates: [],
       approval: false,

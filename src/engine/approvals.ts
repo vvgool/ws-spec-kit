@@ -11,11 +11,12 @@ import { mutateControlPlane } from "./scheduler.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
-type ApprovalArtifactReference = Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">;
+type ApprovalArtifactReference = Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "outputId" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">;
 
 function normalizedApprovalArtifact(artifact: ApprovalArtifactReference): Record<string, unknown> {
   return {
     artifactType: artifact.artifactType,
+    outputId: artifact.outputId ?? null,
     artifactId: artifact.artifactId ?? null,
     schemaVersion: artifact.schemaVersion,
     path: artifact.path,
@@ -40,7 +41,7 @@ export class ApprovalError extends Error {
 export function approvalBindingDigest(input: {
   stageId: string;
   attemptId: string;
-  artifacts: readonly Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">[];
+  artifacts: readonly Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "outputId" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">[];
 }): string {
   const binding = canonicalize({
     version: 1,

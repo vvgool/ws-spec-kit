@@ -1,6 +1,7 @@
 import { evaluateExpression, type ExpressionScope } from "../expressions/evaluate.js";
 import { parseExpression } from "../expressions/parser.js";
 import type { RuntimeProjection } from "../../storage/control-plane.js";
+import { artifactOutputId } from "../../domain/artifacts.js";
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -24,10 +25,15 @@ function artifactView(projection: RuntimeProjection, contextKeys?: readonly stri
     for (const artifact of completed.artifacts) {
       const reference = record(artifact);
       if (typeof reference?.artifactType !== "string") continue;
-      artifacts[reference.artifactType] = {
+      const outputId = artifactOutputId({
+        artifactType: reference.artifactType,
+        ...(typeof reference.outputId === "string" ? { outputId: reference.outputId } : {}),
+      });
+      if (outputId === undefined) continue;
+      artifacts[outputId] = {
         exists: true,
         ...(typeof reference.contentHash === "string" ? { digest: reference.contentHash } : {}),
-        ...(record(record(context)?.artifactValues)?.[reference.artifactType] as Record<string, unknown> | undefined ?? {}),
+        ...(record(record(context)?.artifactValues)?.[outputId] as Record<string, unknown> | undefined ?? {}),
       };
     }
   }

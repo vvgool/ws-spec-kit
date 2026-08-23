@@ -1,7 +1,7 @@
 import path from "node:path";
 import { parse } from "yaml";
 
-import { readArtifact } from "../../domain/artifacts.js";
+import { artifactOutputId, readArtifact } from "../../domain/artifacts.js";
 import type { LoopProjection } from "../../domain/states.js";
 import type { ArtifactReference } from "../../protocol/work-package.js";
 
@@ -93,12 +93,14 @@ export async function projectArtifactValues(
 ): Promise<Record<string, Record<string, unknown>>> {
   const selected = new Map<string, ArtifactReference>();
   for (const artifact of artifacts) {
-    const current = selected.get(artifact.artifactType);
-    if ((artifact.revision ?? 0) >= (current?.revision ?? 0)) selected.set(artifact.artifactType, artifact);
+    const outputId = artifactOutputId(artifact);
+    if (outputId === undefined) continue;
+    const current = selected.get(outputId);
+    if ((artifact.revision ?? 0) >= (current?.revision ?? 0)) selected.set(outputId, artifact);
   }
   const values: Record<string, Record<string, unknown>> = {};
-  for (const artifact of selected.values()) {
-    values[artifact.artifactType] = {
+  for (const [outputId, artifact] of selected) {
+    values[outputId] = {
       exists: true,
       ...(artifact.contentHash === undefined ? {} : { digest: artifact.contentHash }),
       ...(artifact.artifactType === "review-result" ? { approved: await reviewApproved(worktree, artifact) } : {}),

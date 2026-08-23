@@ -2,6 +2,7 @@ import type { WorkItemId } from "../domain/ids.js";
 
 export interface ArtifactReference {
   artifactType: string;
+  outputId?: string;
   schemaVersion: number;
   artifactId?: string;
   path?: string;
@@ -13,6 +14,7 @@ export interface ArtifactReference {
 
 export interface ArtifactExpectation {
   artifactType: string;
+  outputId?: string;
   schemaVersion: number;
   contentLevel?: string;
 }
@@ -48,6 +50,11 @@ export interface WorkPackage {
     forbiddenActions: string[];
   };
   requiredOutputs: ArtifactExpectation[];
+  artifactAuthoring?: {
+    version: 1;
+    maxContentBytes: number;
+    draftRoots: string[];
+  };
   gates: WorkPackageGate[];
   resultSchema: "builtin.submit-result.v1";
 }

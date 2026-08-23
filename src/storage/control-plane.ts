@@ -18,6 +18,8 @@ import { loadRepository } from "./repository.js";
 import { appendEventUnlocked, EventStoreError, readEvents, recoverStaleControlPlaneLock, repairIncompleteEventTail, withControlPlaneLock, type DomainEvent, type StoredEvent } from "./events.js";
 import { writeFileAtomic } from "./files.js";
 import { assertExternalActionProjection, type ExternalActionState } from "../engine/external-effects/authorization.js";
+import { workPackageIdentityDigest } from "../domain/work-package-identity.js";
+import type { WorkPackage } from "../protocol/work-package.js";
 
 export interface RuntimeProjection {
   version: 1;
@@ -49,6 +51,7 @@ export interface RuntimeApproval {
   contentHash: string;
   artifacts?: Array<{
     artifactType: string;
+    outputId?: string;
     artifactId?: string;
     schemaVersion: number;
     path: string;
@@ -75,6 +78,7 @@ export interface RuntimeClaim {
   inputWorkspaceTreeDigest: string;
   allowedPaths: string[];
   workspaceSnapshot: TreeEntry[];
+  workPackageDigest?: string;
 }
 
 export const applicationCloseEvidenceKey = "application.close";
@@ -547,6 +551,11 @@ export function replayEvents(input: {
         throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "Stage 事件引用了未知 Stage。");
       }
       recovered = { ...recovered, stages: { ...recovered.stages, [stageId]: transitionStage(recovered.stages[stageId], { type: "transition", to: event.to as StageState["status"] }) } };
+    } else if (event.eventType === "artifact.authored") {
+      const value = (event.result as { value?: unknown }).value;
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "Artifact authoring 事件缺少安全摘要引用。");
+      }
     } else {
       const result = event.result as ProjectionEventResult;
       if (result.projection === undefined) throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件 ${event.eventType} 缺少可重放投影。`);
@@ -696,7 +705,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     for (const stageId of preservedExternalStageIds) {
       const claim = next.claims[stageId];
       const context = next.contexts[stageId] as {
-        workPackage?: { attemptId?: unknown; lease?: { token?: unknown; expiresAt?: unknown } };
+        workPackage?: WorkPackage;
       } | undefined;
       if (claim === undefined || context?.workPackage?.attemptId !== claim.attemptId
         || context.workPackage.lease?.token !== claim.claimToken) {
@@ -708,13 +717,18 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
         ? expiresAt - claimedAt
         : 30 * 60 * 1_000;
       const renewedExpiresAt = new Date(recoveryTime.getTime() + leaseDuration).toISOString();
-      next.claims[stageId] = { ...claim, expiresAt: renewedExpiresAt };
+      const workPackage = {
+        ...context.workPackage,
+        lease: { ...context.workPackage.lease, expiresAt: renewedExpiresAt },
+      };
+      next.claims[stageId] = {
+        ...claim,
+        expiresAt: renewedExpiresAt,
+        workPackageDigest: workPackageIdentityDigest(workPackage),
+      };
       next.contexts[stageId] = {
         ...context,
-        workPackage: {
-          ...context.workPackage,
-          lease: { ...context.workPackage.lease, expiresAt: renewedExpiresAt },
-        },
+        workPackage,
       };
     }
     for (const requestId of invalidPendingApprovalIds) {

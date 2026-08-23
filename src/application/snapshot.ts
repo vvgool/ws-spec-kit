@@ -14,8 +14,8 @@ export interface SnapshotStep {
   needs: string[];
   enabled: boolean;
   skills: ResolvedSkillDescriptor[];
-  inputs: Array<{ artifact: string; required: boolean }>;
-  outputs: Array<{ artifact: string; required: boolean; contentLevel?: string }>;
+  inputs: Array<{ outputId: string; required: boolean }>;
+  outputs: Array<{ outputId: string; artifact: string; required: boolean; contentLevel?: string }>;
   gates: string[];
   approval: boolean;
   authorizationRequired: boolean;
@@ -122,9 +122,10 @@ function optionalExpression(source: Record<string, unknown>, key: string, label:
 }
 
 function parseArtifactReference(value: unknown, label: string): ArtifactReference {
-  const source = record(value, label, ["artifactType", "schemaVersion", "artifactId", "path", "revision", "contentHash", "mediaType", "contentLevel"]);
+  const source = record(value, label, ["artifactType", "outputId", "schemaVersion", "artifactId", "path", "revision", "contentHash", "mediaType", "contentLevel"]);
   return {
     artifactType: text(source.artifactType, `${label}.artifactType`),
+    ...(source.outputId === undefined ? {} : { outputId: text(source.outputId, `${label}.outputId`) }),
     schemaVersion: integer(source.schemaVersion, `${label}.schemaVersion`, 1),
     ...(source.artifactId === undefined ? {} : { artifactId: text(source.artifactId, `${label}.artifactId`) }),
     ...(source.path === undefined ? {} : { path: text(source.path, `${label}.path`) }),
@@ -145,14 +146,15 @@ function parseSkillDescriptor(value: unknown, label: string): ResolvedSkillDescr
   };
 }
 
-function parseArtifactRequirement(value: unknown, label: string): { artifact: string; required: boolean } {
-  const source = record(value, label, ["artifact", "required"]);
-  return { artifact: text(source.artifact, `${label}.artifact`), required: flag(source.required, `${label}.required`) };
+function parseArtifactRequirement(value: unknown, label: string): { outputId: string; required: boolean } {
+  const source = record(value, label, ["outputId", "required"]);
+  return { outputId: text(source.outputId, `${label}.outputId`), required: flag(source.required, `${label}.required`) };
 }
 
-function parseArtifactDeclaration(value: unknown, label: string): { artifact: string; required: boolean; contentLevel?: string } {
-  const source = record(value, label, ["artifact", "required", "contentLevel"]);
+function parseArtifactDeclaration(value: unknown, label: string): { outputId: string; artifact: string; required: boolean; contentLevel?: string } {
+  const source = record(value, label, ["outputId", "artifact", "required", "contentLevel"]);
   return {
+    outputId: text(source.outputId, `${label}.outputId`),
     artifact: text(source.artifact, `${label}.artifact`),
     required: flag(source.required, `${label}.required`),
     ...(source.contentLevel === undefined ? {} : { contentLevel: text(source.contentLevel, `${label}.contentLevel`) }),

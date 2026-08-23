@@ -1,7 +1,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import * as canonicalizeModule from "canonicalize";
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 
 import { sha256 } from "./digests.js";
 import { resolveRepositoryRegularFile } from "./repository-path.js";
@@ -11,6 +11,7 @@ const canonicalize = canonicalizeModule.default as unknown as (input: unknown) =
 
 export interface ArtifactMetadata {
   artifactType: string;
+  outputId?: string;
   schemaVersion: 1;
   workItemId: string;
   stageId: string;
@@ -34,11 +35,17 @@ export interface ArtifactExpectation {
 
 export interface ArtifactReference {
   artifactType: string;
+  outputId?: string;
   schemaVersion: 1;
   path: string;
   mediaType: "text/markdown";
   revision: number;
   contentHash: string;
+}
+
+export function artifactOutputId(reference: Pick<ArtifactReference, "artifactType" | "outputId">): string | undefined {
+  if (reference.outputId !== undefined && reference.outputId !== "") return reference.outputId;
+  return reference.artifactType === "requirement-source" ? "requirement-source" : undefined;
 }
 
 export class ArtifactError extends Error {
@@ -59,7 +66,7 @@ const sectionContracts: Record<string, string[]> = {
   "knowledge-entry": ["背景", "需求或 Bug", "关键决策", "实现摘要", "验证证据", "适用范围", "限制", "相关引用"],
 };
 
-function normalizeBody(body: string): string {
+export function normalizeArtifactBody(body: string): string {
   const normalized = body
     .replaceAll("\r\n", "\n")
     .replaceAll("\r", "\n")
@@ -75,7 +82,41 @@ export function computeArtifactContentHash(metadataWithoutHash: Record<string, u
   if (canonicalMetadata === undefined) {
     throw new ArtifactError("WSSPEC_ARTIFACT_SCHEMA_MISMATCH", "Artifact 元数据无法规范化。");
   }
-  return sha256(`${canonicalMetadata}\n${normalizeBody(body)}`);
+  return sha256(`${canonicalMetadata}\n${normalizeArtifactBody(body)}`);
+}
+
+export function createArtifactDocument(input: {
+  artifactType: string;
+  outputId: string;
+  workItemId: string;
+  stageId: string;
+  attemptId: string;
+  body: string;
+}): { content: string; reference: Omit<ArtifactReference, "path"> } {
+  const body = normalizeArtifactBody(input.body);
+  verifySections(input.artifactType, body, true);
+  const metadataWithoutHash = {
+    artifactType: input.artifactType,
+    outputId: input.outputId,
+    schemaVersion: 1 as const,
+    workItemId: input.workItemId,
+    stageId: input.stageId,
+    attemptId: input.attemptId,
+    revision: 1,
+  };
+  const contentHash = computeArtifactContentHash(metadataWithoutHash, body);
+  const metadata: ArtifactMetadata = { ...metadataWithoutHash, contentHash };
+  return {
+    content: `---\n${stringify(metadata, { lineWidth: 0 })}---\n${body}`,
+    reference: {
+      artifactType: input.artifactType,
+      outputId: input.outputId,
+      schemaVersion: 1,
+      mediaType: "text/markdown",
+      revision: 1,
+      contentHash,
+    },
+  };
 }
 
 function decodeStrict(buffer: Buffer): string {
@@ -232,6 +273,7 @@ export async function verifyArtifact(
   }
   return {
     artifactType: metadata.artifactType,
+    ...(metadata.outputId === undefined ? {} : { outputId: metadata.outputId }),
     schemaVersion: metadata.schemaVersion,
     path: relative.split(path.sep).join("/"),
     mediaType: "text/markdown",

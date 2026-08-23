@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
+import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
+import { conditionScope } from "../../src/engine/control/condition.js";
+import { projectArtifactValues } from "../../src/engine/control/loop.js";
+import type { ArtifactReference } from "../../src/protocol/work-package.js";
 import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
 import { readEvents } from "../../src/storage/events.js";
 import {
@@ -22,6 +26,54 @@ async function prepareLoop(profile: "quick" | "standard") {
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证 Review-Fix 循环" }, profile });
   await retainOnlyReadyStage(fixture, started.workItemId, "review-fix");
   return { fixture, started, worktree: await worktreeFor(fixture.root, started.workItemId) };
+}
+
+async function writeProjectionReviewArtifact(input: {
+  worktree: string;
+  workItemId: string;
+  approved: boolean;
+  revision: number;
+  outputId?: string;
+}): Promise<ArtifactReference> {
+  const outputId = input.outputId ?? "review-result";
+  const findings = input.approved
+    ? "findings: []"
+    : "findings:\n  - id: finding-1\n    disposition: open";
+  const body = `# Findings\n\n\`\`\`yaml\n${findings}\n\`\`\`\n`;
+  const metadata = {
+    artifactType: "review-result",
+    outputId,
+    schemaVersion: 1 as const,
+    workItemId: input.workItemId,
+    stageId: "review-fix:1:review",
+    attemptId: "attempt-projection",
+    revision: input.revision,
+  };
+  const contentHash = computeArtifactContentHash(metadata, body);
+  const relative = `.wsspec/work-items/${input.workItemId}/projection-tests/${outputId}-v${input.revision}.md`;
+  await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
+  await writeFile(path.join(input.worktree, relative), [
+    "---",
+    "artifactType: review-result",
+    `outputId: ${outputId}`,
+    "schemaVersion: 1",
+    `workItemId: ${input.workItemId}`,
+    "stageId: review-fix:1:review",
+    "attemptId: attempt-projection",
+    `revision: ${input.revision}`,
+    `contentHash: ${contentHash}`,
+    "---",
+    body,
+  ].join("\n"), "utf8");
+  return {
+    artifactType: "review-result",
+    outputId,
+    schemaVersion: 1,
+    path: relative,
+    revision: input.revision,
+    contentHash,
+    mediaType: "text/markdown",
+  };
 }
 
 test("循环投影不会把原型属性当成已有 Loop 实例", async () => {
@@ -91,7 +143,7 @@ test("Review 通过时立即结束外层循环并可从事件恢复相同投影"
   const { fixture, started, worktree } = await prepareLoop("standard");
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
   assert.equal(review.stepId, "review-fix:1:review");
-  const artifact = await writeReviewArtifact({ worktree, workItemId: started.workItemId, workPackage: review, approved: true, filename: "review-1.md" });
+  const artifact = await writeReviewArtifact({ fixture, worktree, workPackage: review, approved: true, filename: "review-1.md" });
 
   const completed = await submitPackage(fixture, review, completedResult(review, [artifact]));
   assert.equal(completed.action, "completed");
@@ -113,7 +165,7 @@ test("Review 通过时立即结束外层循环并可从事件恢复相同投影"
 test("Fix 与 Verify 后进入新轮次，轮次隔离且旧 Submit 保持幂等", async () => {
   const { fixture, started, worktree } = await prepareLoop("standard");
   const review1 = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer-1" }));
-  const rejected = await writeReviewArtifact({ worktree, workItemId: started.workItemId, workPackage: review1, approved: false, filename: "review-1.md" });
+  const rejected = await writeReviewArtifact({ fixture, worktree, workPackage: review1, approved: false, filename: "review-1.md" });
   const fix1 = requireExecute(await submitPackage(fixture, review1, completedResult(review1, [rejected])));
   assert.equal(fix1.stepId, "review-fix:1:fix");
   const verify1 = requireExecute(await submitPackage(fixture, fix1));
@@ -143,19 +195,19 @@ test("Fix 与 Verify 后进入新轮次，轮次隔离且旧 Submit 保持幂等
     (error: unknown) => error instanceof Error && "code" in error && (error as Error & { code: string }).code === "WSSPEC_IDEMPOTENCY_CONFLICT",
   );
 
-  const accepted = await writeReviewArtifact({ worktree, workItemId: started.workItemId, workPackage: review2, approved: true, filename: "review-2.md" });
+  const accepted = await writeReviewArtifact({ fixture, worktree, workPackage: review2, approved: true, filename: "review-2.md" });
   await submitPackage(fixture, review2, completedResult(review2, [accepted]));
   const finished = await readControlPlane(fixture.root, started.workItemId);
   const firstResult = finished.contexts["review-fix:1:review"] as { result: { artifacts: Array<{ path?: string }> } };
   const secondResult = finished.contexts["review-fix:2:review"] as { result: { artifacts: Array<{ path?: string }> } };
-  assert.equal(firstResult.result.artifacts[0]?.path?.endsWith("review-1.md"), true);
-  assert.equal(secondResult.result.artifacts[0]?.path?.endsWith("review-2.md"), true);
+  assert.equal(firstResult.result.artifacts[0]?.path, rejected.path);
+  assert.equal(secondResult.result.artifacts[0]?.path, accepted.path);
 });
 
 test("until 始终为 false 时达到 maxIterations 后稳定阻塞并保持恢复一致", async () => {
   const { fixture, started, worktree } = await prepareLoop("quick");
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
-  const rejected = await writeReviewArtifact({ worktree, workItemId: started.workItemId, workPackage: review, approved: false, filename: "review-blocked.md" });
+  const rejected = await writeReviewArtifact({ fixture, worktree, workPackage: review, approved: false, filename: "review-blocked.md" });
   const fix = requireExecute(await submitPackage(fixture, review, completedResult(review, [rejected])));
   const verify = requireExecute(await submitPackage(fixture, fix));
   const blocked = await submitPackage(fixture, verify);
@@ -246,26 +298,52 @@ test("循环快照缺少 until 时拒绝把首个完成的内部 Step 当作退�
 });
 
 test("Review 退出条件使用最高 revision，不受提交数组顺序影响", async () => {
-  const { fixture, started, worktree } = await prepareLoop("standard");
-  const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
-  const openV2 = await writeReviewArtifact({
+  const { started, worktree } = await prepareLoop("standard");
+  const openV2 = await writeProjectionReviewArtifact({
     worktree,
     workItemId: started.workItemId,
-    workPackage: review,
     approved: false,
-    filename: "review-v2.md",
     revision: 2,
   });
-  const fixedV1 = await writeReviewArtifact({
+  const fixedV1 = await writeProjectionReviewArtifact({
     worktree,
     workItemId: started.workItemId,
-    workPackage: review,
     approved: true,
-    filename: "review-v1.md",
     revision: 1,
   });
 
-  const fix = requireExecute(await submitPackage(fixture, review, completedResult(review, [openV2, fixedV1])));
-  assert.equal(fix.stepId, "review-fix:1:fix");
-  assert.deepEqual(fix.artifacts, [openV2]);
+  assert.equal((await projectArtifactValues(worktree, [openV2, fixedV1]))["review-result"]?.approved, false);
+  assert.equal((await projectArtifactValues(worktree, [fixedV1, openV2]))["review-result"]?.approved, false);
+});
+
+test("同类型 Review outputs 在 Loop 与 Condition 投影中按 outputId 隔离", async () => {
+  const { fixture, started, worktree } = await prepareLoop("standard");
+  const primary = await writeProjectionReviewArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    approved: true,
+    revision: 1,
+    outputId: "primary-review",
+  });
+  const security = await writeProjectionReviewArtifact({
+    worktree,
+    workItemId: started.workItemId,
+    approved: false,
+    revision: 1,
+    outputId: "security-review",
+  });
+  const artifactValues = await projectArtifactValues(worktree, [primary, security]);
+  assert.deepEqual(artifactValues, {
+    "primary-review": { exists: true, digest: primary.contentHash, approved: true },
+    "security-review": { exists: true, digest: security.contentHash, approved: false },
+  });
+
+  const projection = await readControlPlane(fixture.root, started.workItemId);
+  projection.contexts = {
+    review: {
+      artifactValues,
+      result: { status: "completed", artifacts: [primary, security] },
+    },
+  };
+  assert.deepEqual({ ...conditionScope(projection).artifacts }, artifactValues);
 });

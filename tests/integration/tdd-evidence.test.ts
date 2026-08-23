@@ -987,7 +987,7 @@ async function applicationVerifyGreen(testSource = featureTestSource()) {
   await rewriteSelectedSnapshot(current, started.workItemId, (profile) => {
     const implement = profile.steps.find(({ id }) => id === "implement");
     assert.ok(implement);
-    implement.inputs = (implement.inputs as Array<{ artifact: string }>).filter(({ artifact }) => artifact !== "tasks");
+    implement.inputs = (implement.inputs as Array<{ outputId: string }>).filter(({ outputId }) => outputId !== "tasks");
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
   const red = await recordRedEvidence(await redInput(worktree, gate, { taskId: started.workItemId }));
@@ -1243,6 +1243,7 @@ test("invalid Red atomically releases verify-red and routes back to write-tests"
             result: {
               status: "completed",
               artifacts: [{
+                outputId: "tasks",
                 artifactType: "tasks",
                 schemaVersion: 1,
                 path: "tasks.md",
