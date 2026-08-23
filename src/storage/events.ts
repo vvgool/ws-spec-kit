@@ -18,6 +18,7 @@ export interface DomainEvent {
     | "context.created"
     | "attempt.acquired"
     | "attempt.reacquired"
+    | "artifact.authored"
     | "step.skipped"
     | "attempt.submitted"
     | "approval.requested"

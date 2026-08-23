@@ -1,6 +1,7 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { computeArtifactContentHash, readArtifact, verifyArtifact } from "../domain/artifacts.js";
+import { artifactOutputId, computeArtifactContentHash, readArtifact, verifyArtifact } from "../domain/artifacts.js";
 import { createExternalBinding, externalPublishTarget } from "../domain/external-receipt.js";
 import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, sha256, type TreeEntry } from "../domain/digests.js";
 import { matchesRepositoryPath, resolveRepositoryRegularFile } from "../domain/repository-path.js";
@@ -27,6 +28,7 @@ import { validateKnowledgePublishTarget } from "../registry/connectors/knowledge
 import { validateIssueWriteAction } from "../registry/connectors/issue.js";
 import { validate } from "../schemas/index.js";
 import { recoverControlPlane, type RuntimeProjection } from "../storage/control-plane.js";
+import { readEvents } from "../storage/events.js";
 import { recordGreenEvidenceDetails } from "../engine/tdd/green-gate.js";
 import { recordRedEvidence } from "../engine/tdd/red-gate.js";
 import { isTddVerificationCode, VerificationError, type TddCycleEvidence, type TddVerificationCode, type TrustedEvidence } from "../engine/tdd/types.js";
@@ -206,7 +208,7 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
 async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotStep, attemptId: string, reference: ArtifactReference): Promise<void> {
   if (reference.artifactType === "requirement-source") {
     const source = state.snapshot.source;
-    const fields = ["artifactType", "schemaVersion", "artifactId", "path", "revision", "contentHash", "mediaType", "contentLevel"] as const;
+    const fields = ["artifactType", "outputId", "schemaVersion", "artifactId", "path", "revision", "contentHash", "mediaType", "contentLevel"] as const;
     if (!fields.every((field) => reference[field] === source[field])) {
       throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Requirement Source Artifact 与不可变快照不一致。 ");
     }
@@ -228,12 +230,30 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
     attemptId,
   }, { allowUnregisteredType: true });
   if (verified.artifactType !== reference.artifactType
+    || verified.outputId !== reference.outputId
     || verified.schemaVersion !== reference.schemaVersion
     || verified.path !== normalized
     || verified.revision !== reference.revision
     || verified.contentHash !== reference.contentHash
     || (reference.mediaType !== undefined && verified.mediaType !== reference.mediaType)) {
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 身份与提交引用不一致。 `);
+  }
+  const canonicalPath = `.wsspec/work-items/${state.item.workItemId}/artifacts/${reference.artifactType}/${reference.contentHash.slice("sha256:".length)}.md`;
+  const artifactDigest = sha256(await readFile(filename));
+  const authored = (await readEvents(state.projection.controlPlane)).some((event) => {
+    if (event.eventType !== "artifact.authored" || event.stageId !== step.id || event.attemptId !== attemptId) return false;
+    const value = record((event.result as { value?: unknown }).value);
+    return value?.artifactType === reference.artifactType
+      && value.outputId === reference.outputId
+      && value.schemaVersion === reference.schemaVersion
+      && value.revision === reference.revision
+      && value.contentHash === reference.contentHash
+      && (reference.mediaType === undefined || value.mediaType === reference.mediaType)
+      && value.contentLevel === reference.contentLevel
+      && value.artifactDigest === artifactDigest;
+  });
+  if (normalized !== canonicalPath || !authored) {
+    throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 缺少匹配的受治理 authoring 事件。`);
   }
 }
 
@@ -381,16 +401,21 @@ async function validateResult(input: SubmitInput, state: ApplicationState, targe
   if (engineTddStep(target.step, target.internal, hasCycle) && changed.length !== 0) {
     throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "引擎管理的 TDD 验证 Attempt 不允许修改 workspace。 ");
   }
-  const declaredOutputs = new Set(target.step.outputs.map((output) => output.artifact));
-  const undeclared = input.result.artifacts.find((artifact) => !declaredOutputs.has(artifact.artifactType));
+  const undeclared = input.result.artifacts.find((artifact) => !target.step.outputs.some((output) => {
+    return artifact.artifactType === output.artifact && artifactOutputId(artifact) === output.outputId;
+  }));
   if (undeclared !== undefined) {
-    throw new ApplicationSubmitError("WSSPEC_UNDECLARED_ARTIFACT", `Artifact ${undeclared.artifactType} 未在 Step outputs 中声明。 `);
+    throw new ApplicationSubmitError("WSSPEC_UNDECLARED_ARTIFACT", `Artifact output ${artifactOutputId(undeclared) ?? "<missing>"} 未在 Step outputs 中声明。 `);
   }
+  const expectedOutputs = context.workPackage.requiredOutputs;
   for (const artifact of input.result.artifacts) await verifySubmittedArtifact(state, { ...target.step, id: input.stepId }, input.attemptId, artifact);
   if (input.result.status === "completed" && !engineTddStep(target.step, target.internal, hasCycle)) {
-    for (const output of target.step.outputs.filter((candidate) => candidate.required)) {
-      if (!input.result.artifacts.some((artifact) => artifact.artifactType === output.artifact)) {
-        throw new ApplicationSubmitError("WSSPEC_REQUIRED_ARTIFACT_MISSING", `缺少必需 Artifact ${output.artifact}。 `);
+    for (const output of expectedOutputs) {
+      const outputId = output.outputId ?? (output.artifactType === "requirement-source" ? "requirement-source" : undefined);
+      if (outputId === undefined || !input.result.artifacts.some((artifact) => {
+        return artifact.artifactType === output.artifactType && artifactOutputId(artifact) === outputId;
+      })) {
+        throw new ApplicationSubmitError("WSSPEC_REQUIRED_ARTIFACT_MISSING", `缺少必需 Artifact output ${output.outputId ?? output.artifactType}。 `);
       }
     }
   }

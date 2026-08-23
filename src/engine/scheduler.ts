@@ -63,15 +63,31 @@ export async function mutateControlPlane<T>(input: {
   stageId?: string | ((value: T) => string | undefined);
   attemptId?: string | ((value: T) => string | undefined);
   operationInput: unknown;
+  resolveIdentity?: (projection: RuntimeProjection) => { idempotencyKey: string; operationInput: unknown };
   eventDetails?: (value: T) => Record<string, unknown>;
+  simulateEventFailure?: boolean;
+  simulateEventReturnFailure?: boolean;
+  simulateEventVerificationFailure?: boolean;
   simulateProjectionFailure?: boolean;
-  mutate: (projection: RuntimeProjection) => Promise<{ projection: RuntimeProjection; value: T }> | { projection: RuntimeProjection; value: T };
+  mutate: (projection: RuntimeProjection) => Promise<{
+    projection: RuntimeProjection;
+    value: T;
+    rollback?: () => Promise<void>;
+  }> | {
+    projection: RuntimeProjection;
+    value: T;
+    rollback?: () => Promise<void>;
+  };
 }): Promise<T> {
   const initial = await readControlPlane(input.cwd, input.workItemId);
   return withControlPlaneLock(initial.controlPlane, async () => {
     const projection = await readControlPlane(input.cwd, input.workItemId);
-    const inputDigest = operationInputDigest(input.operationInput);
-    const previousSequence = projection.idempotency[input.idempotencyKey];
+    const mutationIdentity = input.resolveIdentity?.(projection) ?? {
+      idempotencyKey: input.idempotencyKey,
+      operationInput: input.operationInput,
+    };
+    const inputDigest = operationInputDigest(mutationIdentity.operationInput);
+    const previousSequence = projection.idempotency[mutationIdentity.idempotencyKey];
     if (previousSequence !== undefined) {
       const previous = (await readEvents(projection.controlPlane))[previousSequence - 1];
       if (previous?.inputDigest !== inputDigest) throw new ControlPlaneError("WSSPEC_IDEMPOTENCY_CONFLICT", "幂等键已被不同输入使用。");
@@ -79,49 +95,83 @@ export async function mutateControlPlane<T>(input: {
     }
     if (projection.readOnly) throw new ControlPlaneError("WSSPEC_CONTROL_PLANE_READ_ONLY", "Work Item 已关闭，运行控制面只读。");
     const mutation = await input.mutate(projection);
-    assertExternalActionProjection(mutation.projection.externalActions, mutation.projection.externalActionIdempotency);
-    assertExternalReceipts(mutation.projection.evidence, "WSSPEC_EVENT_INVALID");
-    const metadata = await eventMetadata(projection);
-    const snapshot = {
-      workItem: mutation.projection.workItem,
-      stages: mutation.projection.stages,
-      profile: mutation.projection.profile,
-      claims: mutation.projection.claims,
-      contexts: mutation.projection.contexts,
-      approvals: mutation.projection.approvals,
-      externalActions: mutation.projection.externalActions,
-      externalActionIdempotency: mutation.projection.externalActionIdempotency,
-      evidence: mutation.projection.evidence,
-      loops: mutation.projection.loops,
-      retries: mutation.projection.retries,
-      readOnly: mutation.projection.readOnly,
-    };
-    const event: DomainEvent = {
-      eventId: `event-${crypto.randomUUID()}`,
-      eventType: typeof input.eventType === "function" ? input.eventType(mutation.value) : input.eventType,
-      occurredAt: new Date().toISOString(),
-      actor: input.actor ?? "engine",
-      repositoryId: projection.repositoryId,
-      workItemId: projection.workItemId,
-      stageId: (typeof input.stageId === "function" ? input.stageId(mutation.value) : input.stageId) ?? null,
-      attemptId: (typeof input.attemptId === "function" ? input.attemptId(mutation.value) : input.attemptId) ?? null,
-      from: projection.workItem.status,
-      to: mutation.projection.workItem.status,
-      idempotencyKey: input.idempotencyKey,
-      ...metadata,
-      inputWorkspaceTreeDigest: metadata.baselineTreeDigest,
-      outputWorkspaceTreeDigest: null,
-      inputDigest,
-      result: { projection: snapshot, value: mutation.value, ...(input.eventDetails?.(mutation.value) ?? {}) },
-    };
-    const stored = await appendEventUnlocked(projection.controlPlane, event);
-    const next = mutation.projection;
-    next.lastSequence = stored.sequence;
-    next.lastEventHash = stored.eventHash;
-    next.idempotency = { ...projection.idempotency, [input.idempotencyKey]: stored.sequence };
-    if (input.simulateProjectionFailure === true) throw new ControlPlaneError("WSSPEC_PROJECTION_WRITE_FAILED", "已追加事件，但模拟的投影写入失败。");
-    await writeProjection(next);
-    return mutation.value;
+    let eventPersisted = false;
+    let eventAppendAttempted = false;
+    let eventId: string | undefined;
+    try {
+      assertExternalActionProjection(mutation.projection.externalActions, mutation.projection.externalActionIdempotency);
+      assertExternalReceipts(mutation.projection.evidence, "WSSPEC_EVENT_INVALID");
+      const metadata = await eventMetadata(projection);
+      const snapshot = {
+        workItem: mutation.projection.workItem,
+        stages: mutation.projection.stages,
+        profile: mutation.projection.profile,
+        claims: mutation.projection.claims,
+        contexts: mutation.projection.contexts,
+        approvals: mutation.projection.approvals,
+        externalActions: mutation.projection.externalActions,
+        externalActionIdempotency: mutation.projection.externalActionIdempotency,
+        evidence: mutation.projection.evidence,
+        loops: mutation.projection.loops,
+        retries: mutation.projection.retries,
+        readOnly: mutation.projection.readOnly,
+      };
+      const eventType = typeof input.eventType === "function" ? input.eventType(mutation.value) : input.eventType;
+      eventId = `event-${crypto.randomUUID()}`;
+      const event: DomainEvent = {
+        eventId,
+        eventType,
+        occurredAt: new Date().toISOString(),
+        actor: input.actor ?? "engine",
+        repositoryId: projection.repositoryId,
+        workItemId: projection.workItemId,
+        stageId: (typeof input.stageId === "function" ? input.stageId(mutation.value) : input.stageId) ?? null,
+        attemptId: (typeof input.attemptId === "function" ? input.attemptId(mutation.value) : input.attemptId) ?? null,
+        from: projection.workItem.status,
+        to: mutation.projection.workItem.status,
+        idempotencyKey: mutationIdentity.idempotencyKey,
+        ...metadata,
+        inputWorkspaceTreeDigest: metadata.baselineTreeDigest,
+        outputWorkspaceTreeDigest: null,
+        inputDigest,
+        result: {
+          ...(eventType === "artifact.authored" ? {} : { projection: snapshot }),
+          value: mutation.value,
+          ...(input.eventDetails?.(mutation.value) ?? {}),
+        },
+      };
+      if (input.simulateEventFailure === true) throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "模拟的事件追加失败。");
+      eventAppendAttempted = true;
+      const stored = await appendEventUnlocked(projection.controlPlane, event);
+      if (input.simulateEventReturnFailure === true) {
+        throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "模拟事件已经持久化但调用方未收到结果。");
+      }
+      eventPersisted = true;
+      const next = mutation.projection;
+      next.lastSequence = stored.sequence;
+      next.lastEventHash = stored.eventHash;
+      next.idempotency = { ...projection.idempotency, [mutationIdentity.idempotencyKey]: stored.sequence };
+      if (input.simulateProjectionFailure === true) throw new ControlPlaneError("WSSPEC_PROJECTION_WRITE_FAILED", "已追加事件，但模拟的投影写入失败。");
+      await writeProjection(next);
+      return mutation.value;
+    } catch (error) {
+      let eventDefinitelyAbsent = !eventAppendAttempted;
+      if (!eventPersisted && eventAppendAttempted && eventId !== undefined) {
+        try {
+          if (input.simulateEventVerificationFailure === true) {
+            throw new ControlPlaneError("WSSPEC_EVENT_INVALID", "模拟的事件日志验证读取失败。");
+          }
+          const latest = (await readEvents(projection.controlPlane)).at(-1);
+          eventPersisted = latest?.eventId === eventId;
+          eventDefinitelyAbsent = !eventPersisted;
+        } catch {
+          // Preserve the file when append durability is unknowable; recovery can reconcile an orphan, not a missing target.
+          eventDefinitelyAbsent = false;
+        }
+      }
+      if (!eventPersisted && eventDefinitelyAbsent) await mutation.rollback?.();
+      throw error;
+    }
   });
 }
 
