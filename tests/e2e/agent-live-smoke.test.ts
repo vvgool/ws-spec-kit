@@ -774,6 +774,7 @@ test("prepare 子进程环境不继承 injected secrets，run manifest 只保留
     maxBuffer: 2 * 1024 * 1024,
   });
   const prepared = JSON.parse(stdout) as PublicPreparedSmoke;
+  assert.equal(prepared.client, "cursor");
   const commonDirectory = (await execFileAsync("git", ["rev-parse", "--git-common-dir"], { cwd: root })).stdout.trim();
   const persistedFiles = [...await filesUnder(root), ...await filesUnder(path.resolve(root, commonDirectory))];
   for (const filename of new Set(persistedFiles)) assert.doesNotMatch(await readFile(filename, "utf8").catch(() => ""), new RegExp(secret, "u"), filename);
@@ -798,6 +799,32 @@ test("历史 live matrix 由 legacy-unbound manifest 生成且不把观察写成
     assert.equal((history.clients[client]?.hostInvocationEvidence as Record<string, unknown>)?.status, "not-run-legacy-unbound");
     assert.doesNotMatch(JSON.stringify(history.clients[client]), /"pass"/u);
   }
+});
+
+test("当前真实宿主 NO-GO 探测与 legacy 观察、local fixture 证据保持分层", async () => {
+  await execFileAsync(process.execPath, [matrixScript, "--check"], { cwd: repositoryRoot });
+  const historyText = await readFile(path.join(repositoryRoot, "docs", "acceptance", "agent-live-history.json"), "utf8");
+  const history = JSON.parse(historyText) as {
+    currentProbe: { method: string; clients: Record<string, { availability: string; realHostEvidence: { status: string; receiptCount: number; phases: unknown[]; verifier: string } }> };
+    evidenceTiers: { localFixtures: string; historicalLegacyObservations: string; realHostEvidence: string };
+    clients: Record<string, Record<string, unknown>>;
+  };
+
+  assert.equal(history.currentProbe.method, "command-v-only");
+  assert.equal(history.currentProbe.clients.codex?.availability, "missing");
+  assert.equal(history.currentProbe.clients.claude?.availability, "missing");
+  assert.equal(history.currentProbe.clients.cursor?.availability, "available-unverified");
+  for (const client of ["codex", "claude", "cursor"]) {
+    const evidence = history.currentProbe.clients[client]?.realHostEvidence;
+    assert.equal(evidence?.status, "not-run-no-go");
+    assert.equal(evidence?.receiptCount, 0);
+    assert.deepEqual(evidence?.phases, []);
+    assert.equal(evidence?.verifier, "not-run");
+    assert.equal(history.clients[client]?.authorityStatus, "legacy-unbound");
+  }
+  assert.equal(history.evidenceTiers.localFixtures, "local-automated-only");
+  assert.equal(history.evidenceTiers.historicalLegacyObservations, "legacy-unbound-not-real-host-evidence");
+  assert.equal(history.evidenceTiers.realHostEvidence, "signed-observer-three-session-and-verifier-required");
 });
 
 test("verifier 重新计算 Artifact contentHash 并拒绝正文篡改", async () => {

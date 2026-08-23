@@ -7,9 +7,12 @@
 本页预检发生在外部 authority 和签名 run manifest 引入之前，无法事后补签。机器可读记录中的 `runIdHash`
 只关联 sanitized legacy record，不代表存在原始 Claude session/run；本页没有任何可发布 PASS。
 
-2026-08-22 在 macOS 26.6.2 arm64 上预检。WSSpecKit 基线为 `3d0175b7`。PATH 中不存在 `claude` 或其他
+历史记录称 2026-08-22 在 macOS 26.6.2 arm64 上预检。WSSpecKit 基线为 `3d0175b7`。PATH 中不存在 `claude` 或其他
 Claude Code CLI；本机存在 Claude Desktop `1.28929.0`，其 canonical binary 是 Electron GUI，不提供本任务
 所需的 headless Skill 列表、非交互执行或会话恢复接口。
+
+**2026-08-23 当前复核：** 只允许并仅执行了 `command -v claude`，结果为缺失。没有调用 Claude、没有检查版本或认证、没有启动
+Agent 或模型，也没有生成本次 signed receipt；历史 Desktop 观察不是当前真实 Host evidence。
 
 因此没有启动 Claude Code 模型调用，没有验证 `/skills`、自动触发、显式 Driver、`inspect -> acquire`
 恢复，也没有生成 Work Item 或 verifier 通过证据。桌面应用文件存在不能替代真实 Claude Code 客户端验收。

@@ -4,8 +4,8 @@
 
 **Blocked by:** 04: 验证功能 Workflow 的本地可恢复闭环; 05: 验证文档 Workflow 的本地可恢复闭环.
 
-**Status:** ready-for-agent
+**Status:** blocked-no-go
 
-- [ ] 每个可用宿主在隔离 fixture 上产生脱敏、可回读的真实会话证据，覆盖 Driver 调用、`inspect + acquire` 恢复、提交和 verifier 结果。
-- [ ] 证据将自动化 fixture、历史观察与发布级真实宿主结果明确分层，缺少客户端或认证时记录为 NO-GO 而不模拟通过。
-- [ ] 宿主验收不改变 Foundation 冻结的 Application Protocol 或 Artifact authoring 边界。
+- [ ] 每个可用宿主在隔离 fixture 上产生脱敏、可回读的真实会话证据，覆盖 Driver 调用、`inspect + acquire` 恢复、提交和 verifier 结果。**NO-GO：** 本次仅允许 `command -v`，Codex 和 Claude 缺失，未运行真实会话。
+- [x] 证据将自动化 fixture、历史观察与发布级真实宿主结果明确分层，缺少客户端或认证时记录为 NO-GO 而不模拟通过。**已记录：** Cursor command 可用但未验证认证，且没有 signed auto/explicit/recovery receipts 或 verifier PASS。
+- [x] 宿主验收不改变 Foundation 冻结的 Application Protocol 或 Artifact authoring 边界。**已核对：** 本次只更新脱敏验收记录和其矩阵校验，不修改 Protocol。

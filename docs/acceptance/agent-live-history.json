@@ -1,7 +1,7 @@
 {
   "version": 1,
   "kind": "wsspeckit-agent-live-history",
-  "recordedDate": "2026-08-22",
+  "recordedDate": "2026-08-23",
   "platform": "macOS-26.6.2-arm64",
   "wsspeckitCommit": "3d0175b7ea8c6e6f1539912b35ccac9bc2ac7396",
   "overall": "no-go",
@@ -16,6 +16,63 @@
       "final-verifier-pass"
     ],
     "satisfiedChecks": []
+  },
+  "evidenceTiers": {
+    "localFixtures": "local-automated-only",
+    "historicalLegacyObservations": "legacy-unbound-not-real-host-evidence",
+    "realHostEvidence": "signed-observer-three-session-and-verifier-required"
+  },
+  "currentProbe": {
+    "recordedDate": "2026-08-23",
+    "method": "command-v-only",
+    "realHostExecution": "not-authorized-not-run",
+    "clients": {
+      "codex": {
+        "availability": "missing",
+        "realHostEvidence": {
+          "status": "not-run-no-go",
+          "receiptCount": 0,
+          "phases": [],
+          "verifier": "not-run",
+          "requiredChecks": [
+            "auto-session",
+            "explicit-session",
+            "recovery-session",
+            "final-verifier-pass"
+          ]
+        }
+      },
+      "claude": {
+        "availability": "missing",
+        "realHostEvidence": {
+          "status": "not-run-no-go",
+          "receiptCount": 0,
+          "phases": [],
+          "verifier": "not-run",
+          "requiredChecks": [
+            "auto-session",
+            "explicit-session",
+            "recovery-session",
+            "final-verifier-pass"
+          ]
+        }
+      },
+      "cursor": {
+        "availability": "available-unverified",
+        "realHostEvidence": {
+          "status": "not-run-no-go",
+          "receiptCount": 0,
+          "phases": [],
+          "verifier": "not-run",
+          "requiredChecks": [
+            "auto-session",
+            "explicit-session",
+            "recovery-session",
+            "final-verifier-pass"
+          ]
+        }
+      }
+    }
   },
   "clients": {
     "codex": {

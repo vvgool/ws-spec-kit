@@ -9,9 +9,12 @@
 机器可读的脱敏历史位于 `agent-live-history.json`；其中 `runIdHash` 只关联公开的 sanitized legacy record，
 不是对已丢失原始 session/run ID 的伪造替代。
 
-2026-08-22 在 macOS 26.6.2 arm64 上运行真实 Codex CLI 与模型。客户端版本为
+历史记录称 2026-08-22 曾在 macOS 26.6.2 arm64 上运行真实 Codex CLI 与模型。客户端版本为
 `codex-cli 0.148.0-alpha.21`，认证状态检查成功，`codex exec` 非交互入口可用。验收基于 WSSpecKit
 `3d0175b7`，脱敏 Work Item 为 `WSS-...4AXWZC`。未访问外部 Issue、飞书或其他业务系统。
+
+**2026-08-23 当前复核：** 只允许并仅执行了 `command -v codex`，结果为缺失。没有调用 Codex、没有检查版本或认证、没有启动
+Agent 或模型，也没有生成本次 signed receipt。历史段落不能被此复核升级为当前真实 Host evidence。
 
 ## 实际调用
 

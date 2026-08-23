@@ -8,9 +8,13 @@
 launcher、认证状态和 Driver 安装结果仅为 `observed-unverified`，不是发布 PASS。机器可读记录中的
 `runIdHash` 只关联 sanitized legacy record，不冒充已丢失的原始 session/run ID。
 
-2026-08-22 在 macOS 26.6.2 arm64 上预检。WSSpecKit 基线为 `3d0175b7`，脱敏 Work Item 为
+历史记录称 2026-08-22 在 macOS 26.6.2 arm64 上预检。WSSpecKit 基线为 `3d0175b7`，脱敏 Work Item 为
 `WSS-...W2GV6`。`cursor` launcher 明确报告没有可用 Cursor IDE，并提示改用 Cursor Agent。canonical
 `agent` 版本为 `2025.10.28-0a91dc2`，帮助信息声明支持 headless `--print`、结构化输出和 resume。
+
+**2026-08-23 当前复核：** 只允许并仅执行了 `command -v cursor`，结果为 command 可用。未调用 Cursor、未检查版本或认证、
+未启动 Agent 或模型，因此 command 可用不代表已认证或已验证；没有本次 signed auto/explicit/recovery 三会话 receipt，
+也没有 verifier PASS。
 
 `agent status` 与 `agent whoami` 都显示登录流程成功但无法获取用户详情；真正的 headless Agent 调用却在模型
 启动前返回 `Authentication required`。该不一致说明只读状态检查不能作为真实认证证据。没有读取、复制或注入

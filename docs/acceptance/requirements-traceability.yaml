@@ -84,7 +84,7 @@ requirements:
       - docs/acceptance/claude-live.md
       - docs/acceptance/cursor-live.md
     status: no-go
-    blocker: 现有记录均为 legacy-unbound 历史观察，缺少本次 signed fixture、三段 fresh-session receipt 与通过的最终 verifier。
+    blocker: 2026-08-23 command -v-only 探测确认 codex、claude 缺失；cursor command 可用但未授权运行、未验证认证，且三者均无本次 signed fixture、auto/explicit/recovery 三段 fresh-session receipt 与通过的最终 verifier。
   - id: T06-02
     ticket: "06"
     checklist: 证据将自动化 fixture、历史观察与发布级真实宿主结果明确分层，缺少客户端或认证时记录为 NO-GO 而不模拟通过。
@@ -93,7 +93,7 @@ requirements:
       - docs/acceptance/agent-live-matrix.yaml
       - docs/acceptance/agent-driver-contract.md
     status: no-go
-    blocker: 分层规则已由本地测试和矩阵表达，但所有三个发布级真实宿主仍为 not_run 或 observed-unverified，不能标记为通过。
+    blocker: 分层规则由矩阵和本地校验表达，但 local fixture 仅为 local-automated、历史记录均为 legacy-unbound；本次 codex/claude 缺失，cursor 仅 command 可用且未认证或执行，不能标记为通过。
   - id: T06-03
     ticket: "06"
     checklist: 宿主验收不改变 Foundation 冻结的 Application Protocol 或 Artifact authoring 边界。
@@ -101,8 +101,8 @@ requirements:
     sources:
       - docs/reference/application-protocol.md
       - docs/acceptance/agent-driver-contract.md
-    status: not_run
-    blocker: 尚未在本次真实宿主验收中完成 Driver 发现、跨会话恢复和 verifier；本地契约不能替代真实宿主证据。
+    status: no-go
+    blocker: 本次没有启动真实宿主；未完成 Driver 发现、自动、显式、recovery 独立会话或 verifier。记录更新未改动 Foundation Protocol，local fixture 契约不能替代真实宿主证据。
   - id: T07-01
     ticket: "07"
     checklist: 每个可用平台独立记录只读预检、授权写入、稳定目标、幂等键、回读摘要和失败路径；Fixture 不能代替真实平台结果。
