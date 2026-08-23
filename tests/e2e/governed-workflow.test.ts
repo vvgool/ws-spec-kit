@@ -104,6 +104,46 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
 });
 
+test("Governed local automated recovery preserves frozen contracts through Review-Fix retry", async () => {
+  const fixture = await createWorkflowFixture({ externalTargets: true });
+  const started = await fixture.app.start({
+    root: fixture.root,
+    source: { type: "prompt", text: "本地自动化验证受治理恢复闭环" },
+    workflowRef: "builtin://workflows/feature-delivery",
+    profile: "governed",
+  });
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const frozenContracts = await Promise.all([
+    readFile(path.join(itemRoot, "snapshot", "application.json")),
+    readFile(path.join(itemRoot, "snapshot", "workflow.lock.json")),
+    readFile(path.join(itemRoot, "snapshot", "skill.lock.json")),
+  ]);
+
+  const result = await executeFeatureWorkflow(fixture, started, {
+    first: await fixture.acquire(started.workItemId, "governed-author"),
+    implementationActor: "governed-author",
+    reviewActors: ["independent-reviewer", "second-independent-reviewer"],
+    reviewApprovals: [false, true],
+    externalTargets: true,
+    interruptAfterLoopSubmit: true,
+  });
+
+  assert.deepEqual(await Promise.all([
+    readFile(path.join(itemRoot, "snapshot", "application.json")),
+    readFile(path.join(itemRoot, "snapshot", "workflow.lock.json")),
+    readFile(path.join(itemRoot, "snapshot", "skill.lock.json")),
+  ]), frozenContracts);
+  assert.equal(result.recoveryEvidence.loopStep, "review-fix:1:fix");
+  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 2);
+  assert.equal(result.recovered.loops["review-fix"]?.iteration, 2);
+  assert.equal(Object.values(result.recovered.approvals).filter(({ status }) => status === "approved").length, 3);
+  assert.ok(result.recovered.evidence[`tdd:${started.workItemId}:cycle`]);
+  assert.equal(result.artifacts.specification.artifactType, "specification");
+  assert.equal(result.artifacts.tasks.artifactType, "tasks");
+  await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
+});
+
 test("Governed rejects publish artifact tampering before creating an external binding", async () => {
   const fixture = await createWorkflowFixture({ externalTargets: true });
   const started = await fixture.app.start({
