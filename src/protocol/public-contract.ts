@@ -121,15 +121,18 @@ export const applicationPublicErrorGroups = {
   ],
   start: ["WSSPEC_START_ROLLBACK_FAILED"],
   acquire: [
-    "WSSPEC_ACTIVE_CLAIM_INVALID", "WSSPEC_LOOP_CONFIGURATION_INVALID", "WSSPEC_LOOP_MAX_ITERATIONS_REACHED", "WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING",
+    "WSSPEC_ACTIVE_CLAIM_INVALID", "WSSPEC_ATTEMPT_NOT_ACTIVE", "WSSPEC_LOOP_CONFIGURATION_INVALID", "WSSPEC_LOOP_MAX_ITERATIONS_REACHED", "WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING",
     "WSSPEC_STAGE_ALREADY_CLAIMED", "WSSPEC_STEP_RETRY_EXHAUSTED", "WSSPEC_WORKFLOW_BLOCKED",
   ],
   artifact: [
+    "WSSPEC_ARTIFACT_AUTHORING_UNAVAILABLE", "WSSPEC_ARTIFACT_CONFLICT", "WSSPEC_ARTIFACT_DRAFT_CHANGED",
+    "WSSPEC_ARTIFACT_DRAFT_NOT_IGNORED", "WSSPEC_ARTIFACT_DRAFT_PATH_INVALID", "WSSPEC_ARTIFACT_DRAFT_TOO_LARGE",
     "WSSPEC_ARTIFACT_ENCODING_INVALID", "WSSPEC_ARTIFACT_HASH_MISMATCH", "WSSPEC_ARTIFACT_INCOMPLETE",
+    "WSSPEC_ARTIFACT_OUTPUT_AMBIGUOUS", "WSSPEC_ARTIFACT_OUTPUT_NOT_REQUIRED", "WSSPEC_ARTIFACT_OUTPUT_SCHEMA_UNSUPPORTED",
     "WSSPEC_ARTIFACT_SCHEMA_MISMATCH", "WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND", "WSSPEC_LOOP_ARTIFACT_INVALID",
   ],
   submit: [
-    "WSSPEC_ARTIFACT_REFERENCE_INVALID", "WSSPEC_ATTEMPT_NOT_ACTIVE", "WSSPEC_DOCUMENTATION_SCOPE_VIOLATION",
+    "WSSPEC_ARTIFACT_REFERENCE_INVALID", "WSSPEC_DOCUMENTATION_SCOPE_VIOLATION",
     "WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED", "WSSPEC_MODIFIED_FILES_MISMATCH", "WSSPEC_REQUIRED_ARTIFACT_MISSING",
     "WSSPEC_STEP_CONFIGURATION_INVALID", "WSSPEC_STEP_FAILED", "WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID",
     "WSSPEC_STEP_INPUT_INVALID", "WSSPEC_UNDECLARED_ARTIFACT",
@@ -177,13 +180,13 @@ export const applicationFixedPublicErrors = {
 } as const satisfies Record<ApplicationRollbackErrorCode, { code: ApplicationRollbackErrorCode; message: string }>;
 
 export const publicCliRoutes = [
-  "init", "start", "acquire", "submit", "decide", "inspect",
+  "init", "start", "acquire", "artifact create", "submit", "decide", "inspect",
   "workflow list", "workflow show", "workflow eject", "workflow validate", "workflow use", "agent install",
   "doctor connectors",
 ] as const;
 export type PublicCliRoute = typeof publicCliRoutes[number];
 
-export const publicCliErrorRoutes = ["dispatch", "workflow", "agent", ...publicCliRoutes] as const;
+export const publicCliErrorRoutes = ["dispatch", "workflow", "agent", "artifact", ...publicCliRoutes] as const;
 export type PublicCliErrorRoute = typeof publicCliErrorRoutes[number];
 
 const applicationGroups = [
@@ -197,12 +200,14 @@ export const applicationPublicErrorGroupNamesByRoute = {
   dispatch: ["internal", "dispatch"],
   workflow: ["internal", "dispatch"],
   agent: ["internal", "dispatch"],
+  artifact: ["internal", "dispatch"],
   init: ["internal", "arguments", "repository"],
   start: [
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
     "compiler", "executor", "connectorRegistry", "connectorProvider", "source", "workItem", "runtime", "start",
   ],
   acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "close", "tdd", "externalAction"],
+  "artifact create": ["internal", "arguments", ...applicationGroups, "source", "acquire", "artifact"],
   submit: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "tdd", "externalAction", "gitCommit"],
   decide: [
     "internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit",

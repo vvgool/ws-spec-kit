@@ -7,8 +7,9 @@ import { installDriverSkill, type DriverAgent } from "../../adapters/skills/inst
 import { CliAdapterError } from "../../adapters/cli/output.js";
 import { runWorkflowCommand } from "../../adapters/cli/workflow.js";
 import { createApplication } from "../../application/application.js";
+import { createApplicationArtifact } from "../../application/artifact.js";
 import { doctorConnectors } from "../../application/doctor-connectors.js";
-import type { DecisionInput, StartInput, SubmitInput } from "../../protocol/application.js";
+import type { ArtifactCreateInput, DecisionInput, StartInput, SubmitInput } from "../../protocol/application.js";
 import type { SkillProvider } from "../../registry/skills/types.js";
 import { initRepository } from "../../storage/repository.js";
 import { loadBuiltinCatalog } from "../../resources/catalog.js";
@@ -120,6 +121,25 @@ async function submit(root: string, argv: string[], home: string): Promise<unkno
   });
 }
 
+async function artifact(root: string, argv: string[]): Promise<unknown> {
+  if (argv[0] !== "create") throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知 Artifact 命令：${argv[0] ?? ""}`);
+  const args = parseArguments(argv.slice(1), 0, [
+    "--work-item", "--step", "--attempt", "--lease-token", "--artifact-type", "--output", "--content-file",
+  ]);
+  const outputId = args.values["--output"];
+  const input: ArtifactCreateInput = {
+    root,
+    workItemId: required(args.values["--work-item"], "--work-item") as `WSS-${string}`,
+    stepId: required(args.values["--step"], "--step"),
+    attemptId: required(args.values["--attempt"], "--attempt"),
+    leaseToken: required(args.values["--lease-token"], "--lease-token"),
+    artifactType: required(args.values["--artifact-type"], "--artifact-type"),
+    ...(outputId === undefined ? {} : { outputId }),
+    contentFile: required(args.values["--content-file"], "--content-file"),
+  };
+  return createApplicationArtifact(input, { now: () => new Date() });
+}
+
 async function decide(root: string, argv: string[], home: string): Promise<unknown> {
   const args = parseArguments(argv, 0, ["--input", "--actor"]);
   const input = JSON.parse(await readFile(path.resolve(root, required(args.values["--input"], "--input")), "utf8")) as Omit<DecisionInput, "root" | "actor">;
@@ -181,6 +201,7 @@ const routes: Readonly<Record<string, (cwd: string, args: string[], home: string
   init: async (cwd, args) => { parseArguments(args, 0, []); return initRepository(cwd); },
   start,
   acquire,
+  artifact,
   submit,
   decide,
   inspect,

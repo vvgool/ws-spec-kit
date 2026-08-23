@@ -14,6 +14,7 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
   { command: "init", usage: "wspec init" },
   { command: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { command: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
+  { command: "artifact", usage: "wspec artifact create --work-item <Work Item> --step <步骤> --attempt <尝试> --lease-token <令牌> --artifact-type <类型> [--output <输出 ID>] --content-file <.acceptance 内正文文件>" },
   { command: "submit", usage: "wspec submit <workItemId> --step <步骤> --attempt <尝试> --lease <令牌> --result <结果文件>" },
   { command: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },
   { command: "inspect", usage: "wspec inspect <workItemId>" },
@@ -26,6 +27,7 @@ export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Ob
   { route: "init", usage: "wspec init" },
   { route: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { route: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
+  { route: "artifact create", usage: "wspec artifact create --work-item <Work Item> --step <步骤> --attempt <尝试> --lease-token <令牌> --artifact-type <类型> [--output <输出 ID>] --content-file <.acceptance 内正文文件>" },
   { route: "submit", usage: "wspec submit <workItemId> --step <步骤> --attempt <尝试> --lease <令牌> --result <结果文件>" },
   { route: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },
   { route: "inspect", usage: "wspec inspect <workItemId>" },
@@ -49,6 +51,7 @@ export function publicCliErrorRoute(argv: readonly string[]): PublicCliErrorRout
     return subcommand !== undefined && workflowRoutes.has(subcommand) ? `workflow ${subcommand}` as PublicCliRoute : "workflow";
   }
   if (command === "agent") return argv[1] === "install" ? "agent install" : "agent";
+  if (command === "artifact") return argv[1] === "create" ? "artifact create" : "artifact";
   if (command === "doctor") return argv[1] === "connectors" ? "doctor connectors" : "dispatch";
   return "dispatch";
 }

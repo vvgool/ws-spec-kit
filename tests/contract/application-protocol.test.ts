@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createApplication } from "../../src/application/application.js";
 import { SchemaValidationError, validate, type SchemaId } from "../../src/schemas/index.js";
 
 const workPackage = {
@@ -230,4 +231,8 @@ test("DecisionInput 只接受执行审批、Workflow Package 信任决定或受�
     () => validate("builtin.application-decision-input.v1" as SchemaId, { ...approval, kind: "profile_override" }),
     "WSSPEC_SCHEMA_INVALID_VALUE",
   );
+});
+
+test("createApplication 仅暴露 start、acquire、submit、decide、inspect", () => {
+  assert.deepEqual(Object.keys(createApplication()).sort(), ["acquire", "decide", "inspect", "start", "submit"]);
 });
