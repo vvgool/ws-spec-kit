@@ -141,6 +141,7 @@ export async function prepareSmoke(input) {
     "fixture_root=${0%/bin/wspec}",
     "case \"${1-}\" in",
     "  inspect|acquire|submit) acceptance_command=$1 ;;",
+    "  artifact) [ \"${2-}\" = create ] && acceptance_command=artifact-create || acceptance_command=other ;;",
     "  *) acceptance_command=other ;;",
     "esac",
     "umask 077",

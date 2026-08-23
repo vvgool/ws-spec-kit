@@ -194,10 +194,10 @@ async function wrapperCommandCounts(root) {
   try {
     text = await readFile(path.join(root, ".acceptance", "wspec-wrapper-audit.jsonl"), "utf8");
   } catch (error) {
-    if (error?.code === "ENOENT") return { inspect: 0, acquire: 0, submit: 0 };
+    if (error?.code === "ENOENT") return { inspect: 0, acquire: 0, submit: 0, "artifact-create": 0 };
     throw error;
   }
-  const counts = { inspect: 0, acquire: 0, submit: 0 };
+  const counts = { inspect: 0, acquire: 0, submit: 0, "artifact-create": 0 };
   for (const line of text.split("\n")) {
     if (line === "") continue;
     const command = JSON.parse(line)?.command;

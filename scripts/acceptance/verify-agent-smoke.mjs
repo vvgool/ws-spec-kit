@@ -90,7 +90,8 @@ function workflowCheckpoint(value, label) {
     && checkpoint.acquireCount === checkpoint.acquiredCount + checkpoint.reacquiredCount
     && integer(checkpoint.successfulAcquireCount) && activeClaimValid && reacquireValid
     && integer(checkpoint.submitCount) && commands !== undefined
-    && integer(commands.inspect) && integer(commands.acquire) && integer(commands.submit);
+    && integer(commands.inspect) && integer(commands.acquire) && integer(commands.submit)
+    && integer(commands["artifact-create"]);
   if (!valid) throw new Error(`${label} checkpoint 字段无效`);
   return checkpoint;
 }
@@ -130,6 +131,7 @@ export function validateHostWorkflowPhases(invocations) {
     ["wrapperCommands", "inspect"],
     ["wrapperCommands", "acquire"],
     ["wrapperCommands", "submit"],
+    ["wrapperCommands", "artifact-create"],
   ];
   const count = (checkpoint, segments) => segments.reduce((value, segment) => value[segment], checkpoint);
   for (const { phase, before, after } of checkpoints) {
@@ -483,6 +485,15 @@ async function verifySmoke(input) {
     const acquired = events.filter(({ eventType }) => eventType === "attempt.acquired" || eventType === "attempt.reacquired").length;
     const submitted = events.filter(({ idempotencyKey }) => typeof idempotencyKey === "string" && idempotencyKey.startsWith("submit:")).length;
     check("protocol.acquire-submit", acquired >= 1 && submitted >= 1, `acquire=${acquired}, submit=${submitted}`);
+    const authored = events.filter(({ eventType }) => eventType === "artifact.authored").length;
+    const finalInvocation = Array.isArray(hostInvocations) ? hostInvocations.at(-1) : undefined;
+    const finalCommands = record(record(record(finalInvocation)?.afterCheckpoint)?.wrapperCommands);
+    const artifactCreates = finalCommands?.["artifact-create"];
+    check(
+      "protocol.artifact-authoring",
+      authored >= 1 && Number.isSafeInteger(artifactCreates) && artifactCreates >= authored,
+      `artifact-create=${String(artifactCreates)}, artifact.authored=${authored}`,
+    );
 
     const references = artifactReferences(state.projection);
     const taskReference = references.find(({ artifactType }) => artifactType === "tasks");
@@ -568,7 +579,7 @@ async function verifySmoke(input) {
       check("smoke.behavior-probe", false, error instanceof Error ? error.message : "行为探针失败");
     }
   } else {
-    for (const id of ["fixture.workflow", "fixture.provider", "fixture.baseline", "fixture.driver", "fixture.wsspeckit", "protocol.acquire-submit", "artifact.compact-plan", "tdd.trusted-red-green", "workflow.review", "workflow.external-close", "workflow.close", "git.expected-diff", "smoke.behavior-probe"]) {
+    for (const id of ["fixture.workflow", "fixture.provider", "fixture.baseline", "fixture.driver", "fixture.wsspeckit", "protocol.acquire-submit", "protocol.artifact-authoring", "artifact.compact-plan", "tdd.trusted-red-green", "workflow.review", "workflow.external-close", "workflow.close", "git.expected-diff", "smoke.behavior-probe"]) {
       check(id, false, "控制面不可验证");
     }
   }

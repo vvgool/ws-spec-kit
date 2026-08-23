@@ -130,17 +130,17 @@ function bodyFor(type) {
 }
 
 function artifact(pkg, type) {
+  const matches = pkg.requiredOutputs.filter((item) => item.artifactType === type);
+  if (matches.length !== 1 || typeof matches[0].outputId !== "string") throw new Error("fixture Artifact output is ambiguous");
+  const expected = matches[0];
   const body = bodyFor(type).replace(/\\r\\n?/gu, "\\n").replace(/\\n*$/u, "") + "\\n";
-  const metadata = { artifactType: type, attemptId: pkg.attemptId, revision: 1, schemaVersion: 1, stageId: pkg.stepId, workItemId: pkg.workItemId };
-  const contentHash = digest(JSON.stringify(metadata) + "\\n" + body);
-  const relative = ".wsspec/work-items/" + pkg.workItemId + "/artifacts/" + pkg.stepId.replaceAll(":", "-") + "-" + type + ".md";
-  mkdirSync(path.dirname(path.join(worktree, relative)), { recursive: true });
-  writeFileSync(path.join(worktree, relative), [
-    "---", "artifactType: " + type, "schemaVersion: 1", "workItemId: " + pkg.workItemId, "stageId: " + pkg.stepId,
-    "attemptId: " + pkg.attemptId, "revision: 1", "contentHash: " + contentHash, "---", body,
-  ].join("\\n"));
-  const expected = pkg.requiredOutputs.find((item) => item.artifactType === type);
-  return { artifactType: type, schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown", ...(expected && expected.contentLevel ? { contentLevel: expected.contentLevel } : {}) };
+  const draft = ".acceptance/artifact-" + pkg.stepId.replaceAll(":", "-") + "-" + expected.outputId + ".md";
+  mkdirSync(path.dirname(path.join(worktree, draft)), { recursive: true });
+  writeFileSync(path.join(worktree, draft), body);
+  return wspec([
+    "artifact", "create", "--work-item", pkg.workItemId, "--step", pkg.stepId, "--attempt", pkg.attemptId,
+    "--lease-token", pkg.lease.token, "--artifact-type", type, "--output", expected.outputId, "--content-file", draft,
+  ]);
 }
 
 function gitOutput(args, options = {}) {
@@ -405,8 +405,8 @@ test("observer production fixture 通过真实 wrapper 完成 same-actor 三 fre
     await readFile(path.join(root, ".acceptance", `agent-smoke-invocation-${phase}.json`), "utf8"),
   ) as Record<string, unknown>));
   const checkpoints = invocations.map(({ beforeCheckpoint, afterCheckpoint }) => ({
-    before: beforeCheckpoint as { acquireCount: number; reacquiredCount: number; submitCount: number; wrapperCommands: { inspect: number; acquire: number; submit: number } },
-    after: afterCheckpoint as { acquireCount: number; reacquiredCount: number; submitCount: number; wrapperCommands: { inspect: number; acquire: number; submit: number } },
+    before: beforeCheckpoint as { acquireCount: number; reacquiredCount: number; submitCount: number; wrapperCommands: { inspect: number; acquire: number; submit: number; "artifact-create": number } },
+    after: afterCheckpoint as { acquireCount: number; reacquiredCount: number; submitCount: number; wrapperCommands: { inspect: number; acquire: number; submit: number; "artifact-create": number } },
   }));
 
   assert.equal(checkpoints[0]!.after.submitCount - checkpoints[0]!.before.submitCount, 0, "auto 必须在 acquire 后停止");
@@ -418,9 +418,11 @@ test("observer production fixture 通过真实 wrapper 完成 same-actor 三 fre
   assert.ok(checkpoints[2]!.after.submitCount - checkpoints[2]!.before.submitCount >= 1);
   assert.ok(checkpoints.every(({ after, before }) => after.wrapperCommands.inspect - before.wrapperCommands.inspect >= 1));
   assert.ok(checkpoints.every(({ after, before }) => after.wrapperCommands.acquire - before.wrapperCommands.acquire >= 1));
+  assert.ok(checkpoints[2]!.after.wrapperCommands["artifact-create"] - checkpoints[2]!.before.wrapperCommands["artifact-create"] >= 1);
 
   const result = await verify(root, "codex", observed.authorityFile, observed.authorityIdentity);
   assert.equal(result.summary.checks.find(({ id }) => id === "host.workflow-phases")?.ok, true);
+  assert.equal(result.summary.checks.find(({ id }) => id === "protocol.artifact-authoring")?.ok, true);
   assert.equal(result.summary.checks.find(({ id }) => id === "workflow.close")?.ok, true);
   assert.equal(result.summary.checks.find(({ id }) => id === "git.user-index")?.ok, true);
   assert.equal(result.summary.ok, true, result.summary.checks.filter(({ ok }) => !ok).map(({ id, detail }) => `${id}:${detail}`).join("\n"));
@@ -490,7 +492,7 @@ test("phase delta 合同接受三段真实推进，拒绝 auto 全做完、recov
     submitCount: input.submit,
     activeClaim: input.activeClaim ?? null,
     lastReacquire: input.lastReacquire ?? null,
-    wrapperCommands: { inspect: input.inspect, acquire: input.acquire, submit: input.submit },
+    wrapperCommands: { inspect: input.inspect, acquire: input.acquire, submit: input.submit, "artifact-create": 0 },
   });
   const a0 = checkpoint({ eventCount: 1, projection: "1", inspect: 0, acquire: 0, successfulAcquire: 0, submit: 0 });
   const firstClaim = { stageId: "explore", attemptId: "attempt-a", leaseDigest: `sha256:${"1".repeat(64)}` };
