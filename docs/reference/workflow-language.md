@@ -21,7 +21,11 @@ connectors: [requirement, git, issue, knowledge]
 
 ## 2. Workflow 定义
 
-顶层字段为 `version`、`workflow`、`inputs`、`steps`、`gates` 和可选 `changePolicy`。外层 `version` 与 `workflow.version` 都必须为 `1`。每个 Step 有唯一 `id`，以 `uses` 指定执行器，可声明 `action`、`needs`、`skills`、`outputs`、`approval`、`when` 和子 `steps`。参与独立 Review actor 隔离的 Agent Step 还应以 `actorRole` 声明 `implementation`、`review` 或 `fix` 语义，运行时不会从 `id` 猜测角色。Gate 有唯一 `id`，并且只声明 `evidence`（`trusted` 或 `attested`）和 argv 形式的 `command`；Gate 不属于 Step 字段。`changePolicy.kind` 只能是 `feature` 或 `documentation-only`。
+顶层字段为 `version`、`workflow`、`inputs`、`steps`、`gates` 和可选 `changePolicy`。外层 `version` 与 `workflow.version` 都必须为 `1`。每个 Step 有唯一 `id`，以 `uses` 指定执行器，可声明 `action`、`needs`、`skills`、`inputs`、`outputs`、`approval`、`when` 和子 `steps`。参与独立 Review actor 隔离的 Agent Step 还应以 `actorRole` 声明 `implementation`、`review` 或 `fix` 语义，运行时不会从 `id` 猜测角色。Gate 有唯一 `id`，并且只声明 `evidence`（`trusted` 或 `attested`）和 argv 形式的 `command`；Gate 不属于 Step 字段。`changePolicy.kind` 只能是 `feature` 或 `documentation-only`。
+
+`outputs` 的规范对象语法为 `{ outputId, artifactType }`。`outputId` 是 Work Package 和 Profile 使用的输出身份，`artifactType` 是 Artifact 内容合同；同一个 Step 内 `outputId` 必须唯一，但不同 `outputId` 可以使用相同 `artifactType`。字符串 `outputs: [specification]` 是 `{ outputId: specification, artifactType: specification }` 的兼容简写。Profile 的 `steps.<stepId>.artifacts` 始终以 `outputId` 为 key，而不是以 `artifactType` 为 key。
+
+`inputs` 的规范对象语法为 `{ outputId, required }`，字符串 `inputs: [specification]` 是 `{ outputId: specification, required: true }` 的简写。编译器的 producer closure、运行时 acquire、Condition/Loop 的 `artifacts.<outputId>` 投影以及 Close 都按 `outputId` 解析；`artifactType` 只选择内容合同，不能作为下游身份。唯一兼容特例是系统 `requirement-source`：它的 Source ArtifactRef 可以不带 `outputId`，但只会匹配同名 `requirement-source` input/output。
 
 ```yaml contract=workflow-v1
 version: 1

@@ -9,6 +9,7 @@
 | `init` | repository initialization | 无 | 初始化当前 Git 仓库的 `.wsspec` 配置。 |
 | `start` | `start` | `builtin.application-start-input.v1` | 从 Prompt 或仓库内文件创建 Work Item，并快照 Workflow、Skill、配置和来源。 |
 | `acquire` | `acquire` | `builtin.application-acquire-input.v1` | 取得下一可执行 Step 的 `AgentAction`。 |
+| `artifact create` | Attempt 作用域辅助能力 | `builtin.application-artifact-create-input.v1` | 把活动 Work Package 授权的 draft 规范化为不可变 `ArtifactRef`；不属于五个 Application 生命周期操作。 |
 | `submit` | `submit` | `builtin.application-submit-input.v1` | 提交本次 Attempt 的结果、Artifact 和 Evidence 引用。 |
 | `decide` | `decide` | `builtin.application-decision-input.v1` | 对步骤审批、外部动作授权或 Workflow 信任作出明确决定，或触发只读外部协调回查。 |
 | `inspect` | `inspect` | `builtin.application-inspect-input.v1` | 读取已快照的 Work Item 状态，不创建新 Attempt。 |
@@ -43,9 +44,34 @@ Skill、Artifact、约束、输出、Gate 与 result schema 都不能由恢复�
 claim 的 Work Package，同一会话必须直接消费；无故再次
 `acquire` 会轮换 Lease 并使刚返回的 token 失效。
 
+### `artifact create`（Attempt 作用域辅助能力）
+
+`WSSpecApplication` 只暴露 `start`、`acquire`、`submit`、`decide` 与 `inspect` 五个生命周期操作。Artifact authoring 绑定当前 Claim、Attempt 与 Lease，由 CLI 的 `artifact create` 直接调用 Attempt 作用域服务，不推进 Workflow，也不将正文或 draft 路径交给 `submit`。
+
+输入：`ArtifactCreateInput`，对应 `builtin.application-artifact-create-input.v1`，包含 `root`、`workItemId`、`stepId`、`attemptId`、`leaseToken`、`artifactType`、可选 `outputId` 和 `contentFile`。输出：`ArtifactReference`。CLI 使用 `wspec artifact create --work-item "<workItemId>" --step "<stepId>" --attempt "<attemptId>" --lease-token "<leaseToken>" --artifact-type "<artifactType>" [--output "<outputId>"] --content-file "<draftPath>"`；stdout 只返回统一 JSON envelope 中的 `ArtifactRef`，不返回正文、draft path、绝对路径或 Lease token。
+
+```json contract=schema:builtin.application-artifact-create-input.v1
+{
+  "root": "/workspace/demo",
+  "workItemId": "WSS-01H00000000000000000000000",
+  "stepId": "explore",
+  "attemptId": "attempt-01",
+  "leaseToken": "lease-01",
+  "artifactType": "exploration-report",
+  "outputId": "exploration-report",
+  "contentFile": ".acceptance/exploration-report.md"
+}
+```
+
+只有活动 Claim、Attempt、未过期 Lease 和完整 Work Package digest 全部精确匹配时才能 author。`artifactAuthoring.version` 必须为 `1`；正文上限来自 `maxContentBytes`，draft 只允许位于 `draftRoots`。`.acceptance/` 下文件还必须被 Git ignore；Work Item 自有 drafts 根无需依赖仓库 ignore。`contentFile` 必须是 canonical NFC 仓库相对 POSIX 路径，任一组件不得是 symlink，末端必须是单链接普通文件。Runtime 以 `O_NOFOLLOW` 打开并在初读、控制面锁内复读及写入前后绑定 device、inode、size、mtime、ctime、link count 与 digest；变化时 fail closed。
+
+`artifactType`、`outputId` 和 `schemaVersion` 必须匹配 `requiredOutputs`。同一 `artifactType` 对应多个输出时必须显式传 `outputId`；若输出声明了 `contentLevel`，该策略同时进入幂等身份、`artifact.authored` 摘要和返回的 `ArtifactRef`，`submit` 不接受被剥离或改写的值。正文按 Artifact 类型既有内容合同校验并规范化，随后写入 `.wsspec/work-items/<workItemId>/artifacts/<artifactType>/<contentHash>.md`。内容寻址文件不可变：并发命中既有路径时只能接受逐字节相同内容。`artifact.authored` 事件仅保存 Artifact 摘要身份，不保存正文、draft path、绝对路径或 Lease token；replay 将其作为不复制完整 projection 的幂等事件处理。
+
 ### `submit`
 
 输入：`SubmitInput`，对应 `builtin.application-submit-input.v1`，包含 `root`、`workItemId`、`stepId`、`attemptId`、`leaseToken` 和 `result`。输出：`AgentAction`。`submit` 没有 `actor` 字段；CLI 的 `--actor` 仅为适配层可选上下文，不能写入协议 JSON。`attemptId` 与 `leaseToken` 必须对应仍活动的租约。Agent 的失败结果只提交 `status: "failed"`、执行摘要、Artifact 等执行事实，不能提交 `failureCode` 或 `retryable`。默认 Executor 将普通失败归类为可重试的 `WSSPEC_STEP_FAILED`；失败分类只由受信 Executor 或 Runtime 内部产生并持久化，例如 `WSSPEC_STEP_INPUT_INVALID` 或 `WSSPEC_STEP_CONFIGURATION_INVALID`，Runtime 据此决定是否消耗重试预算。
+
+Artifact 正文先写入 Work Package 授权的 draft，再通过 `artifact create` 得到 `ArtifactRef`；`result.artifacts` 只提交这些引用，`result` JSON 不得包含 `contentFile` 或正文。完成状态必须逐项满足 `requiredOutputs` 的 `artifactType`、`outputId` 与 `schemaVersion`，不能用相同类型的另一个 output 冒充必需输出。
 
 `external-write` Step，以及 `action: git.commit` 的 `local-write` Step，成功时必须精确提交一个受治理的 `external-action` 意图，包含 Provider、动作、稳定目标、payload 和副作用说明。第一次 `submit` 只持久化 `builtin.external-action-request.v1` 的摘要身份并返回 `await_approval`，不会调用 Provider。批准后重复提交同一 Attempt 才可执行；Runtime 以原子 owner 保证同一 Request 只有一个协调者调用 Provider，并在 Provider 调用前持久化 `executing/not_sent`。Executor 必须在发送边界调用 `markDispatched()` 持久化 `sent_or_unknown`。其他并发提交返回可重试的 `WSSPEC_EXTERNAL_EXECUTION_IN_PROGRESS`。发送后结果未知时进入 `reconciliation_required`，只允许只读回查，不自动重发。Provider 执行或回查异常只返回固定的 `WSSPEC_EXTERNAL_PROVIDER_EXECUTION_FAILED` 或 `WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED`，不回显 Provider 文本。确认成功后 Agent 的原始意图由严格的 `builtin.external-write-receipt.v1` 替换，事件、投影和公开视图不持久化 payload 或凭据。`issue.close` 还要求 `issue.update` 已验证，且 Knowledge 按 Profile 已验证、明确 absent/skipped，或已持久化 optional warning；否则以 `WSSPEC_EXTERNAL_ORDER_INVALID` fail closed。除上述 `external-write` 与本地 `git.commit` 外，其他 Step 禁止携带 `externalWrites`。
 
@@ -83,6 +109,7 @@ path、digest、device、inode、mode、uid、size 和组合 identity，并在�
 |---|---|
 | `builtin.agent-action.v1` | `execute`、`await_approval`、`blocked`、`completed` 四种下一步动作。 |
 | `builtin.application-acquire-input.v1` | `acquire` 的 root、Work Item 和 actor。 |
+| `builtin.application-artifact-create-input.v1` | `artifact` authoring 的 Work Item、Attempt、Lease、输出身份与 draft 路径。 |
 | `builtin.application-decision-input.v1` | 步骤审批、外部动作授权、Workflow 信任决定或只读外部协调回查。 |
 | `builtin.application-inspect-input.v1` | `inspect` 的 root 与 Work Item。 |
 | `builtin.application-project-config.v1` | `.wsspec` 的 Workflow、Profile、Gate 和全局 Skill 配置。 |
@@ -113,7 +140,7 @@ Source Artifact 使用 canonical JSON 存放在 `.wsspec/work-items/<workItemId>
 
 Source 的恢复权威由控制面中的 `application-anchor.json`、其绑定的 Application Snapshot 和唯一有效的 `source.captured` 事件共同组成。恢复必须先读取固定 `snapshot/application.json` 字节，验证 anchor 绑定的 manifest，再验证 Application 摘要并严格解析 Application；只有之后才能读取唯一 Source 事件、比较事件/Application/manifest 的完整 Source Artifact 引用，并跟随路径验证磁盘 Artifact。恢复、Application 加载和 Close 使用同一权威入口，因此 Application 摘要或结构错误总是先于缺失、恶意或不可读的 Source 路径报告，且不会在 Application 认证前访问 Source 文件系统。缺少锚点、Application Snapshot 或唯一 Source 事件的旧版 Work Item 不兼容且不迁移，统一 fail closed 为 `WSSPEC_SOURCE_SNAPSHOT_CHANGED`。
 
-只有在 Step 的 `inputs` 中声明 `requirement-source`，Work Package 的 `artifacts` 才获得可读取的完整 Source 引用；正文和 metadata 不复制进 Work Package。`requiredOutputs` 仅描述 Agent 应产出的 `artifactType`、`schemaVersion` 和可选 `contentLevel`，不携带现有 Artifact 的 ID、路径、摘要或其他读取授权。仅声明 Source output 不能借此读取已有 Source。
+只有在 Step 的 `inputs` 中声明 `requirement-source`，Work Package 的 `artifacts` 才获得可读取的完整 Source 引用；正文和 metadata 不复制进 Work Package。`requiredOutputs` 描述 Agent 应产出的 `outputId`、`artifactType`、`schemaVersion` 和可选 `contentLevel`，不携带现有 Artifact 的 ID、路径、摘要或其他读取授权；系统提供的 `requirement-source` 不带 Agent output id。`artifactAuthoring` 明确给出版本、正文上限和 draft roots，且属于 Claim 绑定的完整 Work Package identity。仅声明 Source output 不能借此读取已有 Source。
 
 首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`；引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
 
@@ -177,9 +204,9 @@ skills:
 | `evidenceIngestion` | `WSSPEC_EVIDENCE_ATTEMPT_MISMATCH`、`WSSPEC_EVIDENCE_HASH_MISMATCH`、`WSSPEC_EVIDENCE_INVALID`、`WSSPEC_EVIDENCE_LEVEL_INSUFFICIENT`、`WSSPEC_EVIDENCE_STALE`、`WSSPEC_GATE_NOT_REQUIRED` |
 | `tdd` | `WSSPEC_TDD_EVIDENCE_INVALIDATED`、`WSSPEC_TDD_GATE_CONFIGURATION_INVALID`、`WSSPEC_TDD_GATE_EXECUTION_FAILED`、`WSSPEC_TDD_GREEN_NOT_OBSERVED`、`WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE`、`WSSPEC_TDD_RED_NOT_OBSERVED`、`WSSPEC_TDD_RED_REQUIRED`、`WSSPEC_TDD_RED_SCOPE_INVALID`、`WSSPEC_TDD_RED_SYNTAX_FAILURE`、`WSSPEC_TDD_RED_TIMEOUT`、`WSSPEC_TDD_REPORT_INVALID`、`WSSPEC_TDD_REPORTER_UNSUPPORTED`、`WSSPEC_TDD_STEP_INVALID`、`WSSPEC_TDD_TEST_PATH_INVALID` |
 | `start` | `WSSPEC_START_ROLLBACK_FAILED` |
-| `acquire` | `WSSPEC_ACTIVE_CLAIM_INVALID`、`WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
-| `artifact` | `WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
-| `submit` | `WSSPEC_ARTIFACT_REFERENCE_INVALID`、`WSSPEC_ATTEMPT_NOT_ACTIVE`、`WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`、`WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED`、`WSSPEC_MODIFIED_FILES_MISMATCH`、`WSSPEC_REQUIRED_ARTIFACT_MISSING`、`WSSPEC_STEP_CONFIGURATION_INVALID`、`WSSPEC_STEP_FAILED`、`WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID`、`WSSPEC_STEP_INPUT_INVALID`、`WSSPEC_UNDECLARED_ARTIFACT` |
+| `acquire` | `WSSPEC_ACTIVE_CLAIM_INVALID`、`WSSPEC_ATTEMPT_NOT_ACTIVE`、`WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
+| `artifact` | `WSSPEC_ARTIFACT_AUTHORING_UNAVAILABLE`、`WSSPEC_ARTIFACT_CONFLICT`、`WSSPEC_ARTIFACT_DRAFT_CHANGED`、`WSSPEC_ARTIFACT_DRAFT_NOT_IGNORED`、`WSSPEC_ARTIFACT_DRAFT_PATH_INVALID`、`WSSPEC_ARTIFACT_DRAFT_TOO_LARGE`、`WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_OUTPUT_AMBIGUOUS`、`WSSPEC_ARTIFACT_OUTPUT_NOT_REQUIRED`、`WSSPEC_ARTIFACT_OUTPUT_SCHEMA_UNSUPPORTED`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
+| `submit` | `WSSPEC_ARTIFACT_REFERENCE_INVALID`、`WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`、`WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED`、`WSSPEC_MODIFIED_FILES_MISMATCH`、`WSSPEC_REQUIRED_ARTIFACT_MISSING`、`WSSPEC_STEP_CONFIGURATION_INVALID`、`WSSPEC_STEP_FAILED`、`WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID`、`WSSPEC_STEP_INPUT_INVALID`、`WSSPEC_UNDECLARED_ARTIFACT` |
 | `approval` | `WSSPEC_APPROVAL_DIGEST_INVALID`、`WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED` |
 | `externalAction` | `WSSPEC_EXTERNAL_ACTION_REJECTED`、`WSSPEC_EXTERNAL_ADOPTION_NOT_VERIFIED`、`WSSPEC_EXTERNAL_ADOPTION_UNSUPPORTED`、`WSSPEC_EXTERNAL_ATTEMPT_MISMATCH`、`WSSPEC_EXTERNAL_BINDING_INVALID`、`WSSPEC_EXTERNAL_DISPATCH_EVIDENCE_MISSING`、`WSSPEC_EXTERNAL_GRANT_EXPIRED`、`WSSPEC_EXTERNAL_GRANT_INVALID`、`WSSPEC_EXTERNAL_GRANT_MISMATCH`、`WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT`、`WSSPEC_EXTERNAL_IDEMPOTENCY_INVALID`、`WSSPEC_EXTERNAL_INTENT_INVALID`、`WSSPEC_EXTERNAL_EXECUTION_IN_PROGRESS`、`WSSPEC_EXTERNAL_ISSUE_CLOSE_NOT_VERIFIED`、`WSSPEC_EXTERNAL_ISSUE_UPDATE_NOT_VERIFIED`、`WSSPEC_EXTERNAL_ORDER_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_ARTIFACT_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_MISMATCH`、`WSSPEC_EXTERNAL_PROJECTION_INVALID`、`WSSPEC_EXTERNAL_PROVIDER_EXECUTION_FAILED`、`WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED`、`WSSPEC_EXTERNAL_READBACK_MISMATCH`、`WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID`、`WSSPEC_EXTERNAL_RECONCILIATION_FAILED`、`WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED`、`WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED`、`WSSPEC_EXTERNAL_REJECTION_INVALID`、`WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH`、`WSSPEC_EXTERNAL_REQUEST_EXPIRED`、`WSSPEC_EXTERNAL_REQUEST_INVALID`、`WSSPEC_EXTERNAL_REQUEST_NOT_FOUND`、`WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID`、`WSSPEC_EXTERNAL_TARGET_INVALID`、`WSSPEC_OPTIONAL_KNOWLEDGE_FAILED`、`WSSPEC_OPTIONAL_KNOWLEDGE_NOT_SETTLED`、`WSSPEC_REQUIRED_KNOWLEDGE_NOT_VERIFIED` |
 | `workflowEject` | `WSSPEC_WORKFLOW_EJECT_SOURCE_INVALID`、`WSSPEC_WORKFLOW_EJECT_TARGET_EXISTS` |
@@ -192,9 +219,11 @@ skills:
 | `dispatch` | `internal`、`dispatch` |
 | `workflow` | `internal`、`dispatch` |
 | `agent` | `internal`、`dispatch` |
+| `artifact` | `internal`、`dispatch` |
 | `init` | `internal`、`arguments`、`repository` |
 | `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`source`、`workItem`、`runtime`、`start` |
 | `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd`、`externalAction` |
+| `artifact create` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`source`、`acquire`、`artifact` |
 | `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction`、`gitCommit` |
 | `decide` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`workflowPackage`、`workflowTrust`、`externalAction` |
 | `inspect` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction` |
