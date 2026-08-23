@@ -1,0 +1,15 @@
+# GitHub 真实 Connector 验收记录
+
+## 当前状态
+
+- Provider：GitHub CLI (`gh`)
+- `command -v`：可用
+- 验收状态：**NO-GO，未运行**
+
+本轮没有执行 `gh`、认证探测、网络访问或远程写入。命令存在不证明认证有效，也不证明有专用非生产目标或写入权限。
+
+## 真实验收前置条件
+
+必须先获得并脱敏记录：已验证认证、专用非生产 Issue/Repository 稳定目标、针对该动作与内容摘要的明确写入授权、幂等键、写后回读摘要、未知结果时先对账再重试的证据，以及不含 Token、Cookie、路径或敏感正文的审计回执。
+
+本地 GitHub fixture 仅覆盖 Connector 契约和恢复语义，不能提升为真实 GitHub PASS。
