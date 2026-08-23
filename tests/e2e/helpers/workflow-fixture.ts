@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
+import { createApplicationArtifact } from "../../../src/application/artifact.js";
 import { loadApplicationState } from "../../../src/application/state.js";
 import { runWorkflowCommand } from "../../../src/adapters/cli/workflow.js";
-import { computeArtifactContentHash, readArtifact } from "../../../src/domain/artifacts.js";
+import { readArtifact } from "../../../src/domain/artifacts.js";
 import { computeWorkspaceTreeDigest, sha256 } from "../../../src/domain/digests.js";
 import { createExternalBinding } from "../../../src/domain/external-receipt.js";
 import { checkDocumentationIntegrity } from "../../../src/engine/docs-integrity.js";
@@ -35,6 +36,7 @@ export interface WorkflowFixture {
   root: string;
   externalRoot: string;
   app: App;
+  now(): Date;
   recovery: {
     intakeAttemptsUsed?: number;
     loopStep?: string;
@@ -323,6 +325,7 @@ export async function createWorkflowFixture(options: { externalTargets?: boolean
     root,
     externalRoot,
     app: createApplication(dependencies()),
+    now: () => new Date(now),
     recovery: {},
     acquire: async (workItemId, actor) => requireExecute(await fixture.app.acquire({ root, workItemId, actor })),
     advance(seconds) { now += seconds * 1_000; },
@@ -371,33 +374,25 @@ async function snapshotFor(root: string, workItemId: string): Promise<FeatureWor
   return JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", workItemId, "snapshot", "application.json"), "utf8")) as FeatureWorkflowResult["snapshot"];
 }
 
-async function writeArtifact(worktree: string, pkg: WorkPackage, type: string, approved = true): Promise<ArtifactReference> {
+async function writeArtifact(fixture: WorkflowFixture, worktree: string, pkg: WorkPackage, type: string, approved = true): Promise<ArtifactReference> {
   const body = bodyFor(type, approved);
-  const metadata = {
-    artifactType: type,
-    schemaVersion: 1 as const,
+  const matchingOutputs = pkg.requiredOutputs.filter((output) => output.artifactType === type);
+  assert.equal(matchingOutputs.length, 1, "E2E Artifact writer requires exactly one matching Work Package output");
+  const outputId = matchingOutputs[0]!.outputId;
+  assert.ok(outputId);
+  const contentFile = `.wsspec/work-items/${pkg.workItemId}/drafts/${pkg.stepId.replaceAll(":", "-")}-${outputId}.md`;
+  await mkdir(path.dirname(path.join(worktree, contentFile)), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(worktree, contentFile), body, { encoding: "utf8", mode: 0o600 });
+  return createApplicationArtifact({
+    root: worktree,
     workItemId: pkg.workItemId,
-    stageId: pkg.stepId,
+    stepId: pkg.stepId,
     attemptId: pkg.attemptId,
-    revision: 1,
-  };
-  const contentHash = computeArtifactContentHash(metadata, body);
-  const relative = `.wsspec/work-items/${pkg.workItemId}/artifacts/${pkg.stepId.replaceAll(":", "-")}-${type}.md`;
-  await mkdir(path.dirname(path.join(worktree, relative)), { recursive: true });
-  await writeFile(path.join(worktree, relative), [
-    "---", `artifactType: ${type}`, "schemaVersion: 1", `workItemId: ${pkg.workItemId}`, `stageId: ${pkg.stepId}`,
-    `attemptId: ${pkg.attemptId}`, "revision: 1", `contentHash: ${contentHash}`, "---", body,
-  ].join("\n"), "utf8");
-  const contentLevel = pkg.requiredOutputs.find(({ artifactType }) => artifactType === type)?.contentLevel;
-  return {
+    leaseToken: pkg.lease.token,
     artifactType: type,
-    schemaVersion: 1,
-    path: relative,
-    revision: 1,
-    contentHash,
-    mediaType: "text/markdown",
-    ...(contentLevel === undefined ? {} : { contentLevel }),
-  };
+    outputId,
+    contentFile,
+  }, { now: fixture.now });
 }
 
 function completed(
@@ -693,7 +688,7 @@ export async function executeFeatureWorkflow(
         continue;
       }
       const approved = type !== "review-result" || options.reviewApprovals[reviewIndex] === true;
-      const ref = await writeArtifact(worktree, pkg, type, approved);
+      const ref = await writeArtifact(fixture, worktree, pkg, type, approved);
       refs.push(ref);
       if (type === "specification") artifacts.specification = ref;
       if (type === "design") artifacts.design = ref;
@@ -870,7 +865,7 @@ export async function executeDocumentationWorkflow(
         assert.ok(source, "requirement-source output requires an authorized input Artifact");
         refs.push(source);
       } else {
-        refs.push(await writeArtifact(worktree, pkg, artifactType, true));
+        refs.push(await writeArtifact(fixture, worktree, pkg, artifactType, true));
       }
     }
     const externalWrites = pkg.stepId === "commit"

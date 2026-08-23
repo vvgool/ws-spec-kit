@@ -18,8 +18,8 @@ import test from "node:test";
 
 import { runCommand } from "../../src/cli/commands/core.js";
 import { createApplication, type ApplicationDependencies } from "../../src/application/application.js";
+import { createApplicationArtifact } from "../../src/application/artifact.js";
 import { loadApplicationState } from "../../src/application/state.js";
-import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { sha256, computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { createExternalBinding } from "../../src/domain/external-receipt.js";
 import { checkDocumentationIntegrity } from "../../src/engine/docs-integrity.js";
@@ -75,6 +75,7 @@ interface Fixture {
     feishu: { HOME: string; LARK_CONFIG_DIR: string };
   };
   app: ReturnType<typeof createApplication>;
+  now(): Date;
   restart(): void;
 }
 
@@ -164,41 +165,25 @@ function bodyFor(type: string): string {
   return `# ${type}\n\nConnector fixture output.\n`;
 }
 
-async function writeArtifact(worktree: string, pkg: WorkPackage, artifactType: string): Promise<ArtifactReference> {
+async function writeArtifact(fixture: Fixture, worktree: string, pkg: WorkPackage, artifactType: string): Promise<ArtifactReference> {
   const body = bodyFor(artifactType);
-  const metadata = {
-    artifactType,
-    schemaVersion: 1 as const,
+  const matchingOutputs = pkg.requiredOutputs.filter((output) => output.artifactType === artifactType);
+  assert.equal(matchingOutputs.length, 1, "external-delivery writer requires exactly one matching Work Package output");
+  const outputId = matchingOutputs[0]!.outputId;
+  assert.ok(outputId);
+  const contentFile = `.wsspec/work-items/${pkg.workItemId}/drafts/${pkg.stepId.replaceAll(":", "-")}-${outputId}.md`;
+  await mkdir(path.dirname(path.join(worktree, contentFile)), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(worktree, contentFile), body, { encoding: "utf8", mode: 0o600 });
+  return createApplicationArtifact({
+    root: worktree,
     workItemId: pkg.workItemId,
-    stageId: pkg.stepId,
+    stepId: pkg.stepId,
     attemptId: pkg.attemptId,
-    revision: 1,
-  };
-  const contentHash = computeArtifactContentHash(metadata, body);
-  const relative = `.wsspec/work-items/${pkg.workItemId}/artifacts/${pkg.stepId.replaceAll(":", "-")}-${artifactType}.md`;
-  await mkdir(path.dirname(path.join(worktree, relative)), { recursive: true });
-  await writeFile(path.join(worktree, relative), [
-    "---",
-    `artifactType: ${artifactType}`,
-    "schemaVersion: 1",
-    `workItemId: ${pkg.workItemId}`,
-    `stageId: ${pkg.stepId}`,
-    `attemptId: ${pkg.attemptId}`,
-    "revision: 1",
-    `contentHash: ${contentHash}`,
-    "---",
-    body,
-  ].join("\n"), "utf8");
-  const contentLevel = pkg.requiredOutputs.find((output) => output.artifactType === artifactType)?.contentLevel;
-  return {
+    leaseToken: pkg.lease.token,
     artifactType,
-    schemaVersion: 1,
-    path: relative,
-    revision: 1,
-    contentHash,
-    mediaType: "text/markdown",
-    ...(contentLevel === undefined ? {} : { contentLevel }),
-  };
+    outputId,
+    contentFile,
+  }, { now: fixture.now });
 }
 
 function completed(
@@ -315,6 +300,7 @@ async function createFixture(scenario: Scenario): Promise<Fixture> {
     executables,
     environments,
     app: createApplication(dependencies()),
+    now: () => new Date("2026-08-20T08:00:00.000Z"),
     restart() { fixture.app = createApplication(dependencies()); },
   };
   return fixture;
@@ -480,9 +466,9 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
       if (action.problems.some(({ code }) => code === "WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED")) {
         fixture.restart();
         try { action = await reconcile(fixture, started); }
-        catch {
+        catch (error) {
           if (!scenario.expectClosed) return { started, action, worktree };
-          throw new Error("public external reconciliation failed unexpectedly");
+          throw new Error(`public external reconciliation failed unexpectedly: ${String(error)}`);
         }
         continue;
       }
@@ -503,7 +489,7 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
         assert.ok(source);
         artifacts.push(source);
       } else {
-        artifacts.push(await writeArtifact(worktree, pkg, output.artifactType));
+        artifacts.push(await writeArtifact(fixture, worktree, pkg, output.artifactType));
       }
     }
     let intent: Record<string, unknown> | undefined;
