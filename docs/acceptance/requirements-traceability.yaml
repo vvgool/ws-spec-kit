@@ -108,28 +108,32 @@ requirements:
     checklist: 每个可用平台独立记录只读预检、授权写入、稳定目标、幂等键、回读摘要和失败路径；Fixture 不能代替真实平台结果。
     evidenceTier: real-platform
     sources:
-      - docs/reference/application-protocol.md
-      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
-    status: not_run
-    blocker: 未提供专用 GitHub、GitLab 或飞书测试目标及本次精确写入授权；fixture 只证明本地契约，不能代替真实平台结果。
+      - docs/acceptance/connector-live-matrix.yaml
+      - docs/acceptance/github-live.md
+      - docs/acceptance/gitlab-live.md
+      - docs/acceptance/feishu-live.md
+      - docs/reference/connector-contracts.md
+    status: no-go
+    blocker: 2026-08-23 command -v-only 探测显示 gh 与 lark-cli 仅为 available-unverified，glab 缺失；三者均无已验证认证、专用非生产稳定目标、精确写入授权、幂等键、回读或失败对账证据，fixture 不能代替真实平台结果。
   - id: T07-02
     ticket: "07"
     checklist: 未安装、未认证或无测试目标的平台明确记录为 NO-GO，不切换到未建模的 Provider 或绕过授权。
     evidenceTier: real-platform
     sources:
-      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
-      - docs/reference/application-protocol.md
+      - docs/acceptance/connector-live-matrix.yaml
+      - docs/acceptance/gitlab-live.md
+      - docs/reference/connector-contracts.md
     status: no-go
-    blocker: 本轮禁止调用远程 Provider，且没有专用平台目标、认证状态证明或写入授权；不得降级为未建模 HTTP Provider。
+    blocker: 本轮禁止调用远程 Provider；glab 缺失，gh 与 lark-cli 的 command -v 可用性不足以证明认证、专用目标或写入权限；不得降级为未建模 HTTP Provider。
   - id: T07-03
     ticket: "07"
     checklist: 外部未知结果进入协调回查或显式处理，不自动重发可能已发生的写入。
     evidenceTier: real-platform
     sources:
-      - docs/reference/application-protocol.md
-      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
-    status: not_run
-    blocker: 本地 fixture 覆盖协调语义，但本轮未在真实平台制造或回查未知外部结果，不能宣称真实平台通过。
+      - docs/acceptance/connector-live-matrix.yaml
+      - docs/reference/connector-contracts.md
+    status: no-go
+    blocker: 本地 fixture 覆盖协调语义，但没有真实平台的幂等键、回读摘要或未知结果对账回执；本轮不重发任何可能已发生的远程写入，不能宣称真实平台通过。
   - id: T08-01
     ticket: "08"
     checklist: clean consumer 安装、功能与文档 Workflow、Driver dry-run 和中文指南在发布产物上得到验证。
