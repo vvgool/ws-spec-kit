@@ -1,0 +1,162 @@
+# Wave 1 Tickets 04-08 的验收库存。此文件记录当前 checkout 的可复核事实，不能把 fixture 升格为真实外部证据。
+version: 1
+scope: Wave 1 / Tickets 04-08
+baselineCommit: 8b15381
+overallStatus: no-go
+foundationBoundary:
+  lifecycleOperations:
+    - start
+    - acquire
+    - submit
+    - decide
+    - inspect
+  artifactCreate: attempt-scoped-helper-not-lifecycle-operation
+evidenceTiers:
+  local-automated: 当前 checkout 可重复执行的本地 Node 测试或干净安装测试。
+  real-host: 在独立真实 Codex、Claude 或 Cursor 会话中产生且可审计的验收记录。
+  real-platform: 在专用 GitHub、GitLab 或飞书测试目标上产生、经授权并可回读的验收记录。
+requirements:
+  - id: T04-01
+    ticket: "04"
+    checklist: 功能 Workflow 在隔离仓库中形成可回读的需求、Artifact、Evidence、审批和 Work Item 投影，并在 Close 前满足既定质量要求。
+    evidenceTier: local-automated
+    sources:
+      - tests/e2e/governed-workflow.test.ts
+      - tests/integration/artifact-authoring.test.ts
+    status: passed
+    blocker: null
+  - id: T04-02
+    ticket: "04"
+    checklist: 中断后由新进程执行 inspect + acquire 能恢复正确 Attempt，Lease 轮换不改变已冻结的 Workflow、Skill、输出合同或 Artifact 引用。
+    evidenceTier: local-automated
+    sources:
+      - tests/e2e/agent-live-smoke.test.ts
+      - tests/integration/recovery.test.ts
+      - docs/reference/application-protocol.md
+    status: passed
+    blocker: null
+  - id: T04-03
+    ticket: "04"
+    checklist: 失败、重试和 Review-Fix 路径具有可验证的状态与证据，且不会绕过可信 TDD Gate。
+    evidenceTier: local-automated
+    sources:
+      - tests/integration/retry-runtime.test.ts
+      - tests/integration/review-fix-loop.test.ts
+      - tests/integration/tdd-evidence.test.ts
+    status: passed
+    blocker: null
+  - id: T05-01
+    ticket: "05"
+    checklist: 文档 Workflow 能形成可回读的探索、编辑、验证与 Review Artifact，并在 Close 前通过文档质量 Gate。
+    evidenceTier: local-automated
+    sources:
+      - tests/e2e/documentation-workflow.test.ts
+      - tests/integration/artifact-authoring.test.ts
+    status: passed
+    blocker: null
+  - id: T05-02
+    ticket: "05"
+    checklist: 新进程恢复后继续同一 Work Item，不改变已冻结的 Work Package、Artifact authoring 合同或文档路径策略。
+    evidenceTier: local-automated
+    sources:
+      - tests/e2e/documentation-workflow.test.ts
+      - tests/integration/recovery.test.ts
+      - docs/reference/application-protocol.md
+    status: passed
+    blocker: null
+  - id: T05-03
+    ticket: "05"
+    checklist: 任何超出允许文档范围的修改都被拒绝，且文档 Workflow 不产生或依赖功能 TDD Evidence。
+    evidenceTier: local-automated
+    sources:
+      - tests/e2e/documentation-workflow.test.ts
+      - tests/unit/compiler.test.ts
+    status: passed
+    blocker: null
+  - id: T06-01
+    ticket: "06"
+    checklist: 每个可用宿主在隔离 fixture 上产生脱敏、可回读的真实会话证据，覆盖 Driver 调用、inspect + acquire 恢复、提交和 verifier 结果。
+    evidenceTier: real-host
+    sources:
+      - docs/acceptance/agent-live-matrix.yaml
+      - docs/acceptance/agent-live-history.json
+      - docs/acceptance/codex-live.md
+      - docs/acceptance/claude-live.md
+      - docs/acceptance/cursor-live.md
+    status: no-go
+    blocker: 现有记录均为 legacy-unbound 历史观察，缺少本次 signed fixture、三段 fresh-session receipt 与通过的最终 verifier。
+  - id: T06-02
+    ticket: "06"
+    checklist: 证据将自动化 fixture、历史观察与发布级真实宿主结果明确分层，缺少客户端或认证时记录为 NO-GO 而不模拟通过。
+    evidenceTier: real-host
+    sources:
+      - docs/acceptance/agent-live-matrix.yaml
+      - docs/acceptance/agent-driver-contract.md
+    status: no-go
+    blocker: 分层规则已由本地测试和矩阵表达，但所有三个发布级真实宿主仍为 not_run 或 observed-unverified，不能标记为通过。
+  - id: T06-03
+    ticket: "06"
+    checklist: 宿主验收不改变 Foundation 冻结的 Application Protocol 或 Artifact authoring 边界。
+    evidenceTier: real-host
+    sources:
+      - docs/reference/application-protocol.md
+      - docs/acceptance/agent-driver-contract.md
+    status: not_run
+    blocker: 尚未在本次真实宿主验收中完成 Driver 发现、跨会话恢复和 verifier；本地契约不能替代真实宿主证据。
+  - id: T07-01
+    ticket: "07"
+    checklist: 每个可用平台独立记录只读预检、授权写入、稳定目标、幂等键、回读摘要和失败路径；Fixture 不能代替真实平台结果。
+    evidenceTier: real-platform
+    sources:
+      - docs/reference/application-protocol.md
+      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
+    status: not_run
+    blocker: 未提供专用 GitHub、GitLab 或飞书测试目标及本次精确写入授权；fixture 只证明本地契约，不能代替真实平台结果。
+  - id: T07-02
+    ticket: "07"
+    checklist: 未安装、未认证或无测试目标的平台明确记录为 NO-GO，不切换到未建模的 Provider 或绕过授权。
+    evidenceTier: real-platform
+    sources:
+      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
+      - docs/reference/application-protocol.md
+    status: no-go
+    blocker: 本轮禁止调用远程 Provider，且没有专用平台目标、认证状态证明或写入授权；不得降级为未建模 HTTP Provider。
+  - id: T07-03
+    ticket: "07"
+    checklist: 外部未知结果进入协调回查或显式处理，不自动重发可能已发生的写入。
+    evidenceTier: real-platform
+    sources:
+      - docs/reference/application-protocol.md
+      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
+    status: not_run
+    blocker: 本地 fixture 覆盖协调语义，但本轮未在真实平台制造或回查未知外部结果，不能宣称真实平台通过。
+  - id: T08-01
+    ticket: "08"
+    checklist: clean consumer 安装、功能与文档 Workflow、Driver dry-run 和中文指南在发布产物上得到验证。
+    evidenceTier: local-automated
+    sources:
+      - tests/e2e/package-install.test.ts
+      - tests/e2e/driver-install.test.ts
+      - tests/contract/chinese-guidance.test.ts
+    status: passed
+    blocker: null
+  - id: T08-02
+    ticket: "08"
+    checklist: 发布门禁验证协议基线、Schema、文档、测试、构建、打包和需求追踪矩阵，不掩盖失败或未运行的必需项。
+    evidenceTier: local-automated
+    sources:
+      - tests/contract/requirements-traceability.test.ts
+      - tests/contract/release-acceptance-traceability.test.ts
+      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
+    status: no-go
+    blocker: 本追溯库存已验证矩阵结构和层级，但最终 release gate 脚本与完整门禁执行尚未在本轮完成；外部必需层也仍未通过。
+  - id: T08-03
+    ticket: "08"
+    checklist: 发布报告分别呈现实现、宿主与平台证据；只有所有首版必需层级均通过时，整体状态才标记为 GO。
+    evidenceTier: local-automated
+    sources:
+      - docs/acceptance/requirements-traceability.yaml
+      - docs/acceptance/agent-live-matrix.yaml
+      - docs/superpowers/plans/2026-08-17-wsspeckit-release-acceptance.md
+    status: no-go
+    blocker: real-host 与 real-platform 必需层均未运行或 NO-GO，因此整体状态必须保持 no-go。
