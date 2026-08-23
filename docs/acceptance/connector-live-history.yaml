@@ -1,0 +1,55 @@
+# Ticket 07 真实 Connector 验收的脱敏 NO-GO 历史 manifest。
+# 本文件仅记录 command -v 可用性；没有执行 Provider CLI、认证探测、网络或远程写入。
+version: 1
+kind: wsspeckit-connector-live-history
+recordedDate: 2026-08-23
+overall: no-go
+evidenceTiers:
+  localFixtures: local-automated-only
+  realPlatformEvidence: authorized-dedicated-target-write-idempotency-readback-reconciliation-required
+currentProbe:
+  method: command-v-only
+  realPlatformExecution: not-authorized-not-run
+  providers:
+    github:
+      availability: available-unverified
+      realPlatformEvidence:
+        status: not-run-no-go
+        receiptCount: 0
+        requiredChecks:
+          - verified-authentication
+          - dedicated-non-production-target
+          - explicit-exact-write-authorization
+          - idempotency-key
+          - readback-summary
+          - reconciliation-before-retry
+          - redacted-audit-receipt
+        satisfiedChecks: []
+    gitlab:
+      availability: missing
+      realPlatformEvidence:
+        status: not-run-no-go
+        receiptCount: 0
+        requiredChecks:
+          - verified-authentication
+          - dedicated-non-production-target
+          - explicit-exact-write-authorization
+          - idempotency-key
+          - readback-summary
+          - reconciliation-before-retry
+          - redacted-audit-receipt
+        satisfiedChecks: []
+    feishu:
+      availability: available-unverified
+      realPlatformEvidence:
+        status: not-run-no-go
+        receiptCount: 0
+        requiredChecks:
+          - verified-authentication
+          - dedicated-non-production-target
+          - explicit-exact-write-authorization
+          - idempotency-key
+          - readback-summary
+          - reconciliation-before-retry
+          - redacted-audit-receipt
+        satisfiedChecks: []
