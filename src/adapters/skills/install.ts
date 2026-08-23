@@ -29,9 +29,9 @@ export interface SecureInstallRequest {
   expectedSize?: number;
 }
 
-type DriverVersion = 1 | 2 | 3 | 4;
+type DriverVersion = 1 | 2 | 3 | 4 | 5 | 6;
 
-const currentDriverVersion = 4 as const;
+const currentDriverVersion = 6 as const;
 const maximumDriverBytes = 1_048_576n;
 const driverDescription = "使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。";
 const driverFrontMatterKeys = ["description", "name", "wsspeckit-driver-content-digest", "wsspeckit-driver-version"] as const;
@@ -46,6 +46,8 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     2: ["sha256:69b6ad68c123a711095377ffdf64d21225f4bafaab3a414497ffef6c5391773e"],
     3: ["sha256:451f3853fbc01766264e07c6b3f376aa64acfa0d7f2c6662916f876496558a8f"],
     4: ["sha256:417eb92d90b1fcd9f3ea519a80fd7d3b9151d211c90371ff17e2edbb361817aa"],
+    5: ["sha256:2168d90a410d3d250645efb01911d09bc0f72259835fa2800819eba6838b65db"],
+    6: ["sha256:dbee7635c12c75cd3548241e36e919f53afa7f6ca5f93a147d2dc674cc39bb25"],
   },
   claude: {
     1: [
@@ -55,6 +57,8 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     2: ["sha256:f7876f2691e037c3d5d9e469275e8f9adb110b6ed39f3ba7eb6f962e5d70cbb1"],
     3: ["sha256:100a50a8ca4da95b9513aec29cdd70703cccd6bdb89209d1d18850f63ea944cb"],
     4: ["sha256:4bc3ec83cec6e94858e91d9530de8cd5cb73808e4afaed40696f0acd0238f1a3"],
+    5: ["sha256:bbaf8982709f2a8a38e62fc1d4142725d9a38932385daad0bba70307295e7f62"],
+    6: ["sha256:3d425ec1ad828b1c58768225bc07e5fa00468566d63997ce8b346c9ba0e50c1f"],
   },
   cursor: {
     1: [
@@ -64,6 +68,8 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     2: ["sha256:2c5645323532c603f0e2b037bb3cd2cc1275d31abf0fa01180cc3ee436534a93"],
     3: ["sha256:5d16ec26c199a1c552b9ba81d346f87fc26ff508c9204c68501ba01ace39ea98"],
     4: ["sha256:37dac4a4dfb61cc430cd50fcfd2b57988aa44caf0edbe87e5f5c97c36b153f1e"],
+    5: ["sha256:cb9f9b0b7698c91a8b92443e3818cb5e875392d8f2a97666408ed38967b3d2a7"],
+    6: ["sha256:fde89e7d933eea21e9ef1b9d32f3e8a2b2c5905664cc7f924ad02de4390e73bc"],
   },
   generic: {
     1: [
@@ -73,18 +79,26 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     2: ["sha256:8248d34a1ac5306701a7d8ac5fbbea175b22ceb932fbcdc3d672a01e31127c25"],
     3: ["sha256:68f5b5a5c650648987fa230f339e162792a431da53d4b4ca202aff78fcb0cff1"],
     4: ["sha256:c850774fd9c8338c31c6815a83fe526408b76f9473a3482d99bcee42342e3db6"],
+    5: ["sha256:6a5288b339b5bc2ae41f3b445863b32ad11428d5b6362ba4a97bd025cafdcca9"],
+    6: ["sha256:675dbd85103232c879728b080f648b64701813a540050a1af0d622655f37cde3"],
   },
 };
 
 function contract(agent: DriverAgent): Record<string, unknown> {
   const actionCases = {
     execute: {
-      next: "submit",
+      next: "artifact",
       capture: {
         workPackage: "result.workPackage",
         stepId: "result.workPackage.stepId",
         attemptId: "result.workPackage.attemptId",
         leaseToken: "result.workPackage.lease.token",
+        requiredOutputs: "result.workPackage.requiredOutputs",
+      },
+      initialize: {
+        target: "artifactRefs",
+        source: "result.workPackage.artifacts",
+        filter: { field: "artifactType", equals: "requirement-source", requiredBy: "requiredOutputs" },
       },
     },
     await_approval: { next: "await_approval" },
@@ -117,6 +131,31 @@ function contract(agent: DriverAgent): Record<string, unknown> {
           cases: actionCases,
         },
       },
+      artifact: {
+        argv: [
+          "wspec", "artifact", "create",
+          "--work-item", "${workItemId}",
+          "--step", "${stepId}",
+          "--attempt", "${attemptId}",
+          "--lease-token", "${leaseToken}",
+          "--artifact-type", "${artifactType}",
+          "--output", "${outputId}",
+          "--content-file", "${contentFile}",
+        ],
+        capture: { artifactRef: "result" },
+        forEach: {
+          source: "requiredOutputs",
+          item: "requiredOutput",
+          filter: { field: "artifactType", notEquals: "requirement-source" },
+          bindings: {
+            artifactType: "requiredOutput.artifactType",
+            outputId: "requiredOutput.outputId",
+            contentFile: ".wsspec/work-items/${workItemId}/drafts/${outputId}.md",
+          },
+          collect: { target: "artifactRefs", value: "result" },
+        },
+        next: "submit",
+      },
       submit: {
         argv: [
           "wspec", "submit", "${workItemId}",
@@ -126,6 +165,7 @@ function contract(agent: DriverAgent): Record<string, unknown> {
           "--result", "${resultPath}",
           "--actor", "${actor}",
         ],
+        resultBindings: { artifacts: "artifactRefs" },
         branch: { field: "result.action", cases: actionCases },
       },
     },
@@ -155,7 +195,7 @@ function body(agent: DriverAgent): string {
     "",
     "每次 acquire 都读取 `result.action` 并按下列分支处理：",
     "",
-    "- `execute`：读取 `result.workPackage.stepId`、`result.workPackage.attemptId` 和 `result.workPackage.lease.token`。只按 Work Package 中的 Artifact 引用读取输入，加载绑定 Skill，由当前 Agent Host 原生执行，并把符合 SubmitResult Schema 的 JSON 写到 `<resultPath>`。随后执行 `wspec submit \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease \"<leaseToken>\" --result \"<resultPath>\" --actor \"<actor>\"`。submit 也返回 `result.action`：若为 `execute`，它已经携带并 claim 新 Work Package，必须直接处理后继续 submit，不得再次 acquire；其余分支按下文停止。不得复用旧 attemptId 或 leaseToken。",
+    "- `execute`：读取 `result.workPackage.stepId`、`result.workPackage.attemptId`、`result.workPackage.lease.token` 和完整 `requiredOutputs`。先把 Work Package 中系统提供的 `requirement-source` 引用放入 `artifactRefs`；再按 `requiredOutputs` 顺序逐项处理其余输出。每项正文写入 Work Item 自有的 `.wsspec/work-items/<workItemId>/drafts/<outputId>.md`，执行 `wspec artifact create --work-item \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease-token \"<leaseToken>\" --artifact-type \"<artifactType>\" --output \"<outputId>\" --content-file \".wsspec/work-items/<workItemId>/drafts/<outputId>.md\"`，并把每次 JSON stdout 的 `result` 追加到 `artifactRefs`。所有必需输出完成后才生成 SubmitResult；submit JSON 的 `artifacts` 只携带累积的 ArtifactRef，正文、`contentFile`、绝对路径和 Lease token 都不得写入 `<resultPath>`。随后执行 `wspec submit \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease \"<leaseToken>\" --result \"<resultPath>\" --actor \"<actor>\"`。submit 也返回 `result.action`：若为 `execute`，它已经携带并 claim 新 Work Package，必须从 artifact 循环处理，不得再次 acquire；其余分支按下文停止。不得复用旧 attemptId 或 leaseToken。",
     "- `await_approval`：读取并向用户展示 `result.approval`，停止自动执行；不得代替用户批准。获得人工决定后由审批入口处理；若 Host 会话已中断，再从 inspect / acquire 恢复。",
     "- `blocked`：读取并展示 `result.problems`，停止循环；只有问题被外部解决后才从 inspect / acquire 恢复。",
     "- `completed`：读取 `result.summary`，报告完成并停止，不再 acquire 或 submit。",
@@ -272,7 +312,7 @@ function ownedSkillVersion(content: string, agent: DriverAgent): DriverVersion |
     && source.description === driverDescription
     && keys.length === driverFrontMatterKeys.length
     && keys.every((key, index) => key === driverFrontMatterKeys[index])
-    && (version === 1 || version === 2 || version === 3 || version === 4)
+    && (version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6)
     && typeof digest === "string"
     && digest === sha256(match[2]!)
     && canonicalDriverDigests[agent][version].includes(digest);

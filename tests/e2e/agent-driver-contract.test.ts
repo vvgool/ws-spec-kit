@@ -7,7 +7,6 @@ import path from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
 
-import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import type { SubmitResult } from "../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
 import { readControlPlane } from "../../src/storage/control-plane.js";
@@ -36,18 +35,41 @@ interface CliRun {
   value: { ok: boolean; result?: Record<string, unknown>; error?: { code?: string; message?: string } };
 }
 
-type DriverState = "start" | "inspect" | "acquire" | "submit";
+type DriverState = "start" | "inspect" | "acquire" | "artifact" | "submit";
+type DriverOperationName = DriverState;
 type DriverTerminal = "await_approval" | "blocked" | "completed";
+
+interface DriverCollectionRule {
+  target: "artifactRefs";
+  source: string;
+  filter: { field: "artifactType"; equals: "requirement-source"; requiredBy: "requiredOutputs" };
+}
+
+interface DriverForEachRule {
+  source: "requiredOutputs";
+  item: "requiredOutput";
+  filter: { field: "artifactType"; notEquals: "requirement-source" };
+  bindings: {
+    artifactType: "requiredOutput.artifactType";
+    outputId: "requiredOutput.outputId";
+    contentFile: ".wsspec/work-items/${workItemId}/drafts/${outputId}.md";
+  };
+  collect: { target: "artifactRefs"; value: "result" };
+}
 
 interface DriverOperation {
   argv: string[];
   capture?: Record<string, string>;
+  initialize?: DriverCollectionRule;
+  forEach?: DriverForEachRule;
+  resultBindings?: { artifacts: "artifactRefs" };
   next?: DriverState;
   branch?: {
     field: string;
     cases: Record<"execute" | DriverTerminal, {
       next: DriverState | DriverTerminal;
       capture?: Record<string, string>;
+      initialize?: DriverCollectionRule;
     }>;
   };
 }
@@ -57,7 +79,7 @@ interface DriverContract {
   version: 1;
   workflowSelection: Record<"feature" | "documentation", TaskFixture["workflowRef"]>;
   entrypoints: { new: "start"; recovery: "inspect" };
-  operations: Record<DriverState, DriverOperation>;
+  operations: Record<DriverOperationName, DriverOperation>;
   terminals: Record<DriverTerminal, { stop: true }>;
 }
 
@@ -186,7 +208,7 @@ function driverContract(body: string): DriverContract {
   assert.ok(contract, "Driver 正文必须包含 fenced JSON 状态机合同");
   assert.equal(contract.version, 1);
   assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" });
-  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "inspect", "start", "submit"]);
+  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "artifact", "inspect", "start", "submit"]);
   assert.deepEqual(Object.keys(contract.terminals).sort(), ["await_approval", "blocked", "completed"]);
   return contract;
 }
@@ -198,16 +220,39 @@ function valueAt(source: unknown, pointer: string): unknown {
   }, source);
 }
 
-function renderArgv(operation: DriverOperation, values: Record<string, unknown>): string[] {
-  return operation.argv.map((argument) => argument.replace(/\$\{([A-Za-z][A-Za-z0-9]*)\}/gu, (_match, name: string) => {
+function renderTemplate(template: string, values: Record<string, unknown>): string {
+  return template.replace(/\$\{([A-Za-z][A-Za-z0-9]*)\}/gu, (_match, name: string) => {
     const value = values[name];
     assert.equal(typeof value, "string", `命令模板变量 ${name} 必须已从 Driver 输出合同捕获`);
     return value as string;
-  }));
+  });
+}
+
+function renderArgv(operation: DriverOperation, values: Record<string, unknown>): string[] {
+  return operation.argv.map((argument) => renderTemplate(argument, values));
 }
 
 function capture(fields: Record<string, string> | undefined, output: CliRun["value"], values: Record<string, unknown>): void {
   for (const [name, pointer] of Object.entries(fields ?? {})) values[name] = valueAt(output, pointer);
+}
+
+function initialize(rule: DriverCollectionRule | undefined, output: CliRun["value"], values: Record<string, unknown>): void {
+  if (rule === undefined) return;
+  const source = valueAt(output, rule.source);
+  assert.ok(Array.isArray(source), `${rule.source} 必须是数组`);
+  const required = values[rule.filter.requiredBy];
+  assert.ok(Array.isArray(required), `${rule.filter.requiredBy} 必须已由 execute capture`);
+  const requiredTypes = new Set(required.flatMap((candidate) => candidate !== null
+    && typeof candidate === "object"
+    && !Array.isArray(candidate)
+    && typeof (candidate as Record<string, unknown>)[rule.filter.field] === "string"
+    ? [(candidate as Record<string, unknown>)[rule.filter.field] as string]
+    : []));
+  values[rule.target] = source.filter((candidate) => candidate !== null
+    && typeof candidate === "object"
+    && !Array.isArray(candidate)
+    && (candidate as Record<string, unknown>)[rule.filter.field] === rule.filter.equals
+    && requiredTypes.has(rule.filter.equals));
 }
 
 test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、幂等和冲突均 fail closed", async (t) => {
@@ -241,6 +286,9 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.match(body, /不得调用模型 API/u, `${client}: 模型边界`);
       assert.match(body, /不得缓存.*对话/u, `${client}: 对话边界`);
       assert.match(body, /不得.*Artifact 正文.*协议 JSON/u, `${client}: Artifact 边界`);
+      assert.match(body, /\.wsspec\/work-items\/<workItemId>\/drafts\/<outputId>\.md/u, `${client}: draft 路径模板`);
+      assert.match(body, /artifact create/u, `${client}: Artifact authoring 命令`);
+      assert.match(body, /submit.*只.*ArtifactRef/su, `${client}: submit 只携带 ArtifactRef`);
       assert.match(body, /builtin:\/\/workflows\/feature-delivery/u, `${client}: 功能 workflowRef`);
       assert.match(body, /builtin:\/\/workflows\/documentation-delivery/u, `${client}: 文档 workflowRef`);
       assert.match(body, /创建后不得自动切换 Workflow/u, `${client}: Workflow 不切换`);
@@ -248,12 +296,18 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.equal(contract.operations.acquire.branch?.field, "result.action", `${client}: acquire action 分支`);
       assert.deepEqual(contract.operations.acquire.branch?.cases, {
         execute: {
-          next: "submit",
+          next: "artifact",
           capture: {
             workPackage: "result.workPackage",
             stepId: "result.workPackage.stepId",
             attemptId: "result.workPackage.attemptId",
             leaseToken: "result.workPackage.lease.token",
+            requiredOutputs: "result.workPackage.requiredOutputs",
+          },
+          initialize: {
+            target: "artifactRefs",
+            source: "result.workPackage.artifacts",
+            filter: { field: "artifactType", equals: "requirement-source", requiredBy: "requiredOutputs" },
           },
         },
         await_approval: { next: "await_approval" },
@@ -261,6 +315,32 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
         completed: { next: "completed" },
       }, `${client}: action.kind 分支必须完整`);
       assert.deepEqual(contract.operations.submit.branch, contract.operations.acquire.branch, `${client}: submit 必须消费返回的 AgentAction`);
+      assert.deepEqual(contract.operations.artifact, {
+        argv: [
+          "wspec", "artifact", "create",
+          "--work-item", "${workItemId}",
+          "--step", "${stepId}",
+          "--attempt", "${attemptId}",
+          "--lease-token", "${leaseToken}",
+          "--artifact-type", "${artifactType}",
+          "--output", "${outputId}",
+          "--content-file", "${contentFile}",
+        ],
+        capture: { artifactRef: "result" },
+        forEach: {
+          source: "requiredOutputs",
+          item: "requiredOutput",
+          filter: { field: "artifactType", notEquals: "requirement-source" },
+          bindings: {
+            artifactType: "requiredOutput.artifactType",
+            outputId: "requiredOutput.outputId",
+            contentFile: ".wsspec/work-items/${workItemId}/drafts/${outputId}.md",
+          },
+          collect: { target: "artifactRefs", value: "result" },
+        },
+        next: "submit",
+      }, `${client}: artifact authoring 命令模板`);
+      assert.deepEqual(contract.operations.submit.resultBindings, { artifacts: "artifactRefs" }, `${client}: submit 必须消费累积 ArtifactRef`);
 
       const repeated = await runCli(root, home, installArgs);
       assertPassed(repeated, `${client}: idempotent reinstall`);
@@ -380,6 +460,9 @@ async function createRepository(home: string): Promise<string> {
   await git(root, "config", "user.name", "Task 2 Fixture");
   const initialized = await runCli(root, home, ["init"]);
   assertPassed(initialized, "init");
+  const ignorePath = path.join(root, ".gitignore");
+  const ignore = await readFile(ignorePath, "utf8").catch(() => "");
+  await writeFile(ignorePath, `${ignore}${ignore.endsWith("\n") || ignore === "" ? "" : "\n"}.acceptance/\n`, "utf8");
   await git(root, "add", ".");
   await git(root, "commit", "-m", "test: initialize driver fixture");
   return root;
@@ -399,40 +482,53 @@ function artifactBody(artifactType: string): string {
   return `# ${artifactType}\n\n本地 Driver 合同 Fixture。\n`;
 }
 
-async function writeOutputArtifact(root: string, workPackage: WorkPackage, artifactType: string): Promise<ArtifactReference> {
+async function executeArtifactOperation(
+  root: string,
+  home: string,
+  environment: Record<string, string>,
+  operation: DriverOperation,
+  values: Record<string, unknown>,
+): Promise<CliRun[]> {
+  const rule = operation.forEach;
+  assert.ok(rule, "artifact operation 必须声明 forEach");
+  const source = values[rule.source];
+  assert.ok(Array.isArray(source), `${rule.source} 必须已由 execute capture`);
+  const collected = values[rule.collect.target];
+  assert.ok(Array.isArray(collected), `${rule.collect.target} 必须已由 execute initialize`);
+  const workPackage = requiredWorkPackage(values.workPackage, "artifact Work Package");
   const projection = await readControlPlane(root, workPackage.workItemId);
   const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
   const worktree = path.join(root, locator.worktree);
-  const body = artifactBody(artifactType);
-  const metadata = {
-    artifactType,
-    schemaVersion: 1 as const,
-    workItemId: workPackage.workItemId,
-    stageId: workPackage.stepId,
-    attemptId: workPackage.attemptId,
-    revision: 1,
-  };
-  const contentHash = computeArtifactContentHash(metadata, body);
-  const relative = `.wsspec/work-items/${workPackage.workItemId}/artifacts/${workPackage.stepId.replaceAll(":", "-")}-${artifactType}.md`;
-  await mkdir(path.dirname(path.join(worktree, relative)), { recursive: true });
-  await writeFile(path.join(worktree, relative), [
-    "---", `artifactType: ${artifactType}`, "schemaVersion: 1", `workItemId: ${workPackage.workItemId}`,
-    `stageId: ${workPackage.stepId}`, `attemptId: ${workPackage.attemptId}`, "revision: 1", `contentHash: ${contentHash}`,
-    "---", body,
-  ].join("\n"), "utf8");
-  const contentLevel = workPackage.requiredOutputs.find((output) => output.artifactType === artifactType)?.contentLevel;
-  return {
-    artifactType,
-    schemaVersion: 1,
-    path: relative,
-    revision: 1,
-    contentHash,
-    mediaType: "text/markdown",
-    ...(contentLevel === undefined ? {} : { contentLevel }),
-  };
+  const runs: CliRun[] = [];
+  for (const candidate of source) {
+    assert.ok(candidate !== null && typeof candidate === "object" && !Array.isArray(candidate), `${rule.item} 必须是对象`);
+    const expected = candidate as Record<string, unknown>;
+    if (expected[rule.filter.field] === rule.filter.notEquals) continue;
+    for (const [name, binding] of Object.entries(rule.bindings)) {
+      const prefix = `${rule.item}.`;
+      values[name] = binding.startsWith(prefix)
+        ? valueAt(expected, binding.slice(prefix.length))
+        : renderTemplate(binding, values);
+    }
+    const artifactType = requiredString(values.artifactType, "artifactType binding");
+    const outputId = requiredString(values.outputId, "outputId binding");
+    const contentFile = requiredString(values.contentFile, "contentFile binding");
+    await mkdir(path.dirname(path.join(worktree, contentFile)), { recursive: true });
+    await writeFile(path.join(worktree, contentFile), artifactBody(artifactType), "utf8");
+    const argv = renderArgv(operation, values);
+    const run = await runCli(worktree, home, argv.slice(1), environment);
+    assertPassed(run, `${workPackage.stepId}/${outputId}: artifact create`);
+    capture(operation.capture, run.value, values);
+    collected.push(valueAt(run.value, rule.collect.value));
+    runs.push(run);
+  }
+  return runs;
 }
 
-async function submissionFor(root: string, workPackage: WorkPackage): Promise<SubmitResult> {
+function submissionFor(
+  workPackage: WorkPackage,
+  artifacts: ArtifactReference[],
+): SubmitResult {
   if (workPackage.stepId === "edit-document") {
     return {
       version: 1,
@@ -445,16 +541,6 @@ async function submissionFor(root: string, workPackage: WorkPackage): Promise<Su
       externalWrites: [],
       remainingRisks: [{ code: "WSSPEC_FIXTURE_DOCUMENT_EDIT_NOT_RUN" }],
     };
-  }
-  const artifacts: ArtifactReference[] = [];
-  for (const expected of workPackage.requiredOutputs) {
-    if (expected.artifactType === "requirement-source") {
-      const source = workPackage.artifacts.find((artifact) => artifact.artifactType === "requirement-source");
-      assert.ok(source, "intake 必须携带 Requirement Source 引用");
-      artifacts.push(source);
-    } else {
-      artifacts.push(await writeOutputArtifact(root, workPackage, expected.artifactType));
-    }
   }
   return {
     version: 1,
@@ -526,10 +612,23 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
           for (let iteration = 0; iteration < 32 && terminal === undefined; iteration += 1) {
             const operation: DriverOperation = contract.operations[state];
             assert.ok(operation, `${client}/${kind}: Driver 缺少 ${state} 操作`);
+            if (state === "artifact") {
+              const runs = await executeArtifactOperation(root, home, environment, operation, values);
+              pids.push(...runs.map(({ pid }) => pid));
+              protocolJson += runs.map(({ stdout }) => stdout).join("");
+              assert.equal(operation.next, "submit", `${client}/${kind}: artifact 完成后必须 submit`);
+              state = operation.next;
+              continue;
+            }
             if (state === "submit") {
               const workPackage = requiredWorkPackage(values.workPackage, `${client}/${kind}: submit Work Package`);
               const resultName = `driver-result-${submitCount + 1}.json`;
-              await writeFile(path.join(root, resultName), `${JSON.stringify(await submissionFor(root, workPackage), null, 2)}\n`, "utf8");
+              const artifactBinding = operation.resultBindings?.artifacts;
+              assert.equal(artifactBinding, "artifactRefs", `${client}/${kind}: submit artifact binding`);
+              const artifactRefs = values[artifactBinding];
+              assert.ok(Array.isArray(artifactRefs), `${client}/${kind}: artifactRefs 必须由状态合同累积`);
+              const result = submissionFor(workPackage, artifactRefs as ArtifactReference[]);
+              await writeFile(path.join(root, resultName), `${JSON.stringify(result, null, 2)}\n`, "utf8");
               values.resultPath = resultName;
             }
             const argv = renderArgv(operation, values);
@@ -544,6 +643,7 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
               ? undefined
               : branch.cases[requiredString(valueAt(run.value, branch.field), `${client}/${kind}: action.kind`) as keyof typeof branch.cases];
             capture(branchCase?.capture, run.value, values);
+            initialize(branchCase?.initialize, run.value, values);
 
             if (state === "start") {
               assert.equal(values.workflowRef, task.workflowRef, `${client}/${kind}: explicit workflowRef`);
@@ -564,7 +664,7 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
                 const workPackage = requiredWorkPackage(values.workPackage, `${client}/${kind}: acquire Work Package`);
                 assert.equal(workPackage.workItemId, values.workItemId);
               }
-            } else {
+            } else if (state === "submit") {
               submitCount += 1;
               if (run.value.result.action === "execute") {
                 executeCount += 1;

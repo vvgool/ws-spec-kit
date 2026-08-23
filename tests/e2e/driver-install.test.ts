@@ -110,7 +110,7 @@ test("安装器只幂等复验当前 canonical Driver", async () => {
   const first = await readFile(ownedTarget, "utf8");
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
   assert.equal(await readFile(ownedTarget, "utf8"), first);
-  assert.match(first, /wsspeckit-driver-version: 4/);
+  assert.match(first, /wsspeckit-driver-version: 6/);
 });
 
 test("安装器拒绝原地升级所有已登记的历史 canonical Driver", async (t) => {
