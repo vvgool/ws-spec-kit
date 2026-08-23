@@ -4,13 +4,13 @@ import path from "node:path";
 import test from "node:test";
 
 import { applyProfileDecision } from "../../src/application/profile.js";
-import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import type { SubmitResult } from "../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
 import { readControlPlane, recoverControlPlane, replayEvents, type RuntimeProjection } from "../../src/storage/control-plane.js";
 import { readEvents, type StoredEvent } from "../../src/storage/events.js";
 import {
+  authorArtifact,
   completedResult,
   controlRuntimeFixture,
   failedResult,
@@ -23,30 +23,21 @@ import {
 } from "./helpers/control-runtime.js";
 
 async function writeArtifact(input: {
+  fixture: Awaited<ReturnType<typeof controlRuntimeFixture>>;
   worktree: string;
-  workItemId: string;
   workPackage: WorkPackage;
   artifactType: string;
   filename?: string;
 }): Promise<ArtifactReference> {
   const body = "# Exploration\n\nRepository facts.\n";
-  const metadata = {
+  return authorArtifact({
+    fixture: input.fixture,
+    worktree: input.worktree,
+    workPackage: input.workPackage,
     artifactType: input.artifactType,
-    schemaVersion: 1 as const,
-    workItemId: input.workItemId,
-    stageId: input.workPackage.stepId,
-    attemptId: input.workPackage.attemptId,
-    revision: 1,
-  };
-  const contentHash = computeArtifactContentHash(metadata, body);
-  const relative = `.wsspec/work-items/${input.workItemId}/artifacts/${input.filename ?? `${input.artifactType}.md`}`;
-  await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
-  await writeFile(
-    path.join(input.worktree, relative),
-    `---\nartifactType: ${input.artifactType}\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: 1\ncontentHash: ${contentHash}\n---\n${body}`,
-    "utf8",
-  );
-  return { artifactType: input.artifactType, schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown" };
+    body,
+    ...(input.filename === undefined ? {} : { filename: input.filename }),
+  });
 }
 
 test("旧事件投影恢复时补齐累计风险信号", () => {
@@ -93,7 +84,7 @@ async function submitExplore(
   const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "intake-agent" }));
   const explore = requireExecute(await submitPackage(fixture, intake));
   const worktree = await worktreeFor(fixture.root, started.workItemId);
-  const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: explore, artifactType: "exploration-report" });
+  const artifact = await writeArtifact({ fixture, worktree, workPackage: explore, artifactType: "exploration-report" });
   const result: SubmitResult = { ...completedResult(explore, [artifact]), remainingRisks };
   const action = await submitPackage(fixture, explore, result);
   return { fixture, started, initial, explore, result, action, projection: await readControlPlane(fixture.root, started.workItemId) };
@@ -245,7 +236,7 @@ test("Profile 升级与重复 Submit 原子幂等，恢复后不丢失 profile/l
     }),
   });
   const worktree = await worktreeFor(fixture.root, started.workItemId);
-  const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: explore, artifactType: "exploration-report" });
+  const artifact = await writeArtifact({ fixture, worktree, workPackage: explore, artifactType: "exploration-report" });
   const result = { ...completedResult(explore, [artifact]), remainingRisks: [{ risk: "high" }] };
 
   const [first, second] = await Promise.all([
@@ -345,7 +336,7 @@ test("失败 Attempt 的敏感实际改动与 Retry 状态原子升档，并在�
   assert.equal((await readEvents(failedProjection.controlPlane)).filter(({ eventType }) => eventType === "profile.upgraded").length, 1);
 
   const retry = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "explorer" }));
-  const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: retry, artifactType: "exploration-report" });
+  const artifact = await writeArtifact({ fixture, worktree, workPackage: retry, artifactType: "exploration-report" });
   await submitPackage(fixture, retry, completedResult(retry, [artifact]));
   const durable = await readControlPlane(fixture.root, started.workItemId);
   assert.equal(durable.profile.selected, "governed");
@@ -433,8 +424,8 @@ test("当前 Review 属于升档失效集合时，永久失败原子持久化 Pr
   const review = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer" }));
   const worktree = await worktreeFor(fixture.root, started.workItemId);
   const reviewArtifact = await writeReviewArtifact({
+    fixture,
     worktree,
-    workItemId: started.workItemId,
     workPackage: review,
     approved: false,
     filename: "permanent-failure-review.md",
@@ -480,7 +471,7 @@ test("Auto 在 Intake low/high 后保持 provisional，并由 Explore 合并累�
     assert.equal(recovered.profile.provisional, true, intakeRisk);
     const resumedExplore = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "explorer" }));
     const worktree = await worktreeFor(fixture.root, started.workItemId);
-    const artifact = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: resumedExplore, artifactType: "exploration-report" });
+    const artifact = await writeArtifact({ fixture, worktree, workPackage: resumedExplore, artifactType: "exploration-report" });
     await submitPackage(fixture, resumedExplore, {
       ...completedResult(resumedExplore, [artifact]),
       remainingRisks: [{ risk: "low" }],

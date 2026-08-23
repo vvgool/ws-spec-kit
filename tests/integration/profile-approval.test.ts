@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
 import { loadApplicationState } from "../../src/application/state.js";
-import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
 import {
+  authorArtifact,
   completedResult,
   controlRuntimeFixture,
   requireExecute,
@@ -35,31 +35,6 @@ const specificationBody = [
   "无",
   "",
 ].join("\n");
-
-async function writeSpecification(input: {
-  worktree: string;
-  workItemId: string;
-  stepId: string;
-  attemptId: string;
-}) {
-  const metadata = {
-    artifactType: "specification",
-    schemaVersion: 1 as const,
-    workItemId: input.workItemId,
-    stageId: input.stepId,
-    attemptId: input.attemptId,
-    revision: 1,
-  };
-  const contentHash = computeArtifactContentHash(metadata, specificationBody);
-  const relative = `.wsspec/work-items/${input.workItemId}/artifacts/specification.md`;
-  await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
-  await writeFile(
-    path.join(input.worktree, relative),
-    `---\nartifactType: specification\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.stepId}\nattemptId: ${input.attemptId}\nrevision: 1\ncontentHash: ${contentHash}\n---\n${specificationBody}`,
-    "utf8",
-  );
-  return { artifactType: "specification", schemaVersion: 1, path: relative, revision: 1, contentHash, mediaType: "text/markdown" };
-}
 
 test("Profile 快照声明 Artifact 审批矩阵，而不是依赖固定阶段规则", async () => {
   const expected = {
@@ -136,11 +111,12 @@ test("审批 decision actor 与精确绑定在事件恢复后保持不变", asyn
     actor: "spec-author",
   }));
   const worktree = await worktreeFor(fixture.root, started.workItemId);
-  const specification = await writeSpecification({
+  const specification = await authorArtifact({
+    fixture,
     worktree,
-    workItemId: started.workItemId,
-    stepId: workPackage.stepId,
-    attemptId: workPackage.attemptId,
+    workPackage,
+    artifactType: "specification",
+    body: specificationBody,
   });
   const awaiting = await submitPackage(fixture, workPackage, completedResult(workPackage, [specification]));
   assert.equal(awaiting.action, "await_approval");

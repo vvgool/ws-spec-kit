@@ -6,6 +6,7 @@ import test from "node:test";
 import { parse } from "yaml";
 
 import { createApplication, type ApplicationDependencies } from "../../src/application/application.js";
+import { createApplicationArtifact } from "../../src/application/artifact.js";
 import { parseApplicationSnapshot } from "../../src/application/snapshot.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { sha256 } from "../../src/domain/digests.js";
@@ -23,6 +24,7 @@ import { createGitRepository, git } from "./helpers/git.js";
 interface Fixture {
   root: string;
   app: ReturnType<typeof createApplication>;
+  now(): Date;
   setNow(value: string): void;
 }
 
@@ -39,7 +41,7 @@ async function fixture(overrides: Partial<ApplicationDependencies> = {}): Promis
     now: () => new Date(currentTime),
     ...overrides,
   });
-  return { root, app, setNow: (value) => { currentTime = value; } };
+  return { root, app, now: () => new Date(currentTime), setNow: (value) => { currentTime = value; } };
 }
 
 async function worktreeFor(root: string, workItemId: string): Promise<string> {
@@ -118,8 +120,12 @@ async function writeArtifact(input: {
   revision?: number;
 }): Promise<ArtifactReference> {
   const revision = input.revision ?? 1;
+  const matchingOutputs = input.workPackage.requiredOutputs.filter((output) => output.artifactType === input.artifactType);
+  assert.ok(matchingOutputs.length <= 1, "test Artifact writer requires an unambiguous Work Package output");
+  const outputId = matchingOutputs[0]?.outputId;
   const metadata = {
     artifactType: input.artifactType,
+    ...(outputId === undefined ? {} : { outputId }),
     schemaVersion: 1 as const,
     workItemId: input.workItemId,
     stageId: input.workPackage.stepId,
@@ -131,10 +137,47 @@ async function writeArtifact(input: {
   await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
   await writeFile(
     path.join(input.worktree, relative),
-    `---\nartifactType: ${input.artifactType}\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: ${revision}\ncontentHash: ${contentHash}\n---\n${input.body}`,
+    `---\nartifactType: ${input.artifactType}\n${outputId === undefined ? "" : `outputId: ${outputId}\n`}schemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: ${revision}\ncontentHash: ${contentHash}\n---\n${input.body}`,
     "utf8",
   );
-  return { artifactType: input.artifactType, schemaVersion: 1, path: relative, revision, contentHash, mediaType: "text/markdown" };
+  return {
+    artifactType: input.artifactType,
+    ...(outputId === undefined ? {} : { outputId }),
+    schemaVersion: 1,
+    path: relative,
+    revision,
+    contentHash,
+    mediaType: "text/markdown",
+  };
+}
+
+async function authorArtifact(input: {
+  current: Fixture;
+  worktree: string;
+  workPackage: WorkPackage;
+  artifactType: string;
+  body: string;
+  filename?: string;
+  outputId?: string;
+}): Promise<ArtifactReference> {
+  const matches = input.workPackage.requiredOutputs.filter((output) => output.artifactType === input.artifactType
+    && (input.outputId === undefined || output.outputId === input.outputId));
+  assert.equal(matches.length, 1, "test Artifact author requires one exact Work Package output");
+  const outputId = matches[0]!.outputId;
+  assert.ok(outputId);
+  const contentFile = `.wsspec/work-items/${input.workPackage.workItemId}/drafts/${input.filename ?? `${outputId}.md`}`;
+  await mkdir(path.dirname(path.join(input.worktree, contentFile)), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(input.worktree, contentFile), input.body, { encoding: "utf8", mode: 0o600 });
+  return createApplicationArtifact({
+    root: input.worktree,
+    workItemId: input.workPackage.workItemId,
+    stepId: input.workPackage.stepId,
+    attemptId: input.workPackage.attemptId,
+    leaseToken: input.workPackage.lease.token,
+    artifactType: input.artifactType,
+    outputId,
+    contentFile,
+  }, { now: input.current.now });
 }
 
 async function prepareApproval(current: Fixture): Promise<{
@@ -150,9 +193,9 @@ async function prepareApproval(current: Fixture): Promise<{
   assert.deepEqual(intake.artifacts, [application.source]);
   const explore = requireExecute(await submitPackage(current, intake));
   assert.deepEqual(explore.artifacts, [application.source]);
-  const exploration = await writeArtifact({
+  const exploration = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: explore,
     artifactType: "exploration-report",
     body: "# Exploration\n\nRepository facts.\n",
@@ -162,7 +205,7 @@ async function prepareApproval(current: Fixture): Promise<{
     "# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "需求",
     "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
   ].join("\n");
-  const specification = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: clarify, artifactType: "specification", body: specificationBody });
+  const specification = await authorArtifact({ current, worktree, workPackage: clarify, artifactType: "specification", body: specificationBody });
   const action = await submitPackage(current, clarify, completedResult(clarify, [specification]));
   assert.equal(action.action, "await_approval");
   if (action.action !== "await_approval") throw new Error("expected approval");
@@ -189,6 +232,31 @@ async function installArtifactContractWorkflow(current: Fixture, artifactType: s
   await writeFile(workflowPath, workflow.replace("outputs: [exploration-report]", `outputs: [exploration-report, ${artifactType}]`), "utf8");
   await git(current.root, "add", ".wsspec/workflows/feature-delivery");
   await git(current.root, "commit", "-m", `test: declare ${artifactType} output`);
+}
+
+async function installRepeatedArtifactTypeWorkflow(current: Fixture): Promise<void> {
+  const projectPackage = path.join(current.root, ".wsspec", "workflows", "feature-delivery");
+  await cp(path.join(process.cwd(), "resources", "workflows", "feature-delivery"), projectPackage, { recursive: true });
+  const workflowPath = path.join(projectPackage, "workflow.yaml");
+  const workflow = await readFile(workflowPath, "utf8");
+  const updated = workflow.replace(
+    "    outputs: [exploration-report]\n  - id: clarify\n    uses: agent.execute\n    needs: [explore]\n    inputs: [exploration-report]",
+    [
+      "    outputs:",
+      "      - { outputId: primary-report, artifactType: exploration-report }",
+      "      - { outputId: secondary-report, artifactType: exploration-report }",
+      "  - id: clarify",
+      "    uses: agent.execute",
+      "    needs: [explore]",
+      "    inputs:",
+      "      - { outputId: primary-report, required: true }",
+      "      - { outputId: secondary-report, required: true }",
+    ].join("\n"),
+  );
+  assert.notEqual(updated, workflow);
+  await writeFile(workflowPath, updated, "utf8");
+  await git(current.root, "add", ".wsspec/workflows/feature-delivery");
+  await git(current.root, "commit", "-m", "test: declare repeated Artifact output types");
 }
 
 async function installRetryWorkflow(current: Fixture): Promise<void> {
@@ -347,7 +415,7 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
       retry?: { maxAttempts: number };
       maxIterations?: number;
       independentReviewActor?: boolean;
-      outputs: Array<{ artifact: string; required: boolean; contentLevel?: string }>;
+      outputs: Array<{ outputId: string; artifact: string; required: boolean; contentLevel?: string }>;
       steps?: Array<{ id: string; actorRole?: "implementation" | "review" | "fix" }>;
     }> }>;
   };
@@ -360,7 +428,7 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
   const quickPlan = application.profiles.quick?.steps.find(({ id }) => id === "plan");
   assert.equal(quickPlan?.artifactLevel, "compact");
   assert.deepEqual(quickPlan?.retry, { maxAttempts: 3 });
-  assert.deepEqual(quickPlan?.outputs, [{ artifact: "tasks", required: true, contentLevel: "compact" }]);
+  assert.deepEqual(quickPlan?.outputs, [{ outputId: "tasks", artifact: "tasks", required: true, contentLevel: "compact" }]);
 
   const projection = await readControlPlane(current.root, started.workItemId);
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
@@ -368,44 +436,76 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
 
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
   const explore = requireExecute(await submitPackage(current, intake));
-  const exploration = await writeArtifact({
+  const exploration = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: explore,
     artifactType: "exploration-report",
     body: "# Exploration\n\nRepository facts.\n",
   });
   const clarify = requireExecute(await submitPackage(current, explore, completedResult(explore, [exploration])));
   assert.deepEqual(clarify.artifacts, [exploration]);
-  const specificationV1 = await writeArtifact({
+  const specification = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: clarify,
     artifactType: "specification",
-    filename: "specification-v1.md",
-    revision: 1,
-    body: [
-      "# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "需求",
-      "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
-    ].join("\n"),
-  });
-  const specificationV2 = await writeArtifact({
-    worktree,
-    workItemId: started.workItemId,
-    workPackage: clarify,
-    artifactType: "specification",
-    filename: "specification-v2.md",
-    revision: 2,
     body: [
       "# 规格", "", "## 目标与背景", "最新目标", "## 范围", "范围", "## 需求", "需求",
       "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
     ].join("\n"),
   });
-  const plan = requireExecute(await submitPackage(current, clarify, completedResult(clarify, [specificationV1, specificationV2])));
+  const plan = requireExecute(await submitPackage(current, clarify, completedResult(clarify, [specification])));
   assert.equal(plan.stepId, "plan");
   assert.equal(plan.artifactLevel, "compact");
-  assert.deepEqual(plan.artifacts, [specificationV2]);
-  assert.deepEqual(plan.requiredOutputs, [{ artifactType: "tasks", schemaVersion: 1, contentLevel: "compact" }]);
+  assert.deepEqual(plan.artifacts, [specification]);
+  assert.deepEqual(plan.requiredOutputs, [{ outputId: "tasks", artifactType: "tasks", schemaVersion: 1, contentLevel: "compact" }]);
+});
+
+test("real Workflow preserves distinct output ids for repeated Artifact types", async () => {
+  const current = await fixture({ workflowTrust: { interactive: true, actor: "reviewer" } });
+  await installRepeatedArtifactTypeWorkflow(current);
+  await trustProjectWorkflow(current);
+  const started = await current.app.start({
+    root: current.root,
+    source: { type: "prompt", text: "生成两份独立探索报告" },
+    workflowRef: "project://workflows/feature-delivery",
+    profile: "quick",
+  });
+  const worktree = await worktreeFor(current.root, started.workItemId);
+  const snapshot = JSON.parse(await readFile(
+    path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"),
+    "utf8",
+  )) as { profiles: { quick: { steps: Array<{ id: string; outputs: unknown[] }> } } };
+  assert.deepEqual(snapshot.profiles.quick.steps.find(({ id }) => id === "explore")?.outputs, [
+    { outputId: "primary-report", artifact: "exploration-report", required: true },
+    { outputId: "secondary-report", artifact: "exploration-report", required: true },
+  ]);
+
+  const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  const explore = requireExecute(await submitPackage(current, intake));
+  assert.deepEqual(explore.requiredOutputs, [
+    { outputId: "primary-report", artifactType: "exploration-report", schemaVersion: 1 },
+    { outputId: "secondary-report", artifactType: "exploration-report", schemaVersion: 1 },
+  ]);
+  const primary = await authorArtifact({
+    current,
+    worktree,
+    workPackage: explore,
+    artifactType: "exploration-report",
+    outputId: "primary-report",
+    body: "# Primary exploration\n\nPrimary findings.\n",
+  });
+  const secondary = await authorArtifact({
+    current,
+    worktree,
+    workPackage: explore,
+    artifactType: "exploration-report",
+    outputId: "secondary-report",
+    body: "# Secondary exploration\n\nSecondary findings.\n",
+  });
+  const clarify = requireExecute(await submitPackage(current, explore, completedResult(explore, [primary, secondary])));
+  assert.deepEqual(clarify.artifacts, [primary, secondary]);
 });
 
 test("acquire fails closed when a compiled required input Artifact is missing", async () => {
@@ -414,9 +514,9 @@ test("acquire fails closed when a compiled required input Artifact is missing", 
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
   const explore = requireExecute(await submitPackage(current, intake));
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const exploration = await writeArtifact({
+  const exploration = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: explore,
     artifactType: "exploration-report",
     body: "# Exploration\n\nRepository facts.\n",
@@ -1225,9 +1325,9 @@ test("submit scopes modifiedFiles to the active Attempt", async () => {
   const explore = requireExecute(await submitPackage(current, intake, { ...completedResult(intake), modifiedFiles: ["first.txt"] }));
 
   await writeFile(path.join(worktree, "second.txt"), "second attempt\n", "utf8");
-  const exploration = await writeArtifact({
+  const exploration = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: explore,
     artifactType: "exploration-report",
     body: "# Exploration\n\nRepository facts.\n",
@@ -1264,9 +1364,9 @@ test("submit preserves the optional mediaType contract for verified Artifacts", 
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
   const explore = requireExecute(await submitPackage(current, intake));
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const { mediaType: _mediaType, ...exploration } = await writeArtifact({
+  const { mediaType: _mediaType, ...exploration } = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: explore,
     artifactType: "exploration-report",
     body: "# Exploration\n\nRepository facts.\n",
@@ -1384,15 +1484,15 @@ test("approval binds an Artifact by declared type instead of its filename", asyn
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
   const explore = requireExecute(await submitPackage(current, intake));
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const exploration = await writeArtifact({ worktree, workItemId: started.workItemId, workPackage: explore, artifactType: "exploration-report", body: "# Exploration\n\nRepository facts.\n" });
+  const exploration = await authorArtifact({ current, worktree, workPackage: explore, artifactType: "exploration-report", body: "# Exploration\n\nRepository facts.\n" });
   const clarify = requireExecute(await submitPackage(current, explore, completedResult(explore, [exploration])));
   const body = [
     "# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "需求",
     "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
   ].join("\n");
-  const specification = await writeArtifact({
+  const specification = await authorArtifact({
+    current,
     worktree,
-    workItemId: started.workItemId,
     workPackage: clarify,
     artifactType: "specification",
     filename: "proposal.md",

@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
+import { createApplicationArtifact } from "../../../src/application/artifact.js";
 import type { ExternalActionExecutor } from "../../../src/application/external-action.js";
-import { computeArtifactContentHash } from "../../../src/domain/artifacts.js";
 import { sha256 } from "../../../src/domain/digests.js";
 import { mutateControlPlane } from "../../../src/engine/scheduler.js";
 import type { AgentAction, SubmitResult } from "../../../src/protocol/application.js";
@@ -18,6 +18,7 @@ import { createGitRepository, git } from "./git.js";
 export interface ControlRuntimeFixture {
   root: string;
   app: ReturnType<typeof createApplication>;
+  now(): Date;
   restart(): void;
 }
 
@@ -70,11 +71,12 @@ export async function controlRuntimeFixture(options: ControlRuntimeFixtureOption
   }
   await git(root, "add", ".wsspec", ".gitignore");
   await git(root, "commit", "-m", "test: initialize control runtime");
+  const now = options.now ?? (() => new Date("2026-08-18T04:00:00.000Z"));
   const dependencies = {
     provider: "codex",
     home: os.homedir(),
     terminal: { isTTY: true },
-    now: options.now ?? (() => new Date("2026-08-18T04:00:00.000Z")),
+    now,
     executors: runtimeExecutors(options),
     ...(options.knowledgeTarget !== true ? {} : {
       connectorRuntime: {
@@ -92,6 +94,7 @@ export async function controlRuntimeFixture(options: ControlRuntimeFixtureOption
   const fixture: ControlRuntimeFixture = {
     root,
     app: createApplication(dependencies),
+    now,
     restart() {
       fixture.app = createApplication({ ...dependencies, executors: runtimeExecutors(options) });
     },
@@ -148,6 +151,35 @@ export async function submitPackage(
   });
 }
 
+export async function authorArtifact(input: {
+  fixture: ControlRuntimeFixture;
+  worktree: string;
+  workPackage: WorkPackage;
+  artifactType: string;
+  body: string;
+  filename?: string;
+  outputId?: string;
+}): Promise<ArtifactReference> {
+  const matches = input.workPackage.requiredOutputs.filter((output) => output.artifactType === input.artifactType
+    && (input.outputId === undefined || output.outputId === input.outputId));
+  assert.equal(matches.length, 1, "test Artifact author requires one exact Work Package output");
+  const outputId = matches[0]!.outputId;
+  assert.ok(outputId);
+  const contentFile = `.wsspec/work-items/${input.workPackage.workItemId}/drafts/${input.filename ?? `${outputId}.md`}`;
+  await mkdir(path.dirname(path.join(input.worktree, contentFile)), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(input.worktree, contentFile), input.body, { encoding: "utf8", mode: 0o600 });
+  return createApplicationArtifact({
+    root: input.worktree,
+    workItemId: input.workPackage.workItemId,
+    stepId: input.workPackage.stepId,
+    attemptId: input.workPackage.attemptId,
+    leaseToken: input.workPackage.lease.token,
+    artifactType: input.artifactType,
+    outputId,
+    contentFile,
+  }, { now: input.fixture.now });
+}
+
 export async function worktreeFor(root: string, workItemId: string): Promise<string> {
   const projection = await readControlPlane(root, workItemId);
   const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
@@ -202,12 +234,11 @@ export async function retainOnlyReadyStage(fixture: ControlRuntimeFixture, workI
 }
 
 export async function writeReviewArtifact(input: {
+  fixture: ControlRuntimeFixture;
   worktree: string;
-  workItemId: string;
   workPackage: WorkPackage;
   approved: boolean;
   filename: string;
-  revision?: number;
 }): Promise<ArtifactReference> {
   const findings = input.approved
     ? "findings: []"
@@ -221,21 +252,12 @@ export async function writeReviewArtifact(input: {
         "    disposition: open",
       ].join("\n");
   const body = `# Findings\n\n\`\`\`yaml\n${findings}\n\`\`\`\n`;
-  const metadata = {
+  return authorArtifact({
+    fixture: input.fixture,
+    worktree: input.worktree,
+    workPackage: input.workPackage,
     artifactType: "review-result",
-    schemaVersion: 1 as const,
-    workItemId: input.workItemId,
-    stageId: input.workPackage.stepId,
-    attemptId: input.workPackage.attemptId,
-    revision: input.revision ?? 1,
-  };
-  const contentHash = computeArtifactContentHash(metadata, body);
-  const relative = `.wsspec/work-items/${input.workItemId}/artifacts/${input.filename}`;
-  await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
-  await writeFile(
-    path.join(input.worktree, relative),
-    `---\nartifactType: review-result\nschemaVersion: 1\nworkItemId: ${input.workItemId}\nstageId: ${input.workPackage.stepId}\nattemptId: ${input.workPackage.attemptId}\nrevision: ${metadata.revision}\ncontentHash: ${contentHash}\n---\n${body}`,
-    "utf8",
-  );
-  return { artifactType: "review-result", schemaVersion: 1, path: relative, revision: metadata.revision, contentHash, mediaType: "text/markdown" };
+    body,
+    filename: input.filename,
+  });
 }
