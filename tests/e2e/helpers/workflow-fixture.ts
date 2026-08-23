@@ -95,9 +95,18 @@ interface DocumentationOptions {
 export interface DocumentationWorkflowResult {
   projection: RuntimeProjection;
   recovered: RuntimeProjection;
+  artifacts: DocumentationArtifacts;
   scopeViolations: Record<"production" | "script" | "dependency" | "build", string>;
   workflowAfterProjectSwitch: string;
   recoveryEvidence: WorkflowFixture["recovery"];
+}
+
+interface DocumentationArtifacts {
+  source: ArtifactReference;
+  exploration: ArtifactReference;
+  edit: ArtifactReference;
+  validation: ArtifactReference;
+  review: ArtifactReference;
 }
 
 function attemptPackage(runtime: RuntimeProjection, stageId: string): WorkPackage {
@@ -817,6 +826,11 @@ export async function executeDocumentationWorkflow(
   const worktree = await worktreeFor(fixture.root, started.workItemId);
   let action: AgentAction = { action: "execute", workPackage: options.first };
   let scopeViolations: DocumentationWorkflowResult["scopeViolations"] | undefined;
+  let source: ArtifactReference | undefined;
+  let exploration: ArtifactReference | undefined;
+  let edit: ArtifactReference | undefined;
+  let validation: ArtifactReference | undefined;
+  let review: ArtifactReference | undefined;
   let workflowAfterProjectSwitch = "";
   let loopInterrupted = false;
   let safety = 0;
@@ -861,11 +875,17 @@ export async function executeDocumentationWorkflow(
     }
     for (const { artifactType } of pkg.requiredOutputs) {
       if (artifactType === "requirement-source") {
-        const source = pkg.artifacts.find(({ artifactType: type }) => type === artifactType);
-        assert.ok(source, "requirement-source output requires an authorized input Artifact");
-        refs.push(source);
+        const requirementSource = pkg.artifacts.find(({ artifactType: type }) => type === artifactType);
+        assert.ok(requirementSource, "requirement-source output requires an authorized input Artifact");
+        refs.push(requirementSource);
+        source = requirementSource;
       } else {
-        refs.push(await writeArtifact(fixture, worktree, pkg, artifactType, true));
+        const ref = await writeArtifact(fixture, worktree, pkg, artifactType, true);
+        refs.push(ref);
+        if (artifactType === "documentation-context") exploration = ref;
+        if (artifactType === "documentation-result") edit = ref;
+        if (artifactType === "documentation-evidence") validation = ref;
+        if (artifactType === "review-result") review = ref;
       }
     }
     const externalWrites = pkg.stepId === "commit"
@@ -891,6 +911,11 @@ export async function executeDocumentationWorkflow(
     }
   }
   assert.ok(scopeViolations);
+  assert.ok(source);
+  assert.ok(exploration);
+  assert.ok(edit);
+  assert.ok(validation);
+  assert.ok(review);
   const projection = await readControlPlane(fixture.root, started.workItemId);
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "interrupted after documentation close\n", "utf8");
   fixture.restart();
@@ -898,6 +923,7 @@ export async function executeDocumentationWorkflow(
   return {
     projection,
     recovered: await readControlPlane(fixture.root, started.workItemId),
+    artifacts: { source, exploration, edit, validation, review },
     scopeViolations,
     workflowAfterProjectSwitch,
     recoveryEvidence: { ...fixture.recovery },

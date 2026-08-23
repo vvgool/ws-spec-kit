@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 
 import {
   createWorkflowFixture,
   executeDocumentationWorkflow,
   interruptAfterAcquire,
+  worktreeFor,
 } from "./helpers/workflow-fixture.js";
 
 test("Documentation stays inside its immutable path, records trusted integrity, and resumes without TDD state", async () => {
@@ -15,6 +18,13 @@ test("Documentation stays inside its immutable path, records trusted integrity, 
     workflowRef: "builtin://workflows/documentation-delivery",
     profile: "quick",
   });
+  const worktree = await worktreeFor(fixture.root, started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const frozenContracts = await Promise.all([
+    readFile(path.join(itemRoot, "snapshot", "application.json")),
+    readFile(path.join(itemRoot, "snapshot", "workflow.lock.json")),
+    readFile(path.join(itemRoot, "snapshot", "skill.lock.json")),
+  ]);
   const first = await fixture.acquire(started.workItemId, "docs-author");
   const resumed = await interruptAfterAcquire(fixture, started, first, "docs-author");
 
@@ -43,4 +53,14 @@ test("Documentation stays inside its immutable path, records trusted integrity, 
   assert.equal(integrity.level, "trusted");
   assert.equal(integrity.result, "passed");
   assert.equal(result.recovered.workItem.status, "closed");
+  assert.deepEqual(await Promise.all([
+    readFile(path.join(itemRoot, "snapshot", "application.json")),
+    readFile(path.join(itemRoot, "snapshot", "workflow.lock.json")),
+    readFile(path.join(itemRoot, "snapshot", "skill.lock.json")),
+  ]), frozenContracts);
+  assert.equal(result.artifacts.source.artifactType, "requirement-source");
+  assert.equal(result.artifacts.exploration.artifactType, "documentation-context");
+  assert.equal(result.artifacts.edit.artifactType, "documentation-result");
+  assert.equal(result.artifacts.validation.artifactType, "documentation-evidence");
+  assert.equal(result.artifacts.review.artifactType, "review-result");
 });
