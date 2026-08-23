@@ -48,6 +48,29 @@ test("repository initialization creates a versioned Application selection config
   });
 });
 
+test("repository initialization locally ignores Artifact drafts without changing the user gitignore", async () => {
+  const root = await createGitRepository();
+  const gitignore = path.join(root, ".gitignore");
+  const userIgnore = ".worktrees/\nuser-owned.log\n";
+  await writeFile(gitignore, userIgnore, "utf8");
+  const commonDir = path.resolve(root, await git(root, "rev-parse", "--git-common-dir"));
+  const exclude = path.join(commonDir, "info", "exclude");
+  const userExclude = "# user local excludes\nlocal.cache\n";
+  await writeFile(exclude, userExclude, "utf8");
+
+  await initRepository(root);
+  const first = await readFile(exclude, "utf8");
+  await initRepository(root);
+
+  assert.equal(await readFile(gitignore, "utf8"), userIgnore);
+  assert.equal(await readFile(exclude, "utf8"), first);
+  assert.ok(first.startsWith(userExclude));
+  assert.equal(first.split("\n").filter((line) => line === ".acceptance/").length, 1);
+  await mkdir(path.join(root, ".acceptance"));
+  await writeFile(path.join(root, ".acceptance", "draft.md"), "draft\n", "utf8");
+  assert.equal(await git(root, "check-ignore", ".acceptance/draft.md"), ".acceptance/draft.md");
+});
+
 test("a clone preserves repository identity and creates only a local cache", async () => {
   const source = await createGitRepository();
   const identity = await initRepository(source);

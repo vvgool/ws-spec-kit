@@ -24,6 +24,22 @@ export class RepositoryError extends Error {
 }
 
 const repositoryIdPattern = /^repo-[0-9A-HJKMNP-TV-Z]{26}$/;
+const artifactDraftIgnoreRule = ".acceptance/";
+
+async function ensureArtifactDraftIgnore(commonDir: string): Promise<void> {
+  const filename = path.join(commonDir, "info", "exclude");
+  let content = "";
+  try {
+    content = await readFile(filename, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const alreadyIgnored = content.split(/\r?\n/u)
+    .some((line) => line.trim() === artifactDraftIgnoreRule || line.trim() === `/${artifactDraftIgnoreRule}`);
+  if (alreadyIgnored) return;
+  const separator = content === "" || content.endsWith("\n") ? "" : "\n";
+  await writeFileAtomic(filename, `${content}${separator}${artifactDraftIgnoreRule}\n`);
+}
 
 async function writeDefaultIfMissing(filename: string, content: string): Promise<void> {
   try {
@@ -113,6 +129,7 @@ export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   } catch {
     throw new RepositoryError("WSSPEC_GIT_REPOSITORY_REQUIRED", "请先显式初始化 Git 仓库。");
   }
+  await ensureArtifactDraftIgnore(commonDir);
   const filename = path.join(root, ".wsspec", "repository.yaml");
   try {
     await readFile(filename, "utf8");
