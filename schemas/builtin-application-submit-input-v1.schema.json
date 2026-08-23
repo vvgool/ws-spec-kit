@@ -81,6 +81,10 @@
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9-]{0,62}$"
               },
+              "outputId": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
               "artifactId": {
                 "type": "string",
                 "minLength": 1,

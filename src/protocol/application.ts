@@ -32,6 +32,17 @@ export interface AcquireInput {
   actor: string;
 }
 
+export interface ArtifactCreateInput {
+  root: string;
+  workItemId: WorkItemId;
+  stepId: string;
+  attemptId: string;
+  leaseToken: string;
+  artifactType: string;
+  outputId?: string;
+  contentFile: string;
+}
+
 export interface SubmitResult {
   version: 1;
   status: "completed" | "failed";

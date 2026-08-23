@@ -6,6 +6,7 @@ export const schemaIds = [
   "builtin.work-item.v1",
   "builtin.application-start-input.v1",
   "builtin.application-acquire-input.v1",
+  "builtin.application-artifact-create-input.v1",
   "builtin.application-submit-input.v1",
   "builtin.application-decision-input.v1",
   "builtin.application-inspect-input.v1",
@@ -109,6 +110,7 @@ const artifactReferenceSchema: JsonSchema = {
   required: ["artifactType", "schemaVersion"],
   properties: {
     artifactType: { type: "string", pattern: idPattern },
+    outputId: { type: "string", pattern: idPattern },
     artifactId: { type: "string", minLength: 1, maxLength: 128 },
     schemaVersion: { type: "integer", minimum: 1 },
     path: { type: "string" },
@@ -125,6 +127,7 @@ const artifactExpectationSchema: JsonSchema = {
   required: ["artifactType", "schemaVersion"],
   properties: {
     artifactType: { type: "string", pattern: idPattern },
+    outputId: { type: "string", pattern: idPattern },
     schemaVersion: { type: "integer", minimum: 1 },
     contentLevel: { type: "string", minLength: 1 },
   },
@@ -329,6 +332,14 @@ const workPackageSchema: JsonSchema = {
       properties: { allowedPaths: stringArray, forbiddenActions: stringArray },
     },
     requiredOutputs: { type: "array", items: artifactExpectationSchema },
+    artifactAuthoring: {
+      type: "object", additionalProperties: false, required: ["version", "maxContentBytes", "draftRoots"],
+      properties: {
+        version: { const: 1 },
+        maxContentBytes: { type: "integer", minimum: 1, maximum: 1_048_576 },
+        draftRoots: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },
+      },
+    },
     gates: {
       type: "array",
       items: {
@@ -572,6 +583,17 @@ export const schemas = {
     properties: {
       root: { type: "string", minLength: 1 }, workItemId: { type: "string", pattern: workItemIdPattern },
       actor: { type: "string", minLength: 1 },
+    },
+  },
+  "builtin.application-artifact-create-input.v1": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-artifact-create-input.v1",
+    type: "object", additionalProperties: false,
+    required: ["root", "workItemId", "stepId", "attemptId", "leaseToken", "artifactType", "contentFile"],
+    properties: {
+      root: { type: "string", minLength: 1 }, workItemId: { type: "string", pattern: workItemIdPattern },
+      stepId: { type: "string", pattern: stepInstanceIdPattern }, attemptId: { type: "string", pattern: attemptIdPattern },
+      leaseToken: { type: "string", minLength: 1 }, artifactType: { type: "string", pattern: idPattern },
+      outputId: { type: "string", pattern: idPattern }, contentFile: { type: "string", minLength: 1 },
     },
   },
   "builtin.application-submit-input.v1": {
@@ -946,6 +968,7 @@ export const schemas = {
     required: ["artifactType", "schemaVersion", "workItemId", "stageId", "attemptId", "revision", "contentHash"],
     properties: {
       artifactType: { type: "string", pattern: idPattern },
+      outputId: { type: "string", pattern: idPattern },
       schemaVersion: { const: 1 },
       workItemId: { type: "string", pattern: workItemIdPattern },
       stageId: { type: "string", pattern: stepInstanceIdPattern },

@@ -1,18 +1,38 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "builtin.artifact.v1",
+  "$id": "builtin.application-artifact-create-input.v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "artifactType",
-    "schemaVersion",
+    "root",
     "workItemId",
-    "stageId",
+    "stepId",
     "attemptId",
-    "revision",
-    "contentHash"
+    "leaseToken",
+    "artifactType",
+    "contentFile"
   ],
   "properties": {
+    "root": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workItemId": {
+      "type": "string",
+      "pattern": "^WSS-[A-Za-z0-9-]+$"
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-.+$"
+    },
+    "leaseToken": {
+      "type": "string",
+      "minLength": 1
+    },
     "artifactType": {
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{0,62}$"
@@ -21,28 +41,9 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9-]{0,62}$"
     },
-    "schemaVersion": {
-      "const": 1
-    },
-    "workItemId": {
+    "contentFile": {
       "type": "string",
-      "pattern": "^WSS-[A-Za-z0-9-]+$"
-    },
-    "stageId": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
-    },
-    "attemptId": {
-      "type": "string",
-      "pattern": "^attempt-.+$"
-    },
-    "revision": {
-      "type": "integer",
-      "minimum": 1
-    },
-    "contentHash": {
-      "type": "string",
-      "pattern": "^sha256:.+$"
+      "minLength": 1
     }
   }
 }

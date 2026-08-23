@@ -104,6 +104,10 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,62}$"
           },
+          "outputId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
           "artifactId": {
             "type": "string",
             "minLength": 1,
@@ -172,11 +176,43 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9-]{0,62}$"
           },
+          "outputId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
           "schemaVersion": {
             "type": "integer",
             "minimum": 1
           },
           "contentLevel": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "artifactAuthoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "maxContentBytes",
+        "draftRoots"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "maxContentBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "draftRoots": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
             "type": "string",
             "minLength": 1
           }
