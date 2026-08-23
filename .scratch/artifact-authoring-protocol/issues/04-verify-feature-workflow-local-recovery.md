@@ -4,8 +4,12 @@
 
 **Blocked by:** 03: 完成 Foundation 冻结门禁.
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] 功能 Workflow 在隔离仓库中形成可回读的需求、Artifact、Evidence、审批和 Work Item 投影，并在 Close 前满足既定质量要求。
-- [ ] 中断后由新进程执行 `inspect + acquire` 能恢复正确 Attempt，Lease 轮换不改变已冻结的 Workflow、Skill、输出合同或 Artifact 引用。
-- [ ] 失败、重试和 Review-Fix 路径具有可验证的状态与证据，且不会绕过可信 TDD Gate。
+- [x] 功能 Workflow 在隔离仓库中形成可回读的需求、Artifact、Evidence、审批和 Work Item 投影，并在 Close 前满足既定质量要求。
+- [x] 中断后由新进程执行 `inspect + acquire` 能恢复正确 Attempt，Lease 轮换不改变已冻结的 Workflow、Skill、输出合同或 Artifact 引用。
+- [x] 失败、重试和 Review-Fix 路径具有可验证的状态与证据，且不会绕过可信 TDD Gate。
+
+## Local Evidence
+
+详见 `docs/acceptance/ticket-04-local-recovery.md`。该记录仅为 local-automated 证据，不是任何真实宿主或外部 Connector/平台证据。
