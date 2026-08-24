@@ -2,7 +2,7 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -27,12 +27,13 @@ const [{ loadApplicationState }, { computeArtifactContentHash, readArtifact }, {
 ]);
 
 const execFileAsync = promisify(execFile);
-const clients = new Set(["codex", "claude", "cursor"]);
+const clients = new Set(["codex", "claude", "cursor", "opencode"]);
 const hostPhases = ["auto", "explicit", "recovery"];
 const hostExecutableNames = {
   codex: new Set(["codex"]),
   claude: new Set(["claude"]),
   cursor: new Set(["agent", "cursor-agent"]),
+  opencode: new Set(["opencode"]),
 };
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const tsxLoader = path.join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
@@ -44,7 +45,7 @@ function parseArguments(argv) {
     const name = argv[index];
     const value = argv[index + 1];
     if (!["--client", "--repo", "--authority", "--authority-identity"].includes(name) || value === undefined || value.startsWith("--")) {
-      throw new Error("用法：verify-agent-smoke.mjs --client <codex|claude|cursor> --repo <目录> --authority <文件> --authority-identity <sha256>");
+      throw new Error("用法：verify-agent-smoke.mjs --client <codex|claude|cursor|opencode> --repo <目录> --authority <文件> --authority-identity <sha256>");
     }
     if (values[name] !== undefined) throw new Error(`重复参数：${name}`);
     values[name] = value;
@@ -461,7 +462,7 @@ async function verifySmoke(input) {
     );
     check(
       "fixture.provider",
-      state.snapshot.skillResolution.provider === metadata.client && state.snapshot.skillResolution.provider === input.client,
+      state.snapshot.skillResolution.provider === (input.client === "opencode" ? "generic" : input.client),
       `snapshotProvider=${state.snapshot.skillResolution.provider}`,
     );
     let baselineValid = false;

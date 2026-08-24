@@ -19,7 +19,7 @@ import {
 } from "./lib/evidence.mjs";
 
 const execFileAsync = promisify(execFile);
-const clients = new Set(["codex", "claude", "cursor"]);
+const clients = new Set(["codex", "claude", "cursor", "opencode"]);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(scriptDirectory, "../..");
 const sourceRuntime = process.env.WSSPECKIT_ACCEPTANCE_RUNTIME === "source";
@@ -36,12 +36,12 @@ function parseArguments(argv) {
     const name = argv[index];
     const value = argv[index + 1];
     if (!["--client", "--directory"].includes(name) || value === undefined || value.startsWith("--")) {
-      throw new Error("用法：prepare-agent-smoke.mjs --client <codex|claude|cursor> [--directory <目录>]");
+      throw new Error("用法：prepare-agent-smoke.mjs --client <codex|claude|cursor|opencode> [--directory <目录>]");
     }
     if (values[name] !== undefined) throw new Error(`重复参数：${name}`);
     values[name] = value;
   }
-  if (!clients.has(values["--client"])) throw new Error("--client 必须是 codex、claude 或 cursor");
+  if (!clients.has(values["--client"])) throw new Error("--client 必须是 codex、claude、cursor 或 opencode");
   return { client: values["--client"], directory: values["--directory"] };
 }
 
@@ -67,13 +67,19 @@ async function git(runtime, root, ...args) {
 function driverDirectory(client, root) {
   if (client === "codex") return path.join(root, ".agents", "skills", "wsspeckit-driver");
   if (client === "claude") return path.join(root, ".claude", "skills", "wsspeckit-driver");
+  if (client === "opencode") return path.join(root, ".opencode", "skills", "wsspeckit-driver");
   return path.join(root, ".cursor", "skills", "wsspeckit-driver");
 }
 
 function driverRelativePath(client) {
   if (client === "codex") return ".agents/skills/wsspeckit-driver/SKILL.md";
   if (client === "claude") return ".claude/skills/wsspeckit-driver/SKILL.md";
+  if (client === "opencode") return ".opencode/skills/wsspeckit-driver/SKILL.md";
   return ".cursor/skills/wsspeckit-driver/SKILL.md";
+}
+
+function providerForClient(client) {
+  return client === "opencode" ? "generic" : client;
 }
 
 async function runWspec(root, environment, args) {
@@ -177,7 +183,11 @@ export async function prepareSmoke(input) {
     },
   }, { lineWidth: 0 }), "utf8");
   await mkdir(driverDirectory(input.client, root), { recursive: true });
-  await runWspec(root, runtime.environment, ["agent", "install", "--client", input.client]);
+  const driver = driverDirectory(input.client, root);
+  await runWspec(root, runtime.environment, [
+    "agent", "install", "--client", providerForClient(input.client),
+    ...(input.client === "opencode" ? ["--target", driver] : []),
+  ]);
   recordInvocation("wspec.agent-install");
 
   await git(runtime, root, "add", ".");
@@ -193,7 +203,7 @@ export async function prepareSmoke(input) {
     "--file", "SMOKE_REQUIREMENT.md",
     "--workflow", "builtin://workflows/feature-delivery",
     "--profile", "quick",
-    "--provider", input.client,
+    "--provider", providerForClient(input.client),
   ]);
   recordInvocation("wspec.start");
   const worktree = path.join(root, ".worktrees", started.workItemId);

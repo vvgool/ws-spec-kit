@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -23,7 +23,7 @@ const { checkedArtifact, validateHostWorkflowPhases } = await import(verifierMod
 
 interface PreparedSmoke {
   version: 1;
-  client: "codex" | "claude" | "cursor";
+  client: "codex" | "claude" | "cursor" | "opencode";
   root: string;
   workItemId: string;
   baselineCommit: string;
@@ -289,6 +289,80 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.match(String(userIndex.digest), /^sha256:[a-f0-9]{64}$/u);
   assert.match(String(userIndex.identity), /^sha256:[a-f0-9]{64}$/u);
   for (const field of ["dev", "ino", "mode", "uid", "size"]) assert.notEqual(userIndex[field], undefined, `userIndex.${field}`);
+});
+
+test("prepare 为 OpenCode 在专用目录安装 Generic Driver，并以 generic provider 启动", async () => {
+  const prepared = await prepare("opencode");
+  const { loadApplicationState } = await import("../../src/application/state.js");
+
+  assert.equal(prepared.client, "opencode");
+  assert.equal(prepared.driver, ".opencode/skills/wsspeckit-driver/SKILL.md");
+  await access(path.join(prepared.root, prepared.driver));
+
+  const state = await loadApplicationState(prepared.root, prepared.workItemId);
+  assert.equal(state.snapshot.skillResolution.provider, "generic");
+});
+
+test("observer 使用 OpenCode canonical run JSON 入口并签名 sessionID 事件证据", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-opencode-run-"));
+  const root = path.join(parent, "repository");
+  const configHome = path.join(parent, "config");
+  const executable = path.join(parent, "opencode");
+  await mkdir(configHome, { recursive: true });
+  const canonicalConfigHome = await realpath(configHome);
+  await writeFile(executable, [
+    "#!/usr/bin/env node",
+    "const args = process.argv.slice(2);",
+    "if (args[0] !== 'run' || args[1] !== '--model' || args[2] !== 'ark-key/ark/gpt-5.6-sol' || args[3] !== '--format' || args[4] !== 'json' || args.includes('--auto')) process.exit(41);",
+    `if (process.env.XDG_CONFIG_HOME !== ${JSON.stringify(canonicalConfigHome)}) process.exit(42);`,
+    "const text = args.slice(5).join(' ');",
+    "const phase = text.includes('WSSPECKIT_SMOKE_AUTO') ? 'auto' : text.includes('WSSPECKIT_SMOKE_EXPLICIT') ? 'explicit' : 'recovery';",
+    "console.log(JSON.stringify({ type: 'step_start', sessionID: `opencode-${phase}-session` }));",
+    "console.log(JSON.stringify({ type: 'step_finish' }));",
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o700 });
+  await chmod(executable, 0o700);
+
+  const { stdout } = await execFileAsync(process.execPath, [
+    runScript,
+    "--client", "opencode",
+    "--client-executable", executable,
+    "--model", "ark-key/ark/gpt-5.6-sol",
+    "--opencode-config-home", configHome,
+    "--directory", root,
+  ], { cwd: repositoryRoot, maxBuffer: 2 * 1024 * 1024 });
+  const observed = JSON.parse(stdout) as PreparedSmoke;
+  const runManifest = JSON.parse(await readFile(path.join(root, ".acceptance", "agent-smoke-run.json"), "utf8")) as {
+    hostInvocations: Array<Record<string, unknown>>;
+  };
+
+  assert.equal(observed.client, "opencode");
+  assert.deepEqual(runManifest.hostInvocations.map(({ phase }) => phase), ["auto", "explicit", "recovery"]);
+  const invocations = await Promise.all(["auto", "explicit", "recovery"].map(async (phase) => JSON.parse(
+    await readFile(path.join(root, ".acceptance", `agent-smoke-invocation-${phase}.json`), "utf8"),
+  ) as Record<string, unknown>));
+  assert.equal(new Set(invocations.map(({ sessionIdHash }) => sessionIdHash)).size, 3);
+  assert.equal(JSON.stringify(invocations).includes(configHome), false);
+
+  const result = await verify(root, "opencode", observed.authorityFile, observed.authorityIdentity);
+  assert.equal(result.summary.checks.find(({ id }) => id === "host.invocations")?.ok, true);
+  await rm(parent, { recursive: true, force: true });
+  await rm(observed.authorityFile, { force: true });
+});
+
+test("observer 拒绝未显式绑定模型与配置根的 OpenCode live 调用", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "wsspec-agent-opencode-options-"));
+  const executable = path.join(parent, "opencode");
+  await writeFile(executable, "#!/bin/sh\nexit 99\n", { encoding: "utf8", mode: 0o700 });
+  await chmod(executable, 0o700);
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    runScript,
+    "--client", "opencode",
+    "--client-executable", executable,
+    "--directory", path.join(parent, "repository"),
+  ], { cwd: repositoryRoot }), /--model.*--opencode-config-home/su);
+  await rm(parent, { recursive: true, force: true });
 });
 
 test("prepare CLI 未指定目录时创建隔离根目录但不输出 observer authority", async () => {

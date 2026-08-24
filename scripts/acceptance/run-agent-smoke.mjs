@@ -23,16 +23,17 @@ const canonicalExecutableNames = {
   codex: new Set(["codex"]),
   claude: new Set(["claude"]),
   cursor: new Set(["agent", "cursor-agent"]),
+  opencode: new Set(["opencode"]),
 };
-const sessionKeys = new Set(["session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"]);
+const sessionKeys = new Set(["session_id", "sessionId", "sessionID", "thread_id", "threadId", "conversation_id", "conversationId"]);
 
 function parseArguments(argv) {
   const values = {};
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index];
     const value = argv[index + 1];
-    if (!["--client", "--client-executable", "--directory"].includes(name) || value === undefined || value.startsWith("--")) {
-      throw new Error("用法：run-agent-smoke.mjs --client <codex|claude|cursor> --client-executable <绝对路径> [--directory <目录>]");
+    if (!["--client", "--client-executable", "--directory", "--model", "--opencode-config-home"].includes(name) || value === undefined || value.startsWith("--")) {
+      throw new Error("用法：run-agent-smoke.mjs --client <codex|claude|cursor|opencode> --client-executable <绝对路径> [--directory <目录>] [--model <provider/model> --opencode-config-home <绝对目录>]");
     }
     if (values[name] !== undefined) throw new Error(`重复参数：${name}`);
     values[name] = value;
@@ -42,7 +43,16 @@ function parseArguments(argv) {
   if (!Object.hasOwn(canonicalExecutableNames, client) || typeof executable !== "string" || !path.isAbsolute(executable)) {
     throw new Error("必须提供有效 client 和显式绝对 client executable；不允许 PATH 解析");
   }
-  return { client, executable, directory: values["--directory"] };
+  const model = values["--model"];
+  const configHome = values["--opencode-config-home"];
+  if (client === "opencode" && (typeof model !== "string" || !/^[a-z0-9-]+\/[A-Za-z0-9._:/-]+$/u.test(model)
+    || typeof configHome !== "string" || !path.isAbsolute(configHome))) {
+    throw new Error("OpenCode live 调用必须提供有效 --model 和绝对 --opencode-config-home");
+  }
+  if (client !== "opencode" && (model !== undefined || configHome !== undefined)) {
+    throw new Error("--model 和 --opencode-config-home 仅适用于 OpenCode");
+  }
+  return { client, executable, directory: values["--directory"], model, configHome };
 }
 
 function executableIdentity(info, digest, requestedName, resolvedName) {
@@ -90,13 +100,16 @@ function prompts(phase, workItemToken) {
   return `WSSPECKIT_SMOKE_RECOVERY：Work Item token=${workItemToken}。这是与前两阶段无关的全新 client session；通过 inspect + acquire 恢复同一 actor 的活动 Attempt，然后只消费 acquire/submit 返回的 action 直至终态。`;
 }
 
-function phaseArguments(client, phase, workItemToken) {
+function phaseArguments(client, phase, workItemToken, model) {
   const prompt = prompts(phase, workItemToken);
   if (client === "codex") {
     return ["exec", "--json", "--skip-git-repo-check", prompt];
   }
   if (client === "claude") {
     return ["--print", "--output-format", "stream-json", "--verbose", prompt];
+  }
+  if (client === "opencode") {
+    return ["run", "--model", model, "--format", "json", prompt];
   }
   return ["--print", "--output-format", "stream-json", prompt];
 }
@@ -324,6 +337,9 @@ export async function runAgentSmoke(input) {
   await checkedWrapper(prepared.root, expectedWrapper);
   const canonicalRoot = await realpath(prepared.root);
   const runtime = await cleanEnvironment(canonicalRoot, [path.join(canonicalRoot, "bin")], { home: process.env.HOME ?? canonicalRoot });
+  const environment = input.client === "opencode"
+    ? { ...runtime.environment, XDG_CONFIG_HOME: await realpath(input.configHome) }
+    : runtime.environment;
   const context = { prepared, authority, fixtureDigest: fixture.manifestDigest, runManifest: run.value, references: [] };
   const workItemToken = sha256(prepared.workItemId);
 
@@ -334,8 +350,8 @@ export async function runAgentSmoke(input) {
     }
     await checkedWrapper(prepared.root, expectedWrapper);
     const beforeCheckpoint = await controlCheckpoint(prepared.root, prepared.workItemId);
-    const args = phaseArguments(input.client, phase, workItemToken);
-    const result = await runHost(executable.filename, args, prepared.root, runtime.environment);
+    const args = phaseArguments(input.client, phase, workItemToken, input.model);
+    const result = await runHost(executable.filename, args, prepared.root, environment);
     const after = await inspectExecutable(input.client, input.executable);
     if (after.identity !== executable.identity || after.digest !== executable.digest || after.filename !== executable.filename) {
       throw new Error("client executable 在 observer 调用期间发生漂移");
@@ -365,7 +381,7 @@ export async function runAgentSmoke(input) {
       stdoutDigest: sha256(result.stdout),
       stderrDigest: sha256(result.stderr),
       stdoutEventSummary: output.summary,
-      environmentKeys: Object.keys(runtime.environment).sort(),
+      environmentKeys: Object.keys(environment).sort(),
       beforeCheckpoint,
       afterCheckpoint,
     };
