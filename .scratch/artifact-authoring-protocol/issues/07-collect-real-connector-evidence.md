@@ -6,6 +6,6 @@
 
 **Status:** blocked-no-go
 
-- [ ] 每个可用平台独立记录只读预检、授权写入、稳定目标、幂等键、回读摘要和失败路径；Fixture 不能代替真实平台结果。**NO-GO：** 本次仅允许 `command -v`；GitHub 与飞书 CLI 可用但未验证认证、没有专用非生产目标或精确写入授权，未执行真实平台；GitLab CLI 缺失。
-- [x] 未安装、未认证或无测试目标的平台明确记录为 NO-GO，不切换到未建模的 Provider 或绕过授权。**已记录：** 三个平台均为 `not-run-no-go`；GitLab 缺少 CLI，GitHub 与飞书仅为 `available-unverified`，本地 fixture 不能提升为真实平台 PASS。
-- [x] 外部未知结果进入协调回查或显式处理，不自动重发可能已发生的写入。**已核对：** 真实验收前置条件要求幂等键、回读摘要与“对账后再重试”；本次不产生远程未知结果，也不修改 Foundation Protocol。
+- [ ] 每个可用平台独立记录只读预检、授权写入、稳定目标、幂等键、回读摘要和失败路径；Fixture 不能代替真实平台结果。**NO-GO：** GitHub 与飞书仍为 `available-unverified`、未运行；GitLab 已确认 host-scoped authentication 并运行至 `reconciliation_required`，但没有回读或回执，不能通过。
+- [x] 未安装、未认证或无测试目标的平台明确记录为 NO-GO，不切换到未建模的 Provider 或绕过授权。**已记录：** GitHub 与飞书为 `not-run-no-go`；GitLab 的 Doctor 默认 `gitlab.com` 检查是非 host-scoped false negative，实际 host auth 已确认，但稳定目标/回读/回执尚未完成。
+- [x] 外部未知结果进入协调回查或显式处理，不自动重发可能已发生的写入。**已核对：** `WSS-01M0S8S3CXJ1Q7M9TWMG3WE03A` 的首次 submit 为 `await_approval`、精确审批后第二次 submit 为 `reconciliation_required`，公开 reconcile 后仍为 `reconciliation_required`；`receiptCount: 0`，不记录 effect ID、原始正文或载荷。

@@ -114,7 +114,7 @@ requirements:
       - docs/acceptance/feishu-live.md
       - docs/reference/connector-contracts.md
     status: no-go
-    blocker: 2026-08-23 command -v-only 探测显示 gh 与 lark-cli 仅为 available-unverified，glab 缺失；三者均无已验证认证、专用非生产稳定目标、精确写入授权、幂等键、回读或失败对账证据，fixture 不能代替真实平台结果。
+    blocker: GitHub 与飞书仍仅为 available-unverified、未运行；GitLab host-scoped auth 已确认，WSS-01M0S8S3CXJ1Q7M9TWMG3WE03A 对 gitlab:892 的受治理 issue.comment 在精确审批后进入 reconciliation_required，公开对账仍未解决且 receiptCount 为 0，缺少回读与可验证回执，fixture 不能代替真实平台结果。
   - id: T07-02
     ticket: "07"
     checklist: 未安装、未认证或无测试目标的平台明确记录为 NO-GO，不切换到未建模的 Provider 或绕过授权。
@@ -124,7 +124,7 @@ requirements:
       - docs/acceptance/gitlab-live.md
       - docs/reference/connector-contracts.md
     status: no-go
-    blocker: 本轮禁止调用远程 Provider；glab 缺失，gh 与 lark-cli 的 command -v 可用性不足以证明认证、专用目标或写入权限；不得降级为未建模 HTTP Provider。
+    blocker: GitHub 与飞书的 command -v 可用性仍不足以证明认证、专用目标或写入权限；GitLab 仅 host-scoped glab auth status 已验证，Doctor 默认 gitlab.com 的非 host-scoped 检查为 false negative。GitLab 运行仍无稳定目标回读或回执，不得降级为未建模 HTTP Provider。
   - id: T07-03
     ticket: "07"
     checklist: 外部未知结果进入协调回查或显式处理，不自动重发可能已发生的写入。
@@ -133,7 +133,7 @@ requirements:
       - docs/acceptance/connector-live-matrix.yaml
       - docs/reference/connector-contracts.md
     status: no-go
-    blocker: 本地 fixture 覆盖协调语义，但没有真实平台的幂等键、回读摘要或未知结果对账回执；本轮不重发任何可能已发生的远程写入，不能宣称真实平台通过。
+    blocker: GitLab 的同一请求在精确审批后第二次 submit 为 reconciliation_required，公开 reconcile 仍为 reconciliation_required；receiptCount 为 0，未记录 effect ID。不得自动重发可能已发生的写入，因此仍不能宣称真实平台通过。
   - id: T08-01
     ticket: "08"
     checklist: clean consumer 安装、功能与文档 Workflow、Driver dry-run 和中文指南在发布产物上得到验证。
