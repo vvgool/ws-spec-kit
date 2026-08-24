@@ -1,5 +1,7 @@
 node_modules/
 dist/
 .worktrees/
+.omo/
+.playwright-mcp/
 *.tgz
 .DS_Store
