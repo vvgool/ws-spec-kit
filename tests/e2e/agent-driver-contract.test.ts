@@ -35,7 +35,7 @@ interface CliRun {
   value: { ok: boolean; result?: Record<string, unknown>; error?: { code?: string; message?: string } };
 }
 
-type DriverState = "start" | "inspect" | "acquire" | "artifact" | "submit";
+type DriverState = "start" | "inspect" | "acquire" | "artifact" | "submit" | "decide";
 type DriverOperationName = DriverState;
 type DriverTerminal = "await_approval" | "blocked" | "completed";
 
@@ -70,6 +70,7 @@ interface DriverOperation {
       next: DriverState | DriverTerminal;
       capture?: Record<string, string>;
       initialize?: DriverCollectionRule;
+      humanGate?: { required: true; approval: "result.approval" };
     }>;
   };
 }
@@ -208,7 +209,7 @@ function driverContract(body: string): DriverContract {
   assert.ok(contract, "Driver 正文必须包含 fenced JSON 状态机合同");
   assert.equal(contract.version, 1);
   assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" });
-  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "artifact", "inspect", "start", "submit"]);
+  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "artifact", "decide", "inspect", "start", "submit"]);
   assert.deepEqual(Object.keys(contract.terminals).sort(), ["await_approval", "blocked", "completed"]);
   return contract;
 }
@@ -314,7 +315,7 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
         blocked: { next: "blocked" },
         completed: { next: "completed" },
       }, `${client}: action.kind 分支必须完整`);
-      assert.deepEqual(contract.operations.submit.branch, contract.operations.acquire.branch, `${client}: submit 必须消费返回的 AgentAction`);
+      assert.deepEqual(contract.operations.submit.branch?.cases.execute, contract.operations.acquire.branch?.cases.execute, `${client}: submit execute 必须消费返回的 AgentAction`);
       assert.deepEqual(contract.operations.artifact, {
         argv: [
           "wspec", "artifact", "create",
@@ -360,6 +361,45 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
   const missingTarget = await runCli(root, genericHome, ["agent", "install", "--client", "generic"]);
   assert.equal(missingTarget.code, 1);
   assert.equal(missingTarget.value.error?.code, "WSSPEC_ARGUMENT_REQUIRED");
+});
+
+test("Driver 对受治理外部动作在人工决定后以返回 Work Package 原样重新 submit", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wspec-driver-governed-resume-"));
+  for (const client of clients) {
+    await t.test(client, async () => {
+      const home = await temporaryHome(client);
+      const target = expectedTarget(client, home);
+      await mkdir(target, { recursive: true });
+      const installed = await runCli(root, home, installArguments(client, target));
+      assertPassed(installed, `${client}: install governed resume contract`);
+      const { body } = splitSkill(await readFile(path.join(target, "SKILL.md"), "utf8"));
+      const contract = driverContract(body);
+
+      const awaitApproval = contract.operations.submit.branch?.cases.await_approval;
+      assert.deepEqual(awaitApproval, {
+        next: "decide",
+        capture: { approval: "result.approval" },
+        humanGate: { required: true, approval: "result.approval" },
+      }, `${client}: first governed submit must stop for a human decision`);
+
+      const decide = contract.operations.decide;
+      assert.deepEqual(decide.argv, ["wspec", "decide", "--input", "${decisionPath}", "--actor", "${actor}"], `${client}: decide must use the public human-gated decision entrypoint`);
+      assert.deepEqual(decide.branch?.cases.execute, {
+        next: "submit",
+        capture: {
+          workPackage: "result.workPackage",
+          stepId: "result.workPackage.stepId",
+          attemptId: "result.workPackage.attemptId",
+          leaseToken: "result.workPackage.lease.token",
+          requiredOutputs: "result.workPackage.requiredOutputs",
+        },
+      }, `${client}: human-approved action must retain the returned package identity and re-submit the existing result`);
+      assert.equal(decide.branch?.cases.execute?.initialize, undefined, `${client}: resumed submit must not rebuild ArtifactRef inputs`);
+      assert.equal(decide.branch?.cases.execute?.next, "submit", `${client}: resumed action must bypass artifact authoring`);
+      assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" }, `${client}: recovery remains inspect then acquire`);
+      assert.equal(contract.operations.inspect.next, "acquire", `${client}: inspect is only the recovery bridge to acquire`);
+    });
+  }
 });
 
 function installArguments(client: Client, target: string): string[] {
