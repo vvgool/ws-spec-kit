@@ -82,4 +82,6 @@ test("最终中文发布报告将本地通过与真实宿主和平台 NO-GO 分�
   assert.match(report, /首版总体发布结论：BLOCKED-NO-GO/u);
   assert.match(report, /真实 Agent 宿主验收/u);
   assert.match(report, /真实 Connector 平台验收/u);
+  assert.match(report, /reconciliation_required/u);
+  assert.match(report, /receiptCount 为 0/u);
 });

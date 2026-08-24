@@ -37,7 +37,7 @@ Ticket 06 要求 Codex、Claude、Cursor 的签名三会话与最终 verifier �
 
 ## 真实 Connector 平台验收
 
-Ticket 07 要求专用非生产目标、认证、精确写入授权、幂等键、回读与对账证据。当前矩阵记录 GitLab CLI 缺失，GitHub 与飞书仅为 available-unverified，且无专用目标或授权，因此不能由本地 fixture 提升为通过。
+Ticket 07 要求专用非生产目标、认证、精确写入授权、幂等键、回读与对账证据。当前矩阵记录 GitLab host-scoped auth 已确认，受治理请求在精确审批后进入 reconciliation_required 且公开对账仍未解决、receiptCount 为 0；GitHub 与飞书仅为 available-unverified。缺少回读和可验证回执，因此不能由本地 fixture 提升为通过。
 
 | 验收项 | Evidence Tier | 结果 | 说明 |
 | --- | --- | --- | --- |
