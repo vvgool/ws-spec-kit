@@ -70,6 +70,26 @@ function examples(document: string): Array<{ language: "json" | "yaml"; contract
   }));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertCliBoundPartialDecisionInput(name: string, value: unknown): void {
+  assert.ok(isRecord(value), `${name} 的 CLI 决定文件必须是对象`);
+  const record = value;
+  assert.equal(record.root, undefined, `${name} 的 CLI 决定文件不应包含 root`);
+  assert.equal(record.actor, undefined, `${name} 的 CLI 决定文件不应包含 actor`);
+  assert.equal(typeof record.kind, "string", `${name} 的 CLI 决定文件缺少 kind`);
+  assert.equal(typeof record.workItemId, "string", `${name} 的 CLI 决定文件缺少 workItemId`);
+  assert.equal(typeof record.decision, "string", `${name} 的 CLI 决定文件缺少 decision`);
+  assert.equal(typeof record.expectedDigest, "string", `${name} 的 CLI 决定文件缺少 expectedDigest`);
+  if (record.kind === "external_reconciliation") {
+    assert.equal(typeof record.requestId, "string", `${name} 的 external_reconciliation 决定缺少 requestId`);
+  } else {
+    assert.equal(record.kind, "external_action", `${name} 的 CLI 决定文件 kind 非法`);
+  }
+}
+
 function applicationOperations(protocol: string): Array<{ name: string; result: string }> {
   return [...protocol.matchAll(/^  ([a-z]+)\(input: [A-Za-z]+\): Promise<([A-Za-z]+)>;/gmu)]
     .map((match) => ({ name: match[1]!, result: match[2]! }));
@@ -310,6 +330,8 @@ test("公开参考中的每个结构化示例都标注并通过正式契约", as
       assert.notEqual(value, undefined, `${name} 的 ${block.language} 示例为空`);
       if (block.contract.startsWith("schema:")) {
         validate(block.contract.slice("schema:".length) as SchemaId, value);
+      } else if (block.contract === "cli-bound-partial-decision-input") {
+        assertCliBoundPartialDecisionInput(name, value);
       } else if (block.contract === "workflow-v1") {
         assert.deepEqual(
           parseWorkflowV1(value),

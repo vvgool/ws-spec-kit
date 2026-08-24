@@ -75,6 +75,90 @@ Artifact 正文先写入 Work Package 授权的 draft，再通过 `artifact crea
 
 `external-write` Step，以及 `action: git.commit` 的 `local-write` Step，成功时必须精确提交一个受治理的 `external-action` 意图，包含 Provider、动作、稳定目标、payload 和副作用说明。第一次 `submit` 只持久化 `builtin.external-action-request.v1` 的摘要身份并返回 `await_approval`，不会调用 Provider。批准后重复提交同一 Attempt 才可执行；Runtime 以原子 owner 保证同一 Request 只有一个协调者调用 Provider，并在 Provider 调用前持久化 `executing/not_sent`。Executor 必须在发送边界调用 `markDispatched()` 持久化 `sent_or_unknown`。其他并发提交返回可重试的 `WSSPEC_EXTERNAL_EXECUTION_IN_PROGRESS`。发送后结果未知时进入 `reconciliation_required`，只允许只读回查，不自动重发。Provider 执行或回查异常只返回固定的 `WSSPEC_EXTERNAL_PROVIDER_EXECUTION_FAILED` 或 `WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED`，不回显 Provider 文本。确认成功后 Agent 的原始意图由严格的 `builtin.external-write-receipt.v1` 替换，事件、投影和公开视图不持久化 payload 或凭据。`issue.close` 还要求 `issue.update` 已验证，且 Knowledge 按 Profile 已验证、明确 absent/skipped，或已持久化 optional warning；否则以 `WSSPEC_EXTERNAL_ORDER_INVALID` fail closed。除上述 `external-write` 与本地 `git.commit` 外，其他 Step 禁止携带 `externalWrites`。
 
+#### 受治理外部动作操作流程
+
+外部写入固定遵循以下顺序，且只使用既有的五个生命周期操作 `start`、`acquire`、`submit`、`decide`、`inspect`。以下示例的 ID、摘要和租约均为占位符。
+
+1. Agent 取得 `execute` 后，首次以完整结果调用 `wspec submit`。结果中的 `externalWrites` 是受治理意图，首次提交只创建 Request 并返回 `await_approval`，不会写入 Provider。
+2. 人类以现有的 `wspec decide --input --actor` 提交 `external_action` 决定。Decision JSON 故意不包含 `root` 与 `actor`，因为 CLI 分别从当前仓库绑定 `root`，并从 `--actor` 绑定 actor。
+3. 仅当决定批准后，Agent 才以**同一份、未修改的**结果再次调用 `wspec submit`。第二次提交才执行既有的受治理 Connector，并生成或核验回执。批准本身不调用 Provider，也不执行写入。
+4. 用 `wspec inspect` 查看 Work Item 与外部动作状态。它只读取快照状态，不创建 Attempt，也不推进或重发外部动作。
+
+首次与第二次提交使用同一个输入文件，避免重建、删减或改写结果：
+
+`wspec submit` 的 `--result` 文件只承载 `builtin.submit-result.v1`。`root`、Work Item、Step、Attempt 和 Lease 由 CLI 参数绑定，因此不写入该文件。
+
+```json contract=schema:builtin.submit-result.v1
+{
+  "version": 1,
+  "status": "completed",
+  "summary": "已准备更新 Issue 的受治理结果。",
+  "modifiedFiles": [],
+  "artifacts": [],
+  "commands": [],
+  "evidence": [],
+  "externalWrites": [
+    {
+      "kind": "external-action",
+      "provider": "gitlab",
+      "action": "issue.update",
+      "target": { "kind": "issue", "stableId": "gitlab:group/project#42" },
+      "payload": { "target": { "host": "gitlab.example.com", "projectPath": "group/project", "iid": 42 }, "action": { "type": "body", "body": "已完成受治理更新。" } },
+      "sideEffects": ["更新 Issue 正文"]
+    }
+  ],
+  "remainingRisks": []
+}
+```
+
+```sh
+# 第一次提交，只建立外部动作 Request，预期返回 await_approval。
+wspec submit WSS-01H00000000000000000000000 --step issue-update --attempt attempt-01 --lease lease-01 --result .acceptance/submit-result.json
+
+# 人类批准。root 由当前仓库绑定，actor 由 --actor 绑定，二者不写入 decision.json。
+wspec decide --input .acceptance/external-action-decision.json --actor maintainer
+
+# 仅在批准后，提交完全相同、未经修改的结果，才进入既有 Connector 执行路径。
+wspec submit WSS-01H00000000000000000000000 --step issue-update --attempt attempt-01 --lease lease-01 --result .acceptance/submit-result.json
+
+# 只读检查状态，不会创建 Attempt 或重发写入。
+wspec inspect WSS-01H00000000000000000000000
+```
+
+以下是 `wspec decide --input` 的 CLI 决定文件。它故意不是完整的 `builtin.application-decision-input.v1`：CLI 在调用 Application 前补入当前仓库的 `root` 与 `--actor` 的 actor。
+
+```json contract=cli-bound-partial-decision-input
+{
+  "kind": "external_action",
+  "workItemId": "WSS-01H00000000000000000000000",
+  "requestId": "external-request-0000000000000000000000000000000000000000000000000000000000000000",
+  "decision": "approved",
+  "expectedDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}
+```
+
+若发送后的结果未知，先用 `wspec inspect` 确认状态。只有状态为 `reconciliation_required` 时，才可通过现有 `decide` 的 `external_reconciliation` 和 `reconcile` 进行 Provider 只读回查；回查完成后使用 `acquire` 恢复原 Attempt。此恢复路径不重新提交结果，也不重发写入。`reconciliation_required` 不是再次 `submit` 的条件，任何自动重提或重发均被禁止。
+
+以下恢复决定同样是 CLI 决定文件，`root` 与 `actor` 仍由 CLI 绑定。
+
+```json contract=cli-bound-partial-decision-input
+{
+  "kind": "external_reconciliation",
+  "workItemId": "WSS-01H00000000000000000000000",
+  "requestId": "external-request-0000000000000000000000000000000000000000000000000000000000000000",
+  "decision": "reconcile",
+  "expectedDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}
+```
+
+```sh
+# 仅在 inspect 显示 reconciliation_required 后执行。该操作只读回查，不写入 Provider。
+wspec decide --input .acceptance/external-reconciliation.json --actor maintainer
+
+# 回查或人工处置完成后，恢复同一 Attempt，不得再次 submit 原结果。
+wspec acquire WSS-01H00000000000000000000000 --actor maintainer
+```
+
 本地 `git.commit` 使用临时 index 构造并回读批准提交，不改写用户真实 index。HEAD 成功前移后，真实 index
 仍可能相对旧 HEAD 使批准文件显示为 `MM`；这是保持 index identity 的预期权衡，不代表 verified commit
 缺失。Runtime、Driver 和验收不得自动 refresh/reset 该 index，而应绑定单父 commit、批准的规范 diff digest
