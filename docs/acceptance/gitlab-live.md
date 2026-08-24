@@ -3,10 +3,13 @@
 ## 当前状态
 
 - Provider：GitLab CLI (`glab`)
-- `command -v`：缺失
-- 验收状态：**NO-GO，未运行**
+- Host-scoped authentication：已由 `glab auth status` 确认；Doctor 的非 host-scoped 检查因默认 `gitlab.com` 未认证而误报失败。
+- 受治理运行：`WSS-01M0S8S3CXJ1Q7M9TWMG3WE03A` / `external-request-9c05777fdc6844ab58698afe49db4e40aba632c32e5f8e5f42deaaf3122d10aa` 对 `gitlab:892` 请求 `issue.comment`，内容仅记录摘要 `sha256:2b3123f714d6cec7092fa66136b74333e9d1945a812b7f4557c7260a67715fef`。
+- 生命周期：首次 submit 为 `await_approval`，精确审批为 `exact-approved`；同一请求的第二次 submit 为 `reconciliation_required`，公开 reconcile 后仍为 `reconciliation_required`。
+- 回执：`absent-unverified`，`receiptCount: 0`；没有记录或声称任何 effect ID。
+- 验收状态：**NO-GO，需对账**
 
-本轮没有执行 `glab`、认证探测、网络访问或远程写入。缺少 GitLab CLI 时不得改用未建模的 HTTP Provider，也不得绕过精确写入授权。
+该记录不包含原始 comment body、payload、凭据或 effect ID。未知效果不得自动重发，必须先完成可审计对账；不得改用未建模的 HTTP Provider，也不得绕过精确写入授权。
 
 ## 真实验收前置条件
 

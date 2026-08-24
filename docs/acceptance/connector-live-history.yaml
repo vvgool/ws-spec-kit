@@ -1,5 +1,5 @@
 # Ticket 07 真实 Connector 验收的脱敏 NO-GO 历史 manifest。
-# 本文件仅记录 command -v 可用性；没有执行 Provider CLI、认证探测、网络或远程写入。
+# GitLab 仅记录一次 host-scoped 认证确认与受治理运行的结果，不含原始正文、载荷、凭据或 effect ID。
 version: 1
 kind: wsspeckit-connector-live-history
 recordedDate: 2026-08-23
@@ -8,8 +8,8 @@ evidenceTiers:
   localFixtures: local-automated-only
   realPlatformEvidence: authorized-dedicated-target-write-idempotency-readback-reconciliation-required
 currentProbe:
-  method: command-v-only
-  realPlatformExecution: not-authorized-not-run
+  method: command-v-plus-governed-run
+  realPlatformExecution: gitlab-governed-run-reconciliation-required
   providers:
     github:
       availability: available-unverified
@@ -26,9 +26,9 @@ currentProbe:
           - redacted-audit-receipt
         satisfiedChecks: []
     gitlab:
-      availability: missing
+      availability: available-verified
       realPlatformEvidence:
-        status: not-run-no-go
+        status: reconciliation-required-no-go
         receiptCount: 0
         requiredChecks:
           - verified-authentication
@@ -38,7 +38,23 @@ currentProbe:
           - readback-summary
           - reconciliation-before-retry
           - redacted-audit-receipt
-        satisfiedChecks: []
+        satisfiedChecks:
+          - verified-authentication
+          - explicit-exact-write-authorization
+          - reconciliation-before-retry
+      governedRun:
+        workItemId: WSS-01M0S8S3CXJ1Q7M9TWMG3WE03A
+        requestId: external-request-9c05777fdc6844ab58698afe49db4e40aba632c32e5f8e5f42deaaf3122d10aa
+        target: gitlab:892
+        requestedEffectKind: issue.comment
+        contentDigest: sha256:2b3123f714d6cec7092fa66136b74333e9d1945a812b7f4557c7260a67715fef
+        hostAuthentication: verified-host-scoped-glab-auth-status
+        doctorAuthentication: false-negative-default-gitlab-com-unauthenticated
+        firstSubmit: await_approval
+        approval: exact-approved
+        secondSubmit: reconciliation_required
+        publicReconcile: remains-reconciliation-required
+        receipt: absent-unverified
     feishu:
       availability: available-unverified
       realPlatformEvidence:
