@@ -49,7 +49,7 @@ export function fixedTestGateFromConfig(raw: unknown): FixedTestGate {
     || !Array.isArray(testAssetPaths) || testAssetPaths.length === 0 || !testAssetPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
     || !Array.isArray(productPaths) || productPaths.length === 0 || !productPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
     || reporter?.type !== "node-test" || reporter.version !== 1) {
-    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 缺少固定且完整的 test Gate，无法启动含 verify-red/verify-green 的 Workflow。");
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 缺少固定且完整的 test Gate。");
   }
   return {
     commandId: "test",
