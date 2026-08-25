@@ -10,28 +10,28 @@ connectors:
 skills:
   - id: requirement-exploration
     version: 1.0.0
-    description: 探索代码并澄清功能需求
+    description: 探索代码与需求：grill 未决决策，从仓库取事实
   - id: solution-design
     version: 1.0.0
-    description: 编写可实施的技术方案
+    description: 在已确认规格上设计方案：选 seam、写取舍
   - id: task-planning
     version: 1.0.0
-    description: 将方案拆分为可验证任务
+    description: 把设计拆成可验证任务：tracer-bullet 与阻塞边
   - id: tdd-implementation
     version: 1.0.0
-    description: 以测试驱动方式实现任务
+    description: 测试驱动实现：先 red 再最小 green
   - id: code-review
     version: 1.0.0
-    description: 审查实现缺陷与需求偏差
+    description: 按 Spec 与 Standards 两轴审查实现
   - id: bug-fixing
     version: 1.0.0
-    description: 修复审查发现并重新验证
+    description: 先 tight red 再修审查问题的根因
   - id: documentation-exploration
     version: 1.0.0
-    description: 探索文档现状和事实来源
+    description: 探索文档事实：只收录能指证的来源
   - id: documentation-editing
     version: 1.0.0
-    description: 按事实编辑中文文档
+    description: 按已确认事实编辑允许路径内的中文文档
   - id: documentation-review
     version: 1.0.0
-    description: 审查文档准确性和完整性
+    description: 审查文档准确性与完整性，不改文件
