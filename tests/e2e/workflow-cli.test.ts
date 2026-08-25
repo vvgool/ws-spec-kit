@@ -6,7 +6,8 @@ import test from "node:test";
 
 import { runWorkflowCommand } from "../../src/adapters/cli/workflow.js";
 import { createApplication } from "../../src/application/application.js";
-import { initRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
+import { stringify } from "yaml";
 import { createGitRepository, git } from "../integration/helpers/git.js";
 
 test("Workflow 命令列出、展示、校验内置 Package，并且拒绝不存在的 Package", async () => {
@@ -100,6 +101,39 @@ test("workflow validate 复用 start 的严格 Project Config 校验", async () 
   );
 });
 
+test("含 verify-red 的 Workflow 在 start 与 validate 时拒绝不完整 test Gate", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-incomplete-gate-home-"));
+  await initRepository(root);
+  await writeFile(path.join(root, ".wsspec", "config.yaml"), [
+    "version: 1",
+    "testing:",
+    "  pathRules: [node]",
+    "  testAssetPaths: [tests/**]",
+    "  productPaths: [src/**]",
+    "",
+  ].join("\n"), "utf8");
+  const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
+  const incomplete = (error: unknown): boolean => error instanceof Error && "code" in error
+    && (error as Error & { code: string }).code === "WSSPEC_TDD_GATE_CONFIGURATION_INVALID";
+
+  await assert.rejects(app.start({ root, source: { type: "prompt", text: "缺 Gate" } }), incomplete);
+  await assert.rejects(runWorkflowCommand({ root, argv: ["validate", "builtin://workflows/feature-delivery"] }), incomplete);
+  assert.equal((await runWorkflowCommand({ root, argv: ["validate", "builtin://workflows/documentation-delivery"] }) as { valid: boolean }).valid, true);
+});
+
+test("init 写入的 test Gate 允许 start feature-delivery", async () => {
+  const root = await createGitRepository();
+  const home = await mkdtemp(path.join(os.tmpdir(), "wspec-init-gate-home-"));
+  await initRepository(root);
+  const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
+
+  const started = await app.start({ root, source: { type: "prompt", text: "init 模板" }, profile: "quick" });
+
+  assert.match(started.workItemId, /^WSS-/u);
+  assert.equal(started.workflowRef, "builtin://workflows/feature-delivery");
+});
+
 test("已初始化项目缺少 Config 时 validate、use 与 start 同样 fail closed，且 use 不修改选择", async () => {
   const root = await createGitRepository();
   await initRepository(root);
@@ -135,9 +169,10 @@ test("四类 Provider 在 validate、use 与 start 使用相同的 Project Skill
       const globalRoot = scenario.root(home);
       await mkdir(path.join(globalRoot, "vendor", "test"), { recursive: true });
       await writeFile(path.join(globalRoot, "vendor", "test", "SKILL.md"), "# 测试 Skill\n", "utf8");
-      await writeFile(path.join(root, ".wsspec", "config.yaml"), scenario.additional === true
-        ? `version: 1\nskills:\n  additionalGlobalRoots:\n    - id: global-root\n      path: ${globalRoot}\n`
-        : "version: 1\n", "utf8");
+      await writeFile(path.join(root, ".wsspec", "config.yaml"), stringify({
+        ...defaultProjectConfig(),
+        ...(scenario.additional === true ? { skills: { additionalGlobalRoots: [{ id: "global-root", path: globalRoot }] } } : {}),
+      }, { lineWidth: 0 }), "utf8");
       await git(root, "add", ".wsspec");
       await git(root, "commit", "-m", `test: ${scenario.provider} global Skill`);
 

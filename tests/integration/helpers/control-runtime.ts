@@ -12,7 +12,8 @@ import type { AgentAction, SubmitResult } from "../../../src/protocol/applicatio
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
 import { createDefaultExecutorRegistry } from "../../../src/registry/executors/registry.js";
 import { readControlPlane } from "../../../src/storage/control-plane.js";
-import { initRepository } from "../../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../../src/storage/repository.js";
+import { stringify } from "yaml";
 import { createGitRepository, git } from "./git.js";
 
 export interface ControlRuntimeFixture {
@@ -59,15 +60,10 @@ export async function controlRuntimeFixture(options: ControlRuntimeFixtureOption
   const root = await createGitRepository();
   await initRepository(root);
   if (options.knowledgeTarget === true) {
-    await writeFile(path.join(root, ".wsspec", "config.yaml"), [
-      "version: 1",
-      "publishing:",
-      "  targets:",
-      "    knowledge:",
-      "      provider: feishu",
-      "      document: existingDocumentToken123",
-      "",
-    ].join("\n"), "utf8");
+    await writeFile(path.join(root, ".wsspec", "config.yaml"), stringify({
+      ...defaultProjectConfig(),
+      publishing: { targets: { knowledge: { provider: "feishu", document: "existingDocumentToken123" } } },
+    }, { lineWidth: 0 }), "utf8");
   }
   await git(root, "add", ".wsspec", ".gitignore");
   await git(root, "commit", "-m", "test: initialize control runtime");

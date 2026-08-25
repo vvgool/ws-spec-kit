@@ -7,14 +7,20 @@ import test from "node:test";
 import { createApplication } from "../../src/application/application.js";
 import { transitionRuntime } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
-import { initRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
+import { stringify } from "yaml";
 import { createGitRepository, git } from "./helpers/git.js";
 
 async function prepare() {
   const root = await createGitRepository();
   await initRepository(root);
   await writeFile(path.join(root, ".wsspec/workflow.yaml"), "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n");
-  await writeFile(path.join(root, ".wsspec/config.yaml"), "version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test: { command: [npm, test], cwd: worktree, timeoutSeconds: 60, required: true, evidence: trusted }\n");
+  await writeFile(path.join(root, ".wsspec/config.yaml"), stringify({
+    ...defaultProjectConfig(),
+    trigger: { mode: "suggest" },
+    git: { worktrees: { enabled: true, root: ".worktrees", branchPrefix: "wspec/" } },
+    runtime: { claimTtlSeconds: 60, maxStageRetries: 3 },
+  }, { lineWidth: 0 }));
   await git(root, "add", "."); await git(root, "commit", "-m", "lock fixture");
   const app = createApplication({ provider: "codex", terminal: { isTTY: true }, now: () => new Date("2026-08-18T00:00:00.000Z") });
   const { workItemId } = await app.start({ root, source: { type: "prompt", text: "锁恢复" }, profile: "standard" });

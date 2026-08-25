@@ -9,16 +9,21 @@ import { approvalBindingDigest, ApprovalError, decideArtifactApproval, requestAr
 import { transitionRuntime } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
 import { withControlPlaneLock } from "../../src/storage/events.js";
-import { initRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
+import { stringify } from "yaml";
 import { createGitRepository, git } from "./helpers/git.js";
 
 async function prepare() {
   const root = await createGitRepository();
   await initRepository(root);
   const workflow = "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n";
-  const config = `version: 1\ntrigger: { mode: suggest }\ngit:\n  worktrees: { enabled: true, root: .worktrees, branchPrefix: wspec/ }\nruntime: { claimTtlSeconds: 60, maxStageRetries: 3 }\nquality:\n  gates:\n    test: { command: [npm, test], cwd: worktree, timeoutSeconds: 60, required: true, evidence: trusted }\n`;
   await mkdir(path.join(root, ".wsspec"), { recursive: true });
-  await writeFile(path.join(root, ".wsspec/workflow.yaml"), workflow); await writeFile(path.join(root, ".wsspec/config.yaml"), config);
+  await writeFile(path.join(root, ".wsspec/workflow.yaml"), workflow);
+  await writeFile(path.join(root, ".wsspec/config.yaml"), stringify({
+    ...defaultProjectConfig(),
+    git: { worktrees: { enabled: true, root: ".worktrees", branchPrefix: "wspec/" } },
+    runtime: { claimTtlSeconds: 60, maxStageRetries: 3 },
+  }, { lineWidth: 0 }));
   await git(root, "add", "."); await git(root, "commit", "-m", "approval fixture");
   const app = createApplication({ provider: "codex", terminal: { isTTY: true }, now: () => new Date("2026-08-18T00:00:00.000Z") });
   const { workItemId } = await app.start({ root, source: { type: "prompt", text: "审批" }, profile: "standard" });

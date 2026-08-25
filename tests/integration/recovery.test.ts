@@ -9,32 +9,18 @@ import { initializeControlPlane, readControlPlane, recoverControlPlane } from ".
 import { sha256 } from "../../src/domain/digests.js";
 import { ControlPlaneError, transitionRuntime } from "../../src/engine/scheduler.js";
 import { captureRequirement, sourceArtifactReference } from "../../src/registry/connectors/requirement-source.js";
-import { initRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
 import { createWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
 const workflow = "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n";
 
-const config = `version: 1
-trigger:
-  mode: suggest
-git:
-  worktrees:
-    enabled: true
-    root: .worktrees
-    branchPrefix: wspec/
-runtime:
-  claimTtlSeconds: 1800
-  maxStageRetries: 3
-quality:
-  gates:
-    test:
-      command: [npm, test]
-      cwd: worktree
-      timeoutSeconds: 900
-      required: true
-      evidence: trusted
-`;
+const config = stringify({
+  ...defaultProjectConfig(),
+  trigger: { mode: "suggest" },
+  git: { worktrees: { enabled: true, root: ".worktrees", branchPrefix: "wspec/" } },
+  runtime: { claimTtlSeconds: 1800, maxStageRetries: 3 },
+}, { lineWidth: 0 });
 
 async function prepare(): Promise<{ root: string; worktree: string; workItemId: string }> {
   const root = await createGitRepository();

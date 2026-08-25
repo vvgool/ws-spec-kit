@@ -569,17 +569,23 @@ function submissionFor(
   workPackage: WorkPackage,
   artifacts: ArtifactReference[],
 ): SubmitResult {
-  if (workPackage.stepId === "edit-document") {
+  if (workPackage.stepId === "edit-document" || workPackage.stepId === "write-tests" || workPackage.stepId === "verify-red") {
     return {
       version: 1,
       status: "failed",
-      summary: "本地 Driver Fixture 不执行真实文档编辑，显式进入 blocked 终点",
+      summary: workPackage.stepId === "edit-document"
+        ? "本地 Driver Fixture 不执行真实文档编辑，显式进入 blocked 终点"
+        : "本地 Driver Fixture 不执行真实 TDD，显式进入 blocked 终点",
       modifiedFiles: [],
       artifacts: [],
       commands: [],
       evidence: [],
       externalWrites: [],
-      remainingRisks: [{ code: "WSSPEC_FIXTURE_DOCUMENT_EDIT_NOT_RUN" }],
+      remainingRisks: [{
+        code: workPackage.stepId === "edit-document"
+          ? "WSSPEC_FIXTURE_DOCUMENT_EDIT_NOT_RUN"
+          : "WSSPEC_FIXTURE_TDD_NOT_RUN",
+      }],
     };
   }
   return {

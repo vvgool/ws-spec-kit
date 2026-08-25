@@ -22,8 +22,15 @@ function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-export async function fixedTestGateForState(state: Pick<import("../application/state.js").ApplicationState, "itemRoot">): Promise<FixedTestGate> {
-  const config = object(parse(await readFile(path.join(state.itemRoot, "snapshot", "config.yaml"), "utf8")));
+export function requiresTrustedTestGate(steps: readonly { id: string; enabled: boolean; steps?: readonly unknown[] }[]): boolean {
+  return steps.some((step) => {
+    const children = Array.isArray(step.steps) ? step.steps as Array<{ id: string; enabled: boolean; steps?: readonly unknown[] }> : [];
+    return ((step.id === "verify-red" || step.id === "verify-green") && step.enabled) || requiresTrustedTestGate(children);
+  });
+}
+
+export function fixedTestGateFromConfig(raw: unknown): FixedTestGate {
+  const config = object(raw);
   const gate = object(object(object(config?.quality)?.gates)?.test);
   const configuredPathRules = object(config?.testing)?.pathRules;
   const testAssetPaths = object(config?.testing)?.testAssetPaths;
@@ -42,7 +49,7 @@ export async function fixedTestGateForState(state: Pick<import("../application/s
     || !Array.isArray(testAssetPaths) || testAssetPaths.length === 0 || !testAssetPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
     || !Array.isArray(productPaths) || productPaths.length === 0 || !productPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
     || reporter?.type !== "node-test" || reporter.version !== 1) {
-    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 快照缺少固定且完整的 test Gate。 ");
+    throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 缺少固定且完整的 test Gate，无法启动含 verify-red/verify-green 的 Workflow。");
   }
   return {
     commandId: "test",
@@ -60,6 +67,10 @@ export async function fixedTestGateForState(state: Pick<import("../application/s
     productPaths: productPaths as string[],
     reporter: { type: "node-test", version: 1 },
   };
+}
+
+export async function fixedTestGateForState(state: Pick<import("../application/state.js").ApplicationState, "itemRoot">): Promise<FixedTestGate> {
+  return fixedTestGateFromConfig(parse(await readFile(path.join(state.itemRoot, "snapshot", "config.yaml"), "utf8")));
 }
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;

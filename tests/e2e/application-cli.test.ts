@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { initRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
 import { createGitRepository } from "../integration/helpers/git.js";
 
 interface CliResult { code: number | null; stdout: string; stderr: string }
@@ -201,7 +201,7 @@ test("CLI 对 Work Item 创建与 rollback 双失败只输出固定安全消息"
   const worktreesRoot = path.join(root, ".worktrees", secret);
   await initRepository(root);
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
-    version: 1,
+    ...defaultProjectConfig(),
     git: { worktrees: { enabled: true, root: `.worktrees/${secret}`, branchPrefix: "wspec/" } },
   }, null, 2)}\n`, "utf8");
   const running = startCli(root, ["start", "--prompt", "rollback fault injection"], home);
@@ -238,7 +238,7 @@ test("CLI acquire 将当前 host 配置缺失报告为 Global root 未绑定", a
   await initRepository(root);
   await mkdir(additionalRoot, { recursive: true });
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
-    version: 1,
+    ...defaultProjectConfig(),
     skills: { additionalGlobalRoots: [{ id: "shared", path: additionalRoot }] },
   }, null, 2)}\n`, "utf8");
   const started = await runCli(root, ["start", "--prompt", "缺失宿主配置", "--provider", "generic", "--profile", "quick"], home);

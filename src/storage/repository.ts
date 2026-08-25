@@ -120,6 +120,27 @@ export async function isRepositoryInitialized(cwd: string): Promise<boolean> {
   }
 }
 
+export function defaultProjectConfig(): Record<string, unknown> {
+  return {
+    version: 1,
+    testing: { pathRules: [...testPathRules], testAssetPaths: [...defaultTestAssetPaths], productPaths: [...defaultProductPaths] },
+    quality: {
+      gates: {
+        test: {
+          command: ["node", "--test"],
+          cwd: "worktree",
+          timeoutSeconds: 60,
+          required: true,
+          evidence: "trusted",
+          inheritEnv: [],
+          env: {},
+          reporter: { type: "node-test", version: 1 },
+        },
+      },
+    },
+  };
+}
+
 export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   let root: string;
   let commonDir: string;
@@ -139,10 +160,7 @@ export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   }
   const repositoryId = `repo-${ulid()}` as RepositoryId;
   await writeFileAtomic(filename, stringify({ version: 1, repositoryId }, { lineWidth: 0 }));
-  await writeDefaultIfMissing(path.join(root, ".wsspec", "config.yaml"), stringify({
-    version: 1,
-    testing: { pathRules: [...testPathRules], testAssetPaths: [...defaultTestAssetPaths], productPaths: [...defaultProductPaths] },
-  }, { lineWidth: 0 }));
+  await writeDefaultIfMissing(path.join(root, ".wsspec", "config.yaml"), stringify(defaultProjectConfig(), { lineWidth: 0 }));
   await writeDefaultIfMissing(path.join(root, ".wsspec", "workflow.yaml"), stringify({
     version: 1,
     activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },

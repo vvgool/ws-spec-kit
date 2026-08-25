@@ -226,7 +226,7 @@ Source 的恢复权威由控制面中的 `application-anchor.json`、其绑定�
 
 只有在 Step 的 `inputs` 中声明 `requirement-source`，Work Package 的 `artifacts` 才获得可读取的完整 Source 引用；正文和 metadata 不复制进 Work Package。`requiredOutputs` 描述 Agent 应产出的 `outputId`、`artifactType`、`schemaVersion` 和可选 `contentLevel`，不携带现有 Artifact 的 ID、路径、摘要或其他读取授权；系统提供的 `requirement-source` 不带 Agent output id。`artifactAuthoring` 明确给出版本、正文上限和 draft roots，且属于 Claim 绑定的完整 Work Package identity。仅声明 Source output 不能借此读取已有 Source。
 
-首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`；引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
+首版 trusted TDD runner 只支持当前 Node.js 的 `node:test`。项目必须在不可变配置快照中声明 `testing.pathRules`，并为 `quality.gates.test` 声明 `reporter: { type: node-test, version: 1 }`。若编译后的 Profile 仍启用 `verify-red` 或 `verify-green`，`start` 与 `workflow validate` 在创建 Work Item 前按同一完整性规则 fail closed 为 `WSSPEC_TDD_GATE_CONFIGURATION_INVALID`，不得把缺 Gate 推迟到红绿验证。引擎解析 `argv[0]` 的绝对可执行文件、绑定继承环境和可执行文件摘要，并注入受控 reporter 目标。`java`、`ruby`、`dotnet` 当前只提供测试路径识别规则，不表示对应 runner adapter 已实现；非 `node:test` runner fail closed 为 `WSSPEC_TDD_REPORTER_UNSUPPORTED`，不能由明文 TAP 输出或 Agent 报告升级为 trusted Evidence。
 
 `testing.testAssetPaths` 是测试入口选择器，不是可由项目任意收窄的可信边界。引擎使用不可配置的 stack ownership marker 将 pattern 归一化为 `testAssetRoots`：遇到最早的 `test`、`tests`、`spec`、`.NET Tests` 或 `*.Tests` 目录时，trusted root 固定截到该目录。于是 `tests/unit/*.test.mjs` 提升为 `tests`，`src/test/java/**/*Test.java` 提升为 `src/test`，`spec/models/**/*_spec.rb` 提升为 `spec`，`packages/Foo.Tests/Unit/**/*Tests.cs` 提升为 `packages/Foo.Tests`。nested `__tests__` 或 `__snapshots__` selector 则提升到 marker 的父 package root：`packages/a/__tests__/unit/*.test.ts` 与 `packages/a/__snapshots__/**` 都派生 `packages/a`，因此只声明任一 selector 也会自动扫描并绑定 sibling marker。多个 package 分别派生 roots，不会因选择 `packages/a` 扩大到 `packages/b`。若 pattern 没有已知 marker，引擎保守使用静态前缀的顶层目录；无静态前缀或根级 pattern 使用仓库根 `.`。这些 marker 与算法不受 `testing.pathRules` 或 selector 深度控制。
 
@@ -305,7 +305,7 @@ skills:
 | `agent` | `internal`、`dispatch` |
 | `artifact` | `internal`、`dispatch` |
 | `init` | `internal`、`arguments`、`repository` |
-| `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`source`、`workItem`、`runtime`、`start` |
+| `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`source`、`workItem`、`runtime`、`start`、`tdd` |
 | `acquire` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd`、`externalAction` |
 | `artifact create` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`source`、`acquire`、`artifact` |
 | `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction`、`gitCommit` |
@@ -314,8 +314,8 @@ skills:
 | `workflow list` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider` |
 | `workflow show` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider`、`workflowPackage` |
 | `workflow eject` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider`、`workflowPackage`、`workflowEject` |
-| `workflow validate` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider` |
-| `workflow use` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`workflowTrust` |
+| `workflow validate` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`tdd` |
+| `workflow use` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`workflowTrust`、`tdd` |
 | `agent install` | `internal`、`arguments`、`agentInstall` |
 | `doctor connectors` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider` |
 

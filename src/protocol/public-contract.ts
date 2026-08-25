@@ -204,7 +204,7 @@ export const applicationPublicErrorGroupNamesByRoute = {
   init: ["internal", "arguments", "repository"],
   start: [
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
-    "compiler", "executor", "connectorRegistry", "connectorProvider", "source", "workItem", "runtime", "start",
+    "compiler", "executor", "connectorRegistry", "connectorProvider", "source", "workItem", "runtime", "start", "tdd",
   ],
   acquire: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "close", "tdd", "externalAction"],
   "artifact create": ["internal", "arguments", ...applicationGroups, "source", "acquire", "artifact"],
@@ -217,8 +217,8 @@ export const applicationPublicErrorGroupNamesByRoute = {
   "workflow list": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
   "workflow show": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage"],
   "workflow eject": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage", "workflowEject"],
-  "workflow validate": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider"],
-  "workflow use": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider", "workflowTrust"],
+  "workflow validate": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider", "tdd"],
+  "workflow use": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider", "workflowTrust", "tdd"],
   "agent install": ["internal", "arguments", "agentInstall"],
   "doctor connectors": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
 } as const satisfies Readonly<Record<PublicCliErrorRoute, readonly ApplicationPublicErrorGroup[]>>;

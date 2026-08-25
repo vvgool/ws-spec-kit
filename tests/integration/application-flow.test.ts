@@ -16,7 +16,7 @@ import { captureLocalRequirement } from "../../src/registry/connectors/local-req
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
 import { readEvents, withControlPlaneLock } from "../../src/storage/events.js";
-import { initRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
 import { createWorkItem } from "../../src/storage/work-items.js";
 import { applicationExternalActionFixture, submitExternalAction } from "./helpers/external-action.js";
 import { createGitRepository, git } from "./helpers/git.js";
@@ -970,7 +970,7 @@ test("start and acquire use an uncommitted current-host config without copying i
   await initRepository(root);
   await mkdir(additionalRoot, { recursive: true });
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
-    version: 1,
+    ...defaultProjectConfig(),
     skills: { additionalGlobalRoots: [{ id: "shared", path: additionalRoot }] },
   }, null, 2)}\n`, "utf8");
   const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
@@ -1005,7 +1005,7 @@ test("acquire reports a missing current-host config as an unbound Global root", 
   await initRepository(root);
   await mkdir(additionalRoot, { recursive: true });
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
-    version: 1,
+    ...defaultProjectConfig(),
     skills: { additionalGlobalRoots: [{ id: "shared", path: additionalRoot }] },
   }, null, 2)}\n`, "utf8");
   const app = createApplication({ provider: "generic", home, terminal: { isTTY: true } });
@@ -1027,7 +1027,7 @@ test("additional Global roots retain their snapshotted provider when rebinding t
   const firstRoot = path.join(firstHome, "shared-skills");
   const secondRoot = path.join(secondHome, "shared-skills");
   const configFor = (root: string): string => `${JSON.stringify({
-    version: 1,
+    ...defaultProjectConfig(),
     skills: { additionalGlobalRoots: [{ id: "shared-skills", path: root }] },
   }, null, 2)}\n`;
   const current = await fixture({ provider: "codex", home: firstHome, workflowTrust: { interactive: true, actor: "reviewer" } });
@@ -1069,7 +1069,7 @@ test("additional Global roots retain their snapshotted provider when rebinding t
     assert.equal(persisted.includes(firstRoot), false, filename);
   }
   assert.deepEqual(parse(await readFile(configSnapshotPath, "utf8")), {
-    version: 1,
+    ...defaultProjectConfig(),
     skills: { additionalGlobalRoots: [{ id: "shared-skills" }] },
   });
   const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as {
@@ -1394,7 +1394,10 @@ test("a failed Submit retries the same Step before dependent Steps can advance",
 
 test("failed Submit stops after the snapshotted retry limit", async () => {
   const current = await fixture();
-  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), "version: 1\nruntime: { claimTtlSeconds: 60, maxStageRetries: 0 }\n", "utf8");
+  await writeFile(path.join(current.root, ".wsspec", "config.yaml"), `${JSON.stringify({
+    ...defaultProjectConfig(),
+    runtime: { claimTtlSeconds: 60, maxStageRetries: 0 },
+  })}\n`, "utf8");
   await git(current.root, "add", ".wsspec/config.yaml");
   await git(current.root, "commit", "-m", "test: disable retries");
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "不重试" } });
@@ -1896,10 +1899,19 @@ test("recovery of an unrelated stale claim does not expire a durable pending app
 test("start assembles Task 6 ProjectGatePolicy from project configuration", async () => {
   const current = await fixture();
   const config = {
-    version: 1,
+    ...defaultProjectConfig(),
     quality: {
       gates: {
-        test: { command: ["npm", "test"], cwd: "worktree", timeoutSeconds: 60, required: true, evidence: "trusted" },
+        test: {
+          command: ["npm", "test"],
+          cwd: "worktree",
+          timeoutSeconds: 60,
+          required: true,
+          evidence: "trusted",
+          inheritEnv: [],
+          env: {},
+          reporter: { type: "node-test", version: 1 },
+        },
       },
     },
   };

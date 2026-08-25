@@ -6,6 +6,7 @@ import { parse, stringify } from "yaml";
 import { sha256 } from "../domain/digests.js";
 import type { ProfileId } from "../domain/workflow.js";
 import { compileWorkflow, type ProjectGatePolicy } from "../engine/compiler.js";
+import { fixedTestGateFromConfig, requiresTrustedTestGate, VerificationError } from "../engine/verification.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
 import { deriveInitialStages } from "./initial-stages.js";
 import { emptyRuntimeRiskSignals } from "./profile.js";
@@ -79,14 +80,18 @@ export function projectConfiguration(raw: unknown, pkg: WorkflowPackage): Projec
   const gates = quality === undefined ? undefined : record(quality.gates);
   const defaultGate = pkg.workflow.workflow.id === "documentation-delivery" ? "docs.integrity" : "test";
   let gatePolicy: ProjectGatePolicy;
+  const knownGateIds = new Set(pkg.workflow.gates.map(({ id }) => id));
   if (gates === undefined) {
     gatePolicy = { requiredGateIds: [defaultGate], configuredGateIds: [defaultGate] };
   } else {
-    const configuredGateIds = Object.keys(gates).sort();
-    if (configuredGateIds.length === 0) throw new ApplicationStartError("WSSPEC_PROJECT_GATE_POLICY_INVALID", "项目不能用空 Gate 配置绕过 Workflow 安全策略。 ");
-    const requiredGateIds = configuredGateIds.filter((id) => record(gates[id])?.required === true);
-    if (requiredGateIds.length === 0) throw new ApplicationStartError("WSSPEC_PROJECT_GATE_POLICY_INVALID", "项目必须明确至少一个 required Gate。 ");
-    gatePolicy = { requiredGateIds, configuredGateIds };
+    const configuredGateIds = Object.keys(gates).filter((id) => knownGateIds.has(id)).sort();
+    if (configuredGateIds.length === 0) {
+      gatePolicy = { requiredGateIds: [defaultGate], configuredGateIds: [defaultGate] };
+    } else {
+      const requiredGateIds = configuredGateIds.filter((id) => record(gates[id])?.required === true);
+      if (requiredGateIds.length === 0) throw new ApplicationStartError("WSSPEC_PROJECT_GATE_POLICY_INVALID", "项目必须明确至少一个 required Gate。 ");
+      gatePolicy = { requiredGateIds, configuredGateIds };
+    }
   }
   const runtime = record(source.runtime);
   const claimTtlSeconds = runtime?.claimTtlSeconds;
@@ -237,6 +242,16 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       ...(configuration.documentationAllowedPaths === undefined ? {} : { documentationAllowedPaths: configuration.documentationAllowedPaths }),
     }, configuration.gatePolicy);
     profiles[profileId] = snapshotProfile(compiled, descriptors);
+  }
+  if (Object.values(profiles).some((profile) => requiresTrustedTestGate(profile.steps))) {
+    try {
+      fixedTestGateFromConfig(parse(configText));
+    } catch (error) {
+      if (error instanceof VerificationError) {
+        throw new ApplicationStartError(error.code, "Project Config 缺少固定且完整的 test Gate，无法启动含 verify-red/verify-green 的 Workflow。");
+      }
+      throw error;
+    }
   }
   const requestedProfile = input.profile ?? projectWorkflow.profile;
   const selected = requestedProfile === "auto" ? selectProfile({ mode: "auto", phase: "intake", risk: null }).id : requestedProfile;

@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { computeArtifactTreeDigest, computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { validate } from "../../src/schemas/index.js";
-import { RepositoryError, initRepository, loadRepository } from "../../src/storage/repository.js";
+import { defaultProjectConfig, RepositoryError, initRepository, loadRepository } from "../../src/storage/repository.js";
 import { createGitRepository, git } from "./helpers/git.js";
 import { parse } from "yaml";
 
@@ -32,14 +32,7 @@ test("repository initialization creates a versioned Application selection config
   await initRepository(root);
   const config = parse(await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8"));
   const workflow = parse(await readFile(path.join(root, ".wsspec", "workflow.yaml"), "utf8"));
-  assert.deepEqual(config, {
-    version: 1,
-    testing: {
-      pathRules: ["node", "java", "ruby", "dotnet"],
-      testAssetPaths: ["test/**", "tests/**", "**/__tests__/**", "**/__snapshots__/**", "**/*.test.*", "**/*.spec.*"],
-      productPaths: ["src/**"],
-    },
-  });
+  assert.deepEqual(config, defaultProjectConfig());
   assert.deepEqual(validate("builtin.application-project-config.v1", config), config);
   assert.deepEqual(workflow, {
     version: 1,

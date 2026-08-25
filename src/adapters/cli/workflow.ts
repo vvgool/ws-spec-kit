@@ -3,6 +3,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 
 import { compileWorkflow } from "../../engine/compiler.js";
+import { fixedTestGateFromConfig, requiresTrustedTestGate } from "../../engine/verification.js";
 import { resolveProjectWorkflowContext } from "../../application/start.js";
 import type { SkillProvider } from "../../registry/skills/types.js";
 import { loadBuiltinCatalog } from "../../resources/catalog.js";
@@ -42,12 +43,20 @@ async function exists(filename: string): Promise<boolean> { try { await access(f
 async function validatePackage(root: string, ref: string, home: string, selectedProvider: SkillProvider, allowMissingConfig = false): Promise<WorkflowPackage> {
   const pkg = await loadWorkflowPackage({ root, ref });
   const { configuration, skills } = await resolveProjectWorkflowContext({ root, pkg, provider: selectedProvider, home, allowMissingConfig });
+  let requiresGate = false;
   for (const id of ["quick", "standard", "governed"] as const) {
-    compileWorkflow(pkg, {
+    const compiled = compileWorkflow(pkg, {
       id,
       skills,
       ...(configuration.documentationAllowedPaths === undefined ? {} : { documentationAllowedPaths: configuration.documentationAllowedPaths }),
     }, configuration.gatePolicy);
+    if (requiresTrustedTestGate(compiled.steps)) requiresGate = true;
+  }
+  if (requiresGate) {
+    const configPath = path.join(root, ".wsspec", "config.yaml");
+    if (!(allowMissingConfig && !(await exists(configPath)))) {
+      fixedTestGateFromConfig(parse(await readFile(configPath, "utf8")));
+    }
   }
   return pkg;
 }
