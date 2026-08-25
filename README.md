@@ -2,7 +2,7 @@
 
 **WSSpecKit**，包名 `ws-spec-kit`，是一个由 Agent Skill 驱动、可配置的软件交付工作流引擎。它把需求来源、工作流、Skill、配置和执行状态绑定到 Work Item，使 Agent 按已声明的步骤交付软件或文档。
 
-当前版本为 `0.1.0-alpha.1`，仍处于 alpha 阶段。
+当前版本为 `0.1.0-beta.0`，仍处于 beta 阶段。
 
 ## 中文概述
 
