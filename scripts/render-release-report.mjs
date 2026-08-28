@@ -42,7 +42,7 @@ export function renderReleaseReport(document) {
     "",
     "## 本地自动化证明",
     "",
-    "本地 RC 门禁以串行 Node 测试、协议/Schema/文档/追溯契约、lint、typecheck、build、`npm pack --dry-run` 与 clean consumer 安装 E2E 组成。2026-08-23 的本次执行中，全量 Node 测试为 944/944 passed，clean consumer 安装 E2E 为 3/3 passed。门禁不调用宿主或 Provider CLI。",
+    "本地 RC 门禁以串行 Node 测试、协议/Schema/文档/追溯契约、lint、typecheck、build、`npm pack --dry-run` 与 clean consumer 安装 E2E 组成。2026-08-28 的本次执行中，全量 Node 测试为 965/965 passed，clean consumer 安装 E2E 为 3/3 passed。门禁不调用宿主或 Provider CLI。",
     "",
     "| 验收项 | Evidence Tier | 结果 | 说明 |",
     "| --- | --- | --- | --- |",
