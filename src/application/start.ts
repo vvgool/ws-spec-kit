@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat, unlink } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ulid } from "ulid";
 import { parse, stringify } from "yaml";
@@ -169,36 +169,6 @@ function portableSkill(skill: ResolvedSkill, catalog: Awaited<ReturnType<typeof 
   };
 }
 
-async function snapshotWorkflowPackage(pkg: WorkflowPackage, target: string): Promise<void> {
-  for (const file of pkg.files) {
-    const destination = path.join(target, file.path);
-    await mkdir(path.dirname(destination), { recursive: true });
-    await writeFileAtomic(destination, await readFile(path.join(pkg.root, file.path), "utf8"));
-  }
-}
-
-async function copySkillDirectory(source: string, target: string): Promise<void> {
-  for (const entry of await readdir(source, { withFileTypes: true })) {
-    const input = path.join(source, entry.name);
-    const output = path.join(target, entry.name);
-    const current = await stat(input);
-    if (current.isDirectory()) await copySkillDirectory(input, output);
-    else if (current.isFile()) {
-      await mkdir(path.dirname(output), { recursive: true });
-      await writeFileAtomic(output, await readFile(input, "utf8"));
-    }
-  }
-}
-
-async function snapshotSkills(skills: readonly ResolvedSkill[], target: string): Promise<void> {
-  for (const skill of skills) {
-    if (skill.source !== "builtin" && skill.source !== "project") continue;
-    const id = skill.ref.split("/").at(-1)!;
-    const destination = path.join(target, skill.source, id);
-    await copySkillDirectory(path.dirname(skill.entrypoint), destination);
-  }
-}
-
 function titleFor(text: string, origin: string): string {
   const firstLine = text.split(/\r?\n/u).find((line) => line.trim() !== "")?.trim();
   return (firstLine ?? origin).slice(0, 120);
@@ -289,9 +259,9 @@ export async function startApplication(input: StartInput, dependencies: StartDep
         worktreeRoot: configuration.worktreeRoot,
         branchPrefix: configuration.branchPrefix,
       },
+      materialize: false,
     });
-    const worktree = path.join(identity.repositoryRoot, item.execution.worktree);
-    const itemRoot = path.join(worktree, ".wsspec", "work-items", workItemId);
+    const itemRoot = path.join(identity.commonDir, "wsspec", "work-items", workItemId, "authority");
     const sourceReference = {
       artifactType: "requirement-source",
       schemaVersion: 1,
@@ -321,9 +291,6 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       maxStageRetries: configuration.maxStageRetries,
       createdAt,
     };
-    await snapshotWorkflowPackage(pkg, path.join(itemRoot, "snapshot", "workflow"));
-    await unlink(path.join(itemRoot, "snapshot", "workflow.yaml"));
-    await snapshotSkills(resolved, path.join(itemRoot, "snapshot", "skills"));
     await writeFileAtomic(path.join(itemRoot, "snapshot", "workflow.lock.json"), `${JSON.stringify(snapshot.workflowPackageLock, null, 2)}\n`);
     await writeFileAtomic(path.join(itemRoot, "snapshot", "skill.lock.json"), `${JSON.stringify(snapshot.skillLock, null, 2)}\n`);
     const applicationText = `${JSON.stringify(snapshot, null, 2)}\n`;

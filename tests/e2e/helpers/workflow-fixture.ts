@@ -22,8 +22,10 @@ import { createBuiltinExternalExecutor } from "../../../src/registry/connectors/
 import { canonicalRequirementText } from "../../../src/registry/connectors/local-requirement.js";
 import type { BuiltinConnectorRuntime } from "../../../src/registry/connectors/runtime.js";
 import { readControlPlane, type RuntimeProjection } from "../../../src/storage/control-plane.js";
+import { materializeWorkItem, type WorkItem } from "../../../src/storage/work-items.js";
 import { readEvents, type StoredEvent } from "../../../src/storage/events.js";
 import { initRepository } from "../../../src/storage/repository.js";
+import { parse } from "yaml";
 import { createGitRepository, git } from "../../integration/helpers/git.js";
 
 type App = ReturnType<typeof createApplication>;
@@ -374,7 +376,12 @@ function bodyFor(type: string, approved = true): string {
 
 export async function worktreeFor(root: string, workItemId: string): Promise<string> {
   const projection = await readControlPlane(root, workItemId);
-  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
+  const workItemRoot = path.dirname(projection.controlPlane);
+  const locator = JSON.parse(await readFile(path.join(workItemRoot, "locator.json"), "utf8")) as { worktree: string; materialized?: boolean };
+  if (locator.materialized === false) {
+    const item = parse(await readFile(path.join(workItemRoot, "authority", "work-item.yaml"), "utf8")) as WorkItem;
+    await materializeWorkItem({ root, item });
+  }
   return path.join(root, locator.worktree);
 }
 

@@ -30,7 +30,7 @@ async function packageFixture(root: string, id = "team-feature"): Promise<string
     "inputs: {}",
     "steps:",
     "  - id: review",
-    "    uses: agent.execute",
+    "    uses: agent.execute\n    workspace: read-only",
     "    skills:",
     "      - ref: package://skills/review",
     "        required: true",
@@ -102,16 +102,19 @@ inputs:
 steps:
   - id: intake
     uses: connector.execute
+    workspace: read-only
     action: requirement.capture
     outputs: [requirement-source]
   - id: explore
     uses: agent.execute
+    workspace: read-only
     needs: [intake]
     objective: 探索代码并提取需求相关约束
     skills: [{ ref: builtin://skills/code-exploration, required: true }]
     outputs: [exploration-report]
   - id: clarify
     uses: agent.execute
+    workspace: read-only
     needs: [explore]
     objective: 澄清需求并生成可验收规格
     skills:
@@ -121,6 +124,7 @@ steps:
     approval: required
   - id: design
     uses: agent.execute
+    workspace: read-only
     needs: [clarify]
     objective: 形成可实施的技术方案
     skills: [{ ref: builtin://skills/technical-design, required: true }]
@@ -128,6 +132,7 @@ steps:
     approval: required
   - id: plan
     uses: agent.execute
+    workspace: read-only
     needs: [clarify, design]
     objective: 将设计拆分为可验证任务
     skills: [{ ref: builtin://skills/task-planning, required: true }]
@@ -137,24 +142,28 @@ steps:
       - { outputId: design, required: false }
   - id: write-tests
     uses: agent.execute
+    workspace: isolated-worktree
     needs: [plan]
     objective: 根据当前任务先编写能够因缺少功能而失败的测试
     skills: [{ ref: builtin://skills/tdd-implementation, required: true }]
     outputs: [red-test-result]
   - id: verify-red
     uses: command.execute
+    workspace: isolated-worktree
     action: quality.test
     expectedOutcome: test-failure
     needs: [write-tests]
     outputs: [red-evidence]
   - id: implement
     uses: agent.execute
+    workspace: isolated-worktree
     needs: [verify-red]
     objective: 在保留 Red 测试的前提下完成最小实现
     skills: [{ ref: builtin://skills/tdd-implementation, required: true }]
     outputs: [implementation-result]
   - id: verify-green
     uses: command.execute
+    workspace: isolated-worktree
     action: quality.test
     expectedOutcome: success
     needs: [implement]
@@ -162,44 +171,53 @@ steps:
     outputs: [tdd-evidence]
   - id: review-fix
     uses: control.loop
+    workspace: isolated-worktree
     needs: [verify-green]
     until: '\${artifacts.review-result.approved}'
     maxIterations: 5
     steps:
       - id: review
         uses: agent.execute
+        workspace: isolated-worktree
         skills: [{ ref: builtin://skills/code-review, required: true }]
         outputs: [review-result]
       - id: fix
         uses: agent.execute
+        workspace: isolated-worktree
         when: '\${artifacts.review-result.approved == false}'
         skills: [{ ref: builtin://skills/review-fix, required: true }]
       - id: verify
         uses: command.execute
+        workspace: isolated-worktree
         action: quality.verify
   - id: commit
     uses: connector.execute
+    workspace: isolated-worktree
     action: git.commit
     needs: [review-fix]
     approval: required
   - id: update-issue
     uses: connector.execute
+    workspace: read-only
     action: issue.update
     needs: [commit]
     when: '\${bindings.issue.exists}'
   - id: update-wiki
     uses: connector.execute
+    workspace: read-only
     action: knowledge.publish
     needs: [update-issue]
     when: '\${bindings.knowledge.exists}'
   - id: close-issue
     uses: connector.execute
+    workspace: read-only
     action: issue.close
     needs: [update-wiki]
     when: '\${bindings.issue.exists}'
     approval: required
   - id: close
     uses: control.close
+    workspace: isolated-worktree
     needs: [close-issue]
 `);
   const loaded = await loadWorkflowPackage({ root, ref: "project://workflows/feature-delivery" });
@@ -245,7 +263,7 @@ test("Manifest、Workflow、Profile、Schema 和 Template 的变化均改变 Pac
   let previous = await loadWorkflowPackage({ root, ref: "project://workflows/team-feature" });
   const changes: Array<[string, string]> = [
     ["manifest.yaml", "version: 1\nid: team-feature\nentry: workflow.yaml\nprofiles: [standard]\nskills: [review]\ncapabilities: [external-read]\n"],
-    ["workflow.yaml", "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: revised\n    uses: agent.execute\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n"],
+    ["workflow.yaml", "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: revised\n    uses: agent.execute\n    workspace: read-only\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n"],
     ["profiles/standard.yaml", "version: 1\nprofile: { id: standard, workflow: team-feature }\nsteps: { design: { enabled: false } }\npublishing: { issueRequired: false, knowledgeRequired: false }\naudit: { level: standard }\n"],
     ["schemas/review.json", "{\"type\":\"string\"}\n"],
     ["templates/review.md", "# Revised template\n"],
@@ -359,10 +377,10 @@ test("拒绝 Manifest、Workflow、Profile 和 Lock 中的未知字段", async (
   await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /WSSPEC_WORKFLOW_PACKAGE_MANIFEST_INVALID/);
 
   await packageFixture(root);
-  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    skills: [{ ref: package://skills/review, required: true }]\n    typo: true\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
+  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    workspace: read-only\n    skills: [{ ref: package://skills/review, required: true }]\n    typo: true\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
   await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID/);
 
-  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
+  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    workspace: read-only\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
   await writeFile(path.join(directory, "profiles", "standard.yaml"), "version: 1\nprofile: { id: standard, workflow: team-feature }\nsteps: {}\npublishing: { issueRequired: false, knowledgeRequired: false }\naudit: { level: standard }\ntypo: true\n");
   await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID/);
 
@@ -384,7 +402,7 @@ test("递归拒绝 Workflow 与 Profile 嵌套对象的未知字段和错误类�
   for (const fragment of workflowCases) {
     const root = await temporaryRoot();
     const directory = await packageFixture(root);
-    await writeFile(path.join(directory, "workflow.yaml"), `version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    ${fragment}\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n`);
+    await writeFile(path.join(directory, "workflow.yaml"), `version: 1\nworkflow: { id: team-feature, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    workspace: read-only\n    ${fragment}\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n`);
     await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID/, fragment);
   }
 
@@ -413,6 +431,16 @@ test("拒绝旧的简化 Workflow 与 Profile 双版本", async () => {
   await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/team-feature" }), /WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID/);
 });
 
+test("Workflow Step 必须显式声明合法 workspace 模式", async () => {
+  const root = await temporaryRoot();
+  const directory = await packageFixture(root, "workspace-mode");
+  const workflow = "version: 1\nworkflow: { id: workspace-mode, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    skills: []\ngates: []\n";
+  await writeFile(path.join(directory, "workflow.yaml"), workflow);
+  await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/workspace-mode" }), /WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID/);
+  await writeFile(path.join(directory, "workflow.yaml"), workflow.replace("skills: []", "workspace: shared\n    skills: []"));
+  await assert.rejects(loadWorkflowPackage({ root, ref: "project://workflows/workspace-mode" }), /WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID/);
+});
+
 test("可选树只允许顶层不存在，已进入 Skill 树后的 ENOENT 必须 fail closed", async () => {
   const root = await temporaryRoot();
   const directory = await packageFixture(root);
@@ -427,7 +455,7 @@ test("可选树只允许顶层不存在，已进入 Skill 树后的 ENOENT 必�
 test("拒绝 Workflow 引用 Manifest 未声明的 Package Skill", async () => {
   const root = await temporaryRoot();
   const directory = await packageFixture(root, "undeclared-skill");
-  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: undeclared-skill, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    skills: [{ ref: package://skills/secret, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
+  await writeFile(path.join(directory, "workflow.yaml"), "version: 1\nworkflow: { id: undeclared-skill, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    workspace: read-only\n    skills: [{ ref: package://skills/secret, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n");
 
   await assert.rejects(
     loadWorkflowPackage({ root, ref: "project://workflows/undeclared-skill" }),

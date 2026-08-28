@@ -91,8 +91,9 @@ function parseArtifactOutput(value: unknown): NonNullable<WorkflowStep["outputs"
 
 function parseStep(value: unknown): WorkflowStep {
   const code = "WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID" as const;
-  const source = record(value, code, "Workflow Step", ["id", "uses", "actorRole", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
-  const result: WorkflowStep = { id: string(source.id, code, "Step id"), uses: string(source.uses, code, "Step uses") };
+  const source = record(value, code, "Workflow Step", ["id", "uses", "workspace", "actorRole", "needs", "when", "retry", "loop", "approval", "inputs", "outputs", "skills", "action", "objective", "expectedOutcome", "until", "maxIterations", "steps"]);
+  if (source.workspace !== "read-only" && source.workspace !== "isolated-worktree") error(code, "Step workspace 必须是 read-only 或 isolated-worktree。");
+  const result: WorkflowStep = { id: string(source.id, code, "Step id"), uses: string(source.uses, code, "Step uses"), workspace: source.workspace };
   if (source.actorRole !== undefined) {
     if (source.actorRole !== "implementation" && source.actorRole !== "review" && source.actorRole !== "fix") {
       error(code, "Step actorRole 不受支持。");

@@ -2,7 +2,7 @@
 
 **WSSpecKit**，包名 `ws-spec-kit`，是一个由 Agent Skill 驱动、可配置的软件交付工作流引擎。它把需求来源、工作流、Skill、配置和执行状态绑定到 Work Item，使 Agent 按已声明的步骤交付软件或文档。
 
-当前版本为 `0.1.0-beta.1`，仍处于 beta 阶段。
+当前版本为 `0.1.0-beta.2`，仍处于 beta 阶段。
 
 ## 中文概述
 
@@ -13,7 +13,7 @@ WSSpecKit 提供可执行文件 `wspec`。CLI 的成功、帮助与错误结果�
 - `builtin://workflows/feature-delivery`，用于功能交付。
 - `builtin://workflows/documentation-delivery`，用于纯文档交付，并限制改动范围为声明的文档路径。
 
-工作流定义、Profile、所需 Skill 和结果会在 Work Item 中快照。非内置工作流在首次使用或内容变化后需要明确的信任决定。外部连接器已有契约与本地自动化验证；真实 Provider 平台的验收状态以 [验收报告](docs/acceptance/release-report.md) 为准。
+Workflow 定义、Profile、所需 Skill 和结果的执行合同会在 Work Item 中快照；Workflow、Skill 和 Schema 正文不复制到每个 Work Item。恢复时会按 Lock 从当前允许来源重新验证，来源缺失或漂移会 fail closed。非内置工作流在首次使用或内容变化后需要明确的信任决定。外部连接器已有契约与本地自动化验证；真实 Provider 平台的验收状态以 [验收报告](docs/acceptance/release-report.md) 为准。
 
 ## 本地开发快速开始
 

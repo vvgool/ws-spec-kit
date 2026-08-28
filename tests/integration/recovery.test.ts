@@ -10,7 +10,7 @@ import { sha256 } from "../../src/domain/digests.js";
 import { ControlPlaneError, transitionRuntime } from "../../src/engine/scheduler.js";
 import { captureRequirement, sourceArtifactReference } from "../../src/registry/connectors/requirement-source.js";
 import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
-import { createWorkItem } from "../../src/storage/work-items.js";
+import { createWorkItem, materializeWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
 const workflow = "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n";
@@ -22,7 +22,7 @@ const config = stringify({
   runtime: { claimTtlSeconds: 1800, maxStageRetries: 3 },
 }, { lineWidth: 0 });
 
-async function prepare(): Promise<{ root: string; worktree: string; workItemId: string }> {
+async function prepare(): Promise<{ root: string; worktree: string; authorityRoot: string; workItemId: string }> {
   const root = await createGitRepository();
   await initRepository(root);
   await writeFile(path.join(root, ".wsspec", "workflow.yaml"), workflow, "utf8");
@@ -32,8 +32,13 @@ async function prepare(): Promise<{ root: string; worktree: string; workItemId: 
   const app = createApplication({ provider: "codex", terminal: { isTTY: true }, now: () => new Date("2026-08-16T04:00:00.000Z") });
   const started = await app.start({ root, source: { type: "prompt", text: "验证事件恢复" }, profile: "standard" });
   const projection = await readControlPlane(root, started.workItemId);
-  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
-  return { root, worktree: path.join(root, locator.worktree), workItemId: started.workItemId };
+  const itemRoot = path.dirname(projection.controlPlane);
+  const locator = JSON.parse(await readFile(path.join(itemRoot, "locator.json"), "utf8")) as { worktree: string; materialized?: boolean };
+  if (locator.materialized === false) {
+    const item = parse(await readFile(path.join(itemRoot, "authority", "work-item.yaml"), "utf8")) as import("../../src/storage/work-items.js").WorkItem;
+    await materializeWorkItem({ root, item });
+  }
+  return { root, worktree: path.join(root, locator.worktree), authorityRoot: path.join(itemRoot, "authority"), workItemId: started.workItemId };
 }
 
 function hasCode(error: unknown, code: string): boolean {
@@ -212,12 +217,14 @@ test("recovery rejects legacy Source manifests without an Application anchor and
 
 test("recovery rejects a Source reference that differs from the trusted source.captured event", async () => {
   const fixture = await prepare();
-  const itemRoot = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId);
+  const itemRoot = fixture.authorityRoot;
   const manifestPath = path.join(itemRoot, "work-item.yaml");
   const applicationPath = path.join(itemRoot, "snapshot", "application.json");
   const replacement = await captureRequirement({
     repositoryRoot: fixture.root,
-    artifactRoot: fixture.worktree,
+    artifactRoot: fixture.authorityRoot,
+    artifactRootRepositoryRoot: path.join(fixture.root, ".git"),
+    artifactPathPrefix: `.wsspec/work-items/${fixture.workItemId}`,
     workItemId: fixture.workItemId,
     source: { type: "user.prompt", text: "attacker-selected" },
   });
@@ -255,10 +262,10 @@ test("recovery rejects a Source reference that differs from the trusted source.c
 
 test("recovery rejects a changed or schema-invalid requirement SourceArtifact", async () => {
   const fixture = await prepare();
-  const manifest = parse(await readFile(path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, "work-item.yaml"), "utf8")) as {
+  const manifest = parse(await readFile(path.join(fixture.authorityRoot, "work-item.yaml"), "utf8")) as {
     source: { snapshot: string };
   };
-  const sourcePath = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, manifest.source.snapshot);
+  const sourcePath = path.join(fixture.authorityRoot, manifest.source.snapshot);
   await writeFile(sourcePath, "{}\n", "utf8");
 
   await assert.rejects(
@@ -269,7 +276,7 @@ test("recovery rejects a changed or schema-invalid requirement SourceArtifact", 
 
 test("recovery authenticates the Work Item manifest before following its Source Artifact reference", async () => {
   const fixture = await prepare();
-  const manifestPath = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, "work-item.yaml");
+  const manifestPath = path.join(fixture.authorityRoot, "work-item.yaml");
   const manifest = await readFile(manifestPath, "utf8");
   await writeFile(
     manifestPath,
@@ -285,7 +292,7 @@ test("recovery authenticates the Work Item manifest before following its Source 
 
 test("recovery authenticates Application before touching a missing Source Artifact", async () => {
   const fixture = await prepare();
-  const itemRoot = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId);
+  const itemRoot = fixture.authorityRoot;
   const manifest = parse(await readFile(path.join(itemRoot, "work-item.yaml"), "utf8")) as {
     source: { snapshot: string };
   };
@@ -301,7 +308,7 @@ test("recovery authenticates Application before touching a missing Source Artifa
 
 test("recovery authenticates Application before interpreting an anchored malicious Source path", async () => {
   const fixture = await prepare();
-  const itemRoot = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId);
+  const itemRoot = fixture.authorityRoot;
   const manifestPath = path.join(itemRoot, "work-item.yaml");
   const applicationPath = path.join(itemRoot, "snapshot", "application.json");
   const manifest = parse(await readFile(manifestPath, "utf8")) as Record<string, unknown> & {

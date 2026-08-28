@@ -8,11 +8,13 @@ inputs:
 steps:
   - id: authorization-probe
     uses: connector.execute
+    workspace: read-only
     action: issue.update
     inputs: [requirement-source]
     when: ${bindings.issue.exists}
   - id: security-review
     uses: agent.execute
+    workspace: read-only
     actorRole: review
     needs: [authorization-probe]
     objective: 使用项目、Package、Global 与 Builtin 规则完成安全审查
@@ -29,12 +31,14 @@ steps:
     outputs: [security-review-result]
   - id: intake
     uses: connector.execute
+    workspace: read-only
     action: requirement.capture
     needs: [security-review]
     inputs: [requirement-source]
     outputs: [requirement-source]
   - id: explore
     uses: agent.execute
+    workspace: read-only
     needs: [intake]
     inputs: [requirement-source]
     objective: 探索代码并提取需求相关约束
@@ -44,6 +48,7 @@ steps:
     outputs: [exploration-report]
   - id: clarify
     uses: agent.execute
+    workspace: read-only
     needs: [explore]
     inputs: [exploration-report]
     objective: 澄清需求并生成可验收规格
@@ -54,6 +59,7 @@ steps:
     approval: required
   - id: design
     uses: agent.execute
+    workspace: read-only
     needs: [clarify]
     inputs: [specification]
     objective: 形成可实施的技术方案
@@ -64,6 +70,7 @@ steps:
     approval: required
   - id: plan
     uses: agent.execute
+    workspace: read-only
     needs: [clarify, design]
     objective: 将设计拆分为可验证任务
     skills:
@@ -77,6 +84,7 @@ steps:
         required: false
   - id: write-tests
     uses: agent.execute
+    workspace: isolated-worktree
     needs: [plan]
     inputs: [tasks]
     objective: 根据当前任务先编写能够因缺少功能而失败的测试
@@ -86,6 +94,7 @@ steps:
     outputs: [red-test-result]
   - id: verify-red
     uses: command.execute
+    workspace: isolated-worktree
     action: quality.test
     expectedOutcome: test-failure
     needs: [write-tests]
@@ -93,6 +102,7 @@ steps:
     outputs: [red-evidence]
   - id: implement
     uses: agent.execute
+    workspace: isolated-worktree
     actorRole: implementation
     needs: [verify-red]
     inputs: [tasks]
@@ -103,6 +113,7 @@ steps:
     outputs: [implementation-result]
   - id: verify-green
     uses: command.execute
+    workspace: isolated-worktree
     action: quality.test
     expectedOutcome: success
     needs: [implement]
@@ -110,12 +121,14 @@ steps:
     outputs: [tdd-evidence]
   - id: review-fix
     uses: control.loop
+    workspace: isolated-worktree
     needs: [verify-green]
     until: ${artifacts.review-result.approved}
     maxIterations: 5
     steps:
       - id: review
         uses: agent.execute
+        workspace: isolated-worktree
         actorRole: review
         skills:
           - ref: builtin://skills/code-review
@@ -123,6 +136,7 @@ steps:
         outputs: [review-result]
       - id: fix
         uses: agent.execute
+        workspace: isolated-worktree
         actorRole: fix
         when: ${artifacts.review-result.approved == false}
         skills:
@@ -130,32 +144,38 @@ steps:
             required: true
       - id: verify
         uses: command.execute
+        workspace: isolated-worktree
         action: quality.verify
   - id: commit
     uses: connector.execute
+    workspace: isolated-worktree
     action: git.commit
     needs: [review-fix]
     approval: required
   - id: update-issue
     uses: connector.execute
+    workspace: read-only
     action: issue.update
     needs: [commit]
     inputs: [implementation-result]
     when: ${bindings.issue.exists}
   - id: update-wiki
     uses: connector.execute
+    workspace: read-only
     action: knowledge.publish
     needs: [update-issue]
     inputs: [implementation-result]
     when: ${bindings.knowledge.exists}
   - id: close-issue
     uses: connector.execute
+    workspace: read-only
     action: issue.close
     needs: [update-wiki]
     when: ${bindings.issue.exists}
     approval: required
   - id: close
     uses: control.close
+    workspace: read-only
     needs: [close-issue]
 gates:
   - id: test

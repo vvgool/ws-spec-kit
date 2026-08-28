@@ -343,15 +343,16 @@ async function resolveSkillWithContext(binding: WorkflowSkillBinding, context: R
   };
 }
 
-export async function revalidateGlobalSkillLock(input: {
+export async function revalidateSkillLock(input: {
   lock: unknown;
   provider: SkillProvider;
   projectRoot: string;
   home: string;
+  package: WorkflowPackage;
   additionalGlobalRoots?: import("./types.js").AdditionalGlobalRoot[];
 }): Promise<void> {
   const lock = parseSkillLock(input.lock);
-  for (const entry of lock.skills.filter(({ source }) => source === "global")) {
+  for (const entry of lock.skills) {
     await resolveSkillWithContext({
       ref: entry.requested,
       required: entry.required,
@@ -360,6 +361,7 @@ export async function revalidateGlobalSkillLock(input: {
       provider: input.provider,
       projectRoot: input.projectRoot,
       home: input.home,
+      package: input.package,
       stepStatus: "started",
       lock,
       ...(input.additionalGlobalRoots === undefined ? {} : { additionalGlobalRoots: input.additionalGlobalRoots }),

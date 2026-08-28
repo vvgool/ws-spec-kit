@@ -277,15 +277,15 @@ async function verifyDirectoryLineage(
   }
 }
 
-async function ensureArtifactDirectory(worktree: string, workItemId: string, artifactType: string): Promise<ArtifactDirectory> {
-  const root = await realpath(worktree);
+async function ensureArtifactDirectory(rootPath: string, parts: readonly string[]): Promise<ArtifactDirectory> {
+  const root = await realpath(rootPath);
   const rootIdentity = await lstat(root, { bigint: true });
   if (!rootIdentity.isDirectory() || rootIdentity.isSymbolicLink()) {
     return failure("WSSPEC_ARTIFACT_CONFLICT", "Artifact 存储根目录不可验证，拒绝写入。");
   }
   const lineage: DirectoryIdentity[] = [{ path: root, identity: rootIdentity, requireArtifactSafety: false }];
   let current = root;
-  for (const part of [".wsspec", "work-items", workItemId, "artifacts", artifactType]) {
+  for (const part of parts) {
     current = path.join(current, part);
     let target: BigIntStats;
     try {
@@ -523,6 +523,10 @@ export async function createApplicationArtifact(
 ): Promise<ArtifactReference> {
   const request = validate<ArtifactCreateInput>("builtin.application-artifact-create-input.v1", input);
   const state = await loadApplicationState(request.root, request.workItemId);
+  const artifactRoot = state.item.execution.materialized === false ? state.authorityRoot : state.worktree;
+  const artifactDirectoryParts = state.item.execution.materialized === false
+    ? ["artifacts", request.artifactType]
+    : [".wsspec", "work-items", request.workItemId, "artifacts", request.artifactType];
   const preflight = activeWorkPackage(state.projection, request, dependencies.now());
   const preflightOutput = requiredArtifactOutput(preflight.workPackage, request);
   const source = await readStableDraft(
@@ -586,7 +590,7 @@ export async function createApplicationArtifact(
           attemptId: request.attemptId,
           body,
         });
-        const directory = await ensureArtifactDirectory(state.worktree, request.workItemId, request.artifactType);
+        const directory = await ensureArtifactDirectory(artifactRoot, artifactDirectoryParts);
         await dependencies.artifactAuthoring?.afterArtifactDirectoryPrepared?.();
         const filename = path.join(directory.path, `${document.reference.contentHash.slice("sha256:".length)}.md`);
         const written = await writeArtifactNoClobber(

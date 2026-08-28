@@ -84,6 +84,22 @@ async function artifactPaths(root: string): Promise<string[]> {
   return result.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
 }
 
+async function authorityArtifactPaths(root: string): Promise<string[]> {
+  const result: string[] = [];
+  const walk = async (directory: string, relative: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
+    for (const entry of entries) {
+      const childRelative = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) await walk(path.join(directory, entry.name), childRelative);
+      else result.push(childRelative);
+    }
+  };
+  try { await walk(path.join(root, "artifacts"), "artifacts"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return result;
+}
+
 export async function computeWorkspaceSnapshot(cwd: string): Promise<TreeEntry[]> {
   const root = await repositoryRoot(cwd);
   const paths = (await listedPaths(root)).filter((candidate) => !artifactPath(candidate)
@@ -96,8 +112,10 @@ export async function computeWorkspaceTreeDigest(cwd: string): Promise<string> {
   return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
 }
 
-export async function computeArtifactTreeDigest(cwd: string): Promise<string> {
-  const root = await repositoryRoot(cwd);
-  const entries = await snapshotPaths(root, await artifactPaths(root));
+export async function computeArtifactTreeDigest(cwd: string, artifactRoot?: string): Promise<string> {
+  const root = artifactRoot ?? await repositoryRoot(cwd);
+  const entries = artifactRoot === undefined
+    ? await snapshotPaths(root, await artifactPaths(root))
+    : await snapshotPaths(root, await authorityArtifactPaths(root));
   return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
 }

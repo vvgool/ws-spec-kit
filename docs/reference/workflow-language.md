@@ -6,6 +6,8 @@ Workflow Language v1 描述可审计的交付步骤。它不执行任意脚本�
 
 每个 Workflow Package 包含 `manifest.yaml`、`workflow.yaml`、声明的 Profile 文件，以及可选的 `skills/`、`schemas/`、`templates/`。引用可为 `builtin://workflows/<id>` 或 `project://workflows/<id>`；`builtin://workflows/feature-delivery` 与 `builtin://workflows/documentation-delivery` 是当前两个内置 Package。
 
+每个 Step 必须显式声明 `workspace`：`read-only` 表示仅读取调用方当前 checkout，`isolated-worktree` 表示首次执行该写入型 Step 时按需物化并复用隔离 Worktree。系统不会根据 Step 名称、Executor 或 Agent 意图推断模式，也不会把 `read-only` 静默升级为隔离 Worktree。
+
 ```yaml contract=builtin-documentation-manifest
 version: 1
 id: documentation-delivery
@@ -39,10 +41,12 @@ steps:
   - id: intake
     uses: connector.execute
     action: requirement.capture
+    workspace: read-only
     inputs: [requirement-source]
     outputs: [requirement-source]
   - id: explore
     uses: agent.execute
+    workspace: read-only
     needs: [intake]
     inputs: [requirement-source]
     skills:
@@ -51,6 +55,7 @@ steps:
     outputs: [documentation-context]
   - id: clarify
     uses: agent.execute
+    workspace: read-only
     needs: [explore]
     inputs: [documentation-context]
     skills:
@@ -59,6 +64,7 @@ steps:
     outputs: [specification]
   - id: plan
     uses: agent.execute
+    workspace: read-only
     needs: [clarify]
     inputs: [specification]
     skills:
@@ -67,6 +73,7 @@ steps:
     outputs: [tasks]
   - id: edit-document
     uses: agent.execute
+    workspace: isolated-worktree
     actorRole: implementation
     needs: [plan]
     inputs: [tasks]
@@ -77,11 +84,13 @@ steps:
   - id: verify-document
     uses: command.execute
     action: quality.docs.integrity
+    workspace: isolated-worktree
     needs: [edit-document]
     inputs: [documentation-result]
     outputs: [documentation-evidence]
   - id: review-fix
     uses: control.loop
+    workspace: isolated-worktree
     needs: [verify-document]
     inputs: [documentation-evidence]
     until: ${artifacts.review-result.approved}
@@ -89,6 +98,7 @@ steps:
     steps:
       - id: review
         uses: agent.execute
+        workspace: isolated-worktree
         actorRole: review
         skills:
           - ref: builtin://skills/documentation-review
@@ -96,6 +106,7 @@ steps:
         outputs: [review-result]
       - id: fix
         uses: agent.execute
+        workspace: isolated-worktree
         actorRole: fix
         when: ${artifacts.review-result.approved == false}
         skills:
@@ -104,31 +115,37 @@ steps:
       - id: verify
         uses: command.execute
         action: quality.docs.integrity
+        workspace: isolated-worktree
   - id: commit
     uses: connector.execute
     action: git.commit
+    workspace: isolated-worktree
     needs: [review-fix]
     approval: required
   - id: update-issue
     uses: connector.execute
     action: issue.update
+    workspace: read-only
     needs: [commit]
     inputs: [documentation-result]
     when: ${bindings.issue.exists}
   - id: update-wiki
     uses: connector.execute
     action: knowledge.publish
+    workspace: read-only
     needs: [update-issue]
     inputs: [documentation-result]
     when: ${bindings.knowledge.exists}
   - id: close-issue
     uses: connector.execute
     action: issue.close
+    workspace: read-only
     needs: [update-wiki]
     when: ${bindings.issue.exists}
     approval: required
   - id: close
     uses: control.close
+    workspace: read-only
     needs: [close-issue]
 gates:
   - id: docs.integrity

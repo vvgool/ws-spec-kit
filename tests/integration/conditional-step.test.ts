@@ -20,8 +20,7 @@ test("条件为 false 时原子写入 step.skipped 并可从事件回放", async
   const app = createApplication({ provider: "codex", home: os.homedir(), terminal: { isTTY: true }, now: () => new Date("2026-08-18T00:00:00.000Z") });
   const started = await app.start({ root, source: { type: "prompt", text: "条件跳过" }, profile: "standard" });
   const initial = await readControlPlane(root, started.workItemId);
-  const worktree = path.join(root, JSON.parse(await readFile(path.join(path.dirname(initial.controlPlane), "locator.json"), "utf8")).worktree as string);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = path.join(path.dirname(initial.controlPlane), "authority");
   const applicationPath = path.join(itemRoot, "snapshot", "application.json");
   const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as { profiles: { standard: { steps: Array<{ id: string; when?: string }> } } };
   snapshot.profiles.standard.steps.find(({ id }) => id === "intake")!.when = "false";
@@ -58,8 +57,7 @@ test("Source 捕获与投影失效事件恢复后条件根 Step 仍在 acquire �
   const app = createApplication({ provider: "codex", home: os.homedir(), terminal: { isTTY: true }, now: () => new Date("2026-08-18T00:00:00.000Z") });
   const started = await app.start({ root, source: { type: "prompt", text: "零事件条件恢复" }, profile: "standard" });
   const initial = await readControlPlane(root, started.workItemId);
-  const worktree = path.join(root, JSON.parse(await readFile(path.join(path.dirname(initial.controlPlane), "locator.json"), "utf8")).worktree as string);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = path.join(path.dirname(initial.controlPlane), "authority");
   const applicationPath = path.join(itemRoot, "snapshot", "application.json");
   const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as { profiles: { standard: { steps: Array<{ id: string; when?: string }> } } };
   snapshot.profiles.standard.steps.find(({ id }) => id === "intake")!.when = "false";

@@ -29,7 +29,7 @@ async function packageFixture(projectRoot: string, id = "fixture"): Promise<stri
   const directory = path.join(projectRoot, ".wsspec", "workflows", id);
   await mkdir(path.join(directory, "skills", "review", "references"), { recursive: true });
   await writeFile(path.join(directory, "manifest.yaml"), `version: 1\nid: ${id}\nentry: workflow.yaml\nprofiles: []\nskills: [review]\n`);
-  await writeFile(path.join(directory, "workflow.yaml"), `version: 1\nworkflow: { id: ${id}, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\n`);
+  await writeFile(path.join(directory, "workflow.yaml"), `version: 1\nworkflow: { id: ${id}, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    workspace: read-only\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\n`);
   await writeFile(path.join(directory, "skills", "review", "SKILL.md"), "# Review\n");
   await writeFile(path.join(directory, "skills", "review", "references", "policy.md"), "policy\n");
   return directory;

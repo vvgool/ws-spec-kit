@@ -318,6 +318,9 @@ test("Governed 后续 Review 不能由上一轮 Fix Actor 执行", async () => {
 test("失败 Attempt 的敏感实际改动与 Retry 状态原子升档，并在无新 diff 的重试和恢复后保持 Governed", async () => {
   const fixture = await controlRuntimeFixture();
   const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "验证失败 Attempt 风险" }, profile: "quick" });
+  await rewriteSelectedSnapshot(fixture, started.workItemId, (profile) => {
+    profile.steps.find(({ id }) => id === "explore")!.workspace = "isolated-worktree";
+  });
   const intake = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "intake" }));
   const explore = requireExecute(await submitPackage(fixture, intake));
   const worktree = await worktreeFor(fixture.root, started.workItemId);

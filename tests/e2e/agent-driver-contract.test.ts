@@ -538,7 +538,7 @@ async function executeArtifactOperation(
   const workPackage = requiredWorkPackage(values.workPackage, "artifact Work Package");
   const projection = await readControlPlane(root, workPackage.workItemId);
   const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
-  const worktree = path.join(root, locator.worktree);
+  const executionRoot = workPackage.workspace.materialized ? path.join(root, locator.worktree) : root;
   const runs: CliRun[] = [];
   for (const candidate of source) {
     assert.ok(candidate !== null && typeof candidate === "object" && !Array.isArray(candidate), `${rule.item} 必须是对象`);
@@ -553,10 +553,10 @@ async function executeArtifactOperation(
     const artifactType = requiredString(values.artifactType, "artifactType binding");
     const outputId = requiredString(values.outputId, "outputId binding");
     const contentFile = requiredString(values.contentFile, "contentFile binding");
-    await mkdir(path.dirname(path.join(worktree, contentFile)), { recursive: true });
-    await writeFile(path.join(worktree, contentFile), artifactBody(artifactType), "utf8");
+    await mkdir(path.dirname(path.join(executionRoot, contentFile)), { recursive: true });
+    await writeFile(path.join(executionRoot, contentFile), artifactBody(artifactType), "utf8");
     const argv = renderArgv(operation, values);
-    const run = await runCli(worktree, home, argv.slice(1), environment);
+    const run = await runCli(executionRoot, home, argv.slice(1), environment);
     assertPassed(run, `${workPackage.stepId}/${outputId}: artifact create`);
     capture(operation.capture, run.value, values);
     collected.push(valueAt(run.value, rule.collect.value));
@@ -668,12 +668,13 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
             }
             if (state === "submit") {
               const workPackage = requiredWorkPackage(values.workPackage, `${client}/${kind}: submit Work Package`);
-              const resultName = `driver-result-${submitCount + 1}.json`;
+              const resultName = `.acceptance/driver-result-${submitCount + 1}.json`;
               const artifactBinding = operation.resultBindings?.artifacts;
               assert.equal(artifactBinding, "artifactRefs", `${client}/${kind}: submit artifact binding`);
               const artifactRefs = values[artifactBinding];
               assert.ok(Array.isArray(artifactRefs), `${client}/${kind}: artifactRefs 必须由状态合同累积`);
               const result = submissionFor(workPackage, artifactRefs as ArtifactReference[]);
+              await mkdir(path.dirname(path.join(root, resultName)), { recursive: true });
               await writeFile(path.join(root, resultName), `${JSON.stringify(result, null, 2)}\n`, "utf8");
               values.resultPath = resultName;
             }

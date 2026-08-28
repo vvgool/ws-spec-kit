@@ -84,7 +84,9 @@ test("compiles the formal Step Manifest with registry-owned security classes and
   assert.equal(compiled.id, "feature-delivery");
   assert.equal(compiled.profile.id, "standard");
   assert.equal(compiled.steps.find(({ id }) => id === "intake")?.securityClass, "external-read");
+  assert.equal(compiled.steps.find(({ id }) => id === "explore")?.workspace, "read-only");
   assert.equal(compiled.steps.find(({ id }) => id === "verify-red")?.securityClass, "local-write");
+  assert.equal(compiled.steps.find(({ id }) => id === "verify-red")?.workspace, "isolated-worktree");
   assert.equal(compiled.steps.find(({ id }) => id === "commit")?.securityClass, "local-write");
   assert.equal(compiled.steps.find(({ id }) => id === "update-wiki")?.securityClass, "external-write");
   assert.equal(compiled.steps.find(({ id }) => id === "close")?.securityClass, "control");
@@ -114,7 +116,7 @@ test("Quick skips only independent design while keeping a compact plan consumed 
 
 test("rejects duplicate Step IDs including nested control Steps", async () => {
   const { pkg, profile } = await fixture();
-  step(pkg, "review-fix").steps?.push({ id: "plan", uses: "agent.execute" });
+  step(pkg, "review-fix").steps?.push({ id: "plan", uses: "agent.execute", workspace: "read-only" });
 
   expectCompileError(() => compileWorkflow(pkg, profile), "WSSPEC_COMPILE_DUPLICATE_STEP");
 });
@@ -134,9 +136,10 @@ test("rejects nested control.loop before completed Submit can bypass its until c
   step(pkg, "review-fix").steps?.push({
     id: "nested-review-fix",
     uses: "control.loop",
+    workspace: "isolated-worktree",
     until: "false",
     maxIterations: 2,
-    steps: [{ id: "nested-review", uses: "agent.execute" }],
+    steps: [{ id: "nested-review", uses: "agent.execute", workspace: "read-only" }],
   });
 
   assert.throws(

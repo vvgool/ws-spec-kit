@@ -4,11 +4,12 @@ import { parseExpression } from "../engine/expressions/parser.js";
 import type { ArtifactReference, ResolvedSkillDescriptor } from "../protocol/work-package.js";
 import { parseSkillLock } from "../registry/skills/lock.js";
 import type { SkillLock, SkillProvider } from "../registry/skills/types.js";
-import type { ProfileAudit, ProfilePublishing, WorkflowActorRole, WorkflowPackageLock, WorkflowRetry } from "../workflow-package/types.js";
+import type { ProfileAudit, ProfilePublishing, WorkflowActorRole, WorkflowPackageLock, WorkflowRetry, WorkspaceMode } from "../workflow-package/types.js";
 
 export interface SnapshotStep {
   id: string;
   uses: string;
+  workspace?: WorkspaceMode;
   actorRole?: WorkflowActorRole;
   securityClass: SecurityClass;
   needs: string[];
@@ -163,12 +164,13 @@ function parseArtifactDeclaration(value: unknown, label: string): { outputId: st
 
 function parseSnapshotStep(value: unknown, label: string): SnapshotStep {
   const source = record(value, label, [
-    "id", "uses", "actorRole", "securityClass", "needs", "enabled", "skills", "inputs", "outputs", "gates", "approval",
+    "id", "uses", "workspace", "actorRole", "securityClass", "needs", "enabled", "skills", "inputs", "outputs", "gates", "approval",
     "authorizationRequired", "artifactLevel", "objective", "expectedOutcome", "when", "action", "until", "retry",
     "maxIterations", "independentReviewActor", "steps",
   ]);
   const securityClasses: SecurityClass[] = ["agent", "local-read", "local-write", "external-read", "external-write", "control"];
   if (!securityClasses.includes(source.securityClass as SecurityClass)) invalid(`${label}.securityClass`);
+  if (source.workspace !== undefined && source.workspace !== "read-only" && source.workspace !== "isolated-worktree") invalid(`${label}.workspace`);
   if (source.actorRole !== undefined && source.actorRole !== "implementation" && source.actorRole !== "review" && source.actorRole !== "fix") {
     invalid(`${label}.actorRole`);
   }
@@ -181,6 +183,7 @@ function parseSnapshotStep(value: unknown, label: string): SnapshotStep {
   return {
     id: text(source.id, `${label}.id`),
     uses: text(source.uses, `${label}.uses`),
+    ...(source.workspace === undefined ? {} : { workspace: source.workspace }),
     ...(source.actorRole === undefined ? {} : { actorRole: source.actorRole as WorkflowActorRole }),
     securityClass: source.securityClass as SecurityClass,
     needs: strings(source.needs, `${label}.needs`),
@@ -354,6 +357,7 @@ export function snapshotStep(step: CompiledStep, skills: ReadonlyMap<string, Res
   return {
     id: step.id,
     uses: step.uses,
+    workspace: step.workspace,
     ...(step.actorRole === undefined ? {} : { actorRole: step.actorRole }),
     securityClass: step.securityClass,
     needs: [...step.needs],

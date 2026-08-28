@@ -8,11 +8,13 @@ inputs:
 steps:
   - id: intake
     uses: connector.execute
+    workspace: read-only
     action: requirement.capture
     inputs: [requirement-source]
     outputs: [requirement-source]
   - id: explore
     uses: agent.execute
+    workspace: read-only
     needs: [intake]
     inputs: [requirement-source]
     skills:
@@ -21,6 +23,7 @@ steps:
     outputs: [documentation-context]
   - id: clarify
     uses: agent.execute
+    workspace: read-only
     needs: [explore]
     inputs: [documentation-context]
     skills:
@@ -29,6 +32,7 @@ steps:
     outputs: [specification]
   - id: plan
     uses: agent.execute
+    workspace: read-only
     needs: [clarify]
     inputs: [specification]
     skills:
@@ -37,6 +41,7 @@ steps:
     outputs: [tasks]
   - id: edit-document
     uses: agent.execute
+    workspace: isolated-worktree
     actorRole: implementation
     needs: [plan]
     inputs: [tasks]
@@ -46,12 +51,14 @@ steps:
     outputs: [documentation-result]
   - id: verify-document
     uses: command.execute
+    workspace: isolated-worktree
     action: quality.docs.integrity
     needs: [edit-document]
     inputs: [documentation-result]
     outputs: [documentation-evidence]
   - id: review-fix
     uses: control.loop
+    workspace: isolated-worktree
     needs: [verify-document]
     inputs: [documentation-evidence]
     until: ${artifacts.review-result.approved}
@@ -59,6 +66,7 @@ steps:
     steps:
       - id: review
         uses: agent.execute
+        workspace: isolated-worktree
         actorRole: review
         skills:
           - ref: builtin://skills/documentation-review
@@ -66,6 +74,7 @@ steps:
         outputs: [review-result]
       - id: fix
         uses: agent.execute
+        workspace: isolated-worktree
         actorRole: fix
         when: ${artifacts.review-result.approved == false}
         skills:
@@ -73,32 +82,38 @@ steps:
             required: true
       - id: verify
         uses: command.execute
+        workspace: isolated-worktree
         action: quality.docs.integrity
   - id: commit
     uses: connector.execute
+    workspace: isolated-worktree
     action: git.commit
     needs: [review-fix]
     approval: required
   - id: update-issue
     uses: connector.execute
+    workspace: read-only
     action: issue.update
     needs: [commit]
     inputs: [documentation-result]
     when: ${bindings.issue.exists}
   - id: update-wiki
     uses: connector.execute
+    workspace: read-only
     action: knowledge.publish
     needs: [update-issue]
     inputs: [documentation-result]
     when: ${bindings.knowledge.exists}
   - id: close-issue
     uses: connector.execute
+    workspace: read-only
     action: issue.close
     needs: [update-wiki]
     when: ${bindings.issue.exists}
     approval: required
   - id: close
     uses: control.close
+    workspace: read-only
     needs: [close-issue]
 gates:
   - id: docs.integrity

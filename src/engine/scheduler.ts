@@ -8,7 +8,7 @@ import { assertExternalReceipts } from "../domain/external-receipt.js";
 import { assertExternalActionProjection } from "./external-effects/authorization.js";
 import { transitionStage, transitionWorkItem, type StageStatus, type WorkItemStatus } from "../domain/states.js";
 import { appendEventUnlocked, readEvents, withControlPlaneLock, type DomainEvent } from "../storage/events.js";
-import { readControlPlane, replayEvents, writeProjection, type RuntimeProjection } from "../storage/control-plane.js";
+import { readControlPlane, replayEvents, resolveWorkItemContextFromControlPlane, writeProjection, type RuntimeProjection } from "../storage/control-plane.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
@@ -176,14 +176,8 @@ export async function mutateControlPlane<T>(input: {
 }
 
 async function eventMetadata(projection: RuntimeProjection): Promise<{ workflowDigest: string; configDigest: string; baselineTreeDigest: string }> {
-  const locatorRoot = path.dirname(projection.controlPlane);
-  const locator = JSON.parse(await readFile(path.join(locatorRoot, "locator.json"), "utf8")) as { worktree: string };
-  const repositoryCache = JSON.parse(await readFile(path.resolve(projection.controlPlane, "../../../repository.json"), "utf8")) as { repositoryId: string; repositoryRoot: string };
-  if (repositoryCache.repositoryId !== projection.repositoryId) {
-    throw new ControlPlaneError("WSSPEC_REPOSITORY_ID_MISMATCH", "控制面仓库缓存身份不一致。");
-  }
-  const manifestPath = path.join(repositoryCache.repositoryRoot, locator.worktree, ".wsspec", "work-items", projection.workItemId, "work-item.yaml");
-  const manifest = parse(await readFile(manifestPath, "utf8")) as { execution: { workflowDigest: string; configDigest: string; baselineTreeDigest: string } };
+  const context = await resolveWorkItemContextFromControlPlane(projection.controlPlane, projection.workItemId);
+  const manifest = parse(await readFile(path.join(context.authorityRoot, "work-item.yaml"), "utf8")) as { execution: { workflowDigest: string; configDigest: string; baselineTreeDigest: string } };
   return manifest.execution;
 }
 

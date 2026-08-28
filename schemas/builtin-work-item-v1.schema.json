@@ -58,8 +58,7 @@
         "baselineRevision",
         "baselineTreeDigest",
         "workflowDigest",
-        "configDigest",
-        "schemaDigest"
+        "configDigest"
       ],
       "properties": {
         "worktree": {
@@ -69,6 +68,9 @@
         "branch": {
           "type": "string",
           "minLength": 1
+        },
+        "materialized": {
+          "type": "boolean"
         },
         "baselineRevision": {
           "type": "string",

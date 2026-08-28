@@ -12,8 +12,9 @@ import type { AgentAction, SubmitResult } from "../../../src/protocol/applicatio
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
 import { createDefaultExecutorRegistry } from "../../../src/registry/executors/registry.js";
 import { readControlPlane } from "../../../src/storage/control-plane.js";
+import { materializeWorkItem } from "../../../src/storage/work-items.js";
 import { defaultProjectConfig, initRepository } from "../../../src/storage/repository.js";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
 import { createGitRepository, git } from "./git.js";
 
 export interface ControlRuntimeFixture {
@@ -178,7 +179,12 @@ export async function authorArtifact(input: {
 
 export async function worktreeFor(root: string, workItemId: string): Promise<string> {
   const projection = await readControlPlane(root, workItemId);
-  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
+  const workItemRoot = path.dirname(projection.controlPlane);
+  const locator = JSON.parse(await readFile(path.join(workItemRoot, "locator.json"), "utf8")) as { worktree: string; materialized?: boolean };
+  if (locator.materialized === false) {
+    const item = parse(await readFile(path.join(workItemRoot, "authority", "work-item.yaml"), "utf8")) as import("../../../src/storage/work-items.js").WorkItem;
+    await materializeWorkItem({ root, item });
+  }
   return path.join(root, locator.worktree);
 }
 
@@ -188,7 +194,7 @@ export async function rewriteSelectedSnapshot(
   mutate: (profile: { order: string[]; steps: Array<Record<string, unknown>> }) => void,
 ): Promise<void> {
   const worktree = await worktreeFor(fixture.root, workItemId);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", workItemId);
+  const itemRoot = path.join(path.dirname((await readControlPlane(fixture.root, workItemId)).controlPlane), "authority");
   const applicationPath = path.join(itemRoot, "snapshot", "application.json");
   const manifestPath = path.join(itemRoot, "work-item.yaml");
   const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as {

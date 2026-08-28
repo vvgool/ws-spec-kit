@@ -429,6 +429,7 @@ test("ExternalBinding derives stable content and attempt-sensitive input digests
     workItemId: "WSS-BIND" as const,
     stepId: "update-issue",
     attemptId: "attempt-publish-1",
+    workspace: { mode: "read-only" as const, materialized: true },
     lease: { token: "lease", expiresAt: "2026-08-19T12:00:00.000Z" },
     objective: "publish",
     skills: [],
@@ -622,7 +623,8 @@ test("Close rejects drift in a sibling snapshot automatically bound by a nested 
     },
   };
 
-  assert.equal((await closeChecklistForWorktree(input)).allowed, true);
+  const initialDecision = await closeChecklistForWorktree(input);
+  assert.equal(initialDecision.allowed, true, JSON.stringify(initialDecision.missing));
   await writeFile(path.join(worktree, "packages/a/__snapshots__/feature.snap"), "snapshot 1\n", "utf8");
   assert.deepEqual((await closeChecklistForWorktree(input)).missing.filter(({ category }) => category === "artifact"), [
     { category: "artifact", id: "red-evidence" },
@@ -893,7 +895,8 @@ test("Close 重新读盘验证 required 和 approved Artifact", async () => {
     },
   };
 
-  assert.equal((await closeChecklistForWorktree(input)).allowed, true);
+  const initialDecision = await closeChecklistForWorktree(input);
+  assert.equal(initialDecision.allowed, true, JSON.stringify(initialDecision.missing));
 
   await writeFile(filename, "tampered\n", "utf8");
   assert.deepEqual((await closeChecklistForWorktree(input)).missing.filter(({ category }) => category === "artifact" || category === "approval"), [
@@ -1031,6 +1034,7 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
     workspaceTreeDigest: "sha256:workspace",
     configDigest: "sha256:config",
     worktree,
+    authorityRoot: state.authorityRoot,
     source,
   };
 
@@ -1051,7 +1055,8 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
   (current.contexts.intake as { result: { artifacts: unknown[] } }).result.artifacts = [source];
   input.source = source;
 
-  await writeFile(path.join(worktree, source.path), "{}\n", "utf8");
+  const sourcePath = source.path.replace(`.wsspec/work-items/${started.workItemId}/`, "");
+  await writeFile(path.join(state.authorityRoot, sourcePath), "{}\n", "utf8");
   assert.deepEqual((await closeChecklistForWorktree(input)).missing, [
     { category: "artifact", id: "requirement-source" },
   ]);

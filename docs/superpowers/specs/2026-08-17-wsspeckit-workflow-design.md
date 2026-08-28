@@ -15,7 +15,7 @@ WSSpecKit 是由当前 Agent 会话中的 Driver Skill 驱动、支持自由定�
 3. Workflow 描述交付流程，不调用或托管模型。
 4. Skill 指导 Agent 如何完成 Step，不能授予权限或绕过安全策略。
 5. 当前 Agent 会话负责驱动流程；首版不提供 daemon、模型 Provider 或无人值守 Agent Runner。
-6. 活动 Work Item 固定 Workflow、Skill、Schema、配置和来源快照，后续升级不能静默改变执行语义。
+6. 活动 Work Item 固定编译后的 Workflow、Skill 选择、配置和来源快照，并用 Lock 检测 Workflow 与 Skill 来源漂移；后续升级不能静默改变执行语义。
 7. Workflow Language 只提供有限控制结构，不演变为通用编程语言。
 8. Profile 只调整执行强度，不能关闭可信验证、外部写入授权等安全底线。
 9. 所有用户文档、CLI 文案、内置 Workflow 说明、模板和内置 Skill 正文使用中文；协议字段、命令、URI、Schema ID 和错误码使用英文标识。
@@ -222,8 +222,7 @@ skills:
     fallbackDigest: sha256:fallback
 ```
 
-- Builtin、Package 和 Project Skill 随 Work Item 完整快照。
-- Global Skill 首版记录来源和摘要，不复制其内容。
+- Builtin、Package、Project 和 Global Skill 均由 Skill Lock 固定选择结果与内容摘要，不随 Work Item 复制正文。
 - Global Skill 缺失时，尚未开始的 Step 可以使用已锁定 fallback。
 - Global Skill 内容变化时暂停执行，要求更新锁或选择 fallback。
 - 已完成 Step 不因 Skill 升级自动重跑，但保留其实际 Skill 摘要。
@@ -270,7 +269,7 @@ interface WorkflowTrustRecord {
 Package 内 Skill 必须使用 `package://skills/<name>` 引用。Resolver 将其解析为当前
 Package 的 `skills/<name>/SKILL.md`，拒绝绝对路径、父目录逃逸、跨 Package 符号链接和
 Manifest 未列出的 Skill。Workflow Lock 同时记录 Package 摘要和每个 Package Skill 摘要；
-活动 Work Item 使用完整快照，不受项目目录中的后续修改影响。
+活动 Work Item 使用编译后的 Application Snapshot 执行，并通过 Workflow Lock 与 Skill Lock 检测来源内容漂移，不复制 Package 或 Skill 正文。
 
 ## 9. Workflow Language v1
 
@@ -893,10 +892,10 @@ Provider Manifest 声明最低 CLI 版本、可执行文件名、允许的 argv 
 ├── work-item.yaml
 ├── source/
 ├── snapshot/
-│   ├── workflow/
-│   ├── skills/
-│   ├── schemas/
-│   └── config.yaml
+│   ├── application.json
+│   ├── config.yaml
+│   ├── workflow.lock.json
+│   └── skill.lock.json
 ├── artifacts/
 └── archive/
 ```
@@ -1007,7 +1006,7 @@ src/
 - Profile 升级会补回必需 Step，并失效受影响的审批、结果和 Evidence。
 - 项目自定义 Workflow 可以声明自己的 Profile overlay 和最低风险要求。
 - 项目 Workflow 可以绑定多个 Builtin、Package、Global 和 Project Skill。
-- Workflow Package 可以使用 `package://` 绑定并快照自身携带的 Skill。
+- Workflow Package 可以使用 `package://` 绑定自身携带的 Skill，并由 Workflow Lock 与 Skill Lock 固定其内容摘要。
 - Global Skill 可以显式回退到 Builtin Skill。
 - Global Skill 按宿主官方目录和显式附加目录解析；同名不同摘要必须阻塞，不得静默覆盖。
 - 必需 Skill 缺失、摘要变化或 Workflow Package 被篡改时 fail closed。

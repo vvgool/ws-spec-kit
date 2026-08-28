@@ -8,7 +8,7 @@ import { parse } from "yaml";
 import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { validate } from "../../src/schemas/index.js";
 import { initRepository } from "../../src/storage/repository.js";
-import { WorkItemError, createWorkItem } from "../../src/storage/work-items.js";
+import { WorkItemError, createWorkItem, materializeWorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
 const workflow = "version: 1\nactiveWorkflow: { ref: builtin://workflows/feature-delivery, version: 1 }\nprofile: standard\n";
@@ -44,7 +44,7 @@ async function prepareRepository(): Promise<string> {
   return root;
 }
 
-test("creates an isolated Work Item with immutable prompt source and snapshots", async () => {
+test("creates an isolated Work Item with immutable prompt source and configuration snapshot", async () => {
   const root = await prepareRepository();
   const workItem = await createWorkItem({
     root,
@@ -68,9 +68,7 @@ test("creates an isolated Work Item with immutable prompt source and snapshots",
   assert.match(source.contentDigest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(await git(root, "worktree", "list", "--porcelain").then((value) => value.includes(worktree)), true);
   assert.equal(await git(root, "show-ref", "--verify", "refs/heads/wspec/WSS-20260816-001").then(() => true), true);
-  await access(path.join(itemRoot, "snapshot", "workflow.yaml"));
   await access(path.join(itemRoot, "snapshot", "config.yaml"));
-  await access(path.join(itemRoot, "snapshot", "schemas", "builtin-workflow-selection-v1.schema.json"));
 
   const commonDir = await git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const locator = JSON.parse(
@@ -97,6 +95,30 @@ test("captures Markdown file content instead of retaining a mutable source path"
 
   assert.equal(snapshot.stableId, "requirement.md");
   assert.match(snapshot.body, /Retry payment/);
+});
+
+test("delayed Work Item creation keeps authority in common-dir until an isolated step materializes it", async () => {
+  const root = await prepareRepository();
+  const workItem = await createWorkItem({
+    root,
+    workItemId: "WSS-DELAYED-001",
+    title: "延迟物化",
+    source: { type: "prompt", content: "实现延迟物化" },
+    materialize: false,
+  });
+  const commonDir = await git(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
+  const authority = path.join(commonDir, "wsspec", "work-items", workItem.workItemId, "authority");
+  assert.equal(workItem.execution.materialized, false);
+  await assert.rejects(access(path.join(root, ".worktrees", workItem.workItemId)));
+  await access(path.join(authority, "work-item.yaml"));
+  await access(path.join(authority, "source"));
+
+  const materialized = await materializeWorkItem({ root, item: workItem });
+  assert.equal(materialized.execution.materialized, true);
+  await access(path.join(root, ".worktrees", workItem.workItemId, ".wsspec", "work-items", workItem.workItemId, "work-item.yaml"));
+  assert.equal(await git(root, "show-ref", "--verify", `refs/heads/${workItem.execution.branch}`).then(() => true), true);
+  const repeated = await materializeWorkItem({ root, item: materialized });
+  assert.equal(repeated.execution.materialized, true);
 });
 
 test("baseline digest is measured from the created worktree when the caller is dirty", async (t) => {

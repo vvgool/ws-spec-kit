@@ -42,6 +42,7 @@ export interface CloseChecklistInput {
 
 export interface WorktreeCloseChecklistInput extends CloseChecklistInput {
   worktree: string;
+  authorityRoot?: string;
   source: ApplicationSnapshot["source"];
 }
 
@@ -406,6 +407,7 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
     sourceAuthority ??= authenticateApplicationSourceAuthority({
       controlPlane: input.projection.controlPlane,
       worktree: input.worktree,
+      ...(input.authorityRoot === undefined ? {} : { authorityRoot: input.authorityRoot }),
       workItemId: input.projection.workItemId,
       repositoryId: input.projection.repositoryId,
     }).then(({ sourceReference }) => sourceReference, () => undefined);
@@ -446,7 +448,12 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
             || !sameValues(source, input.source) || !sameValues(source, authoritySource)) {
             throw new Error("Source Artifact reference mismatch");
           }
-          await verifySourceArtifact(input.worktree, input.projection.workItemId, source);
+          await verifySourceArtifact(
+            input.authorityRoot ?? input.worktree,
+            input.projection.workItemId,
+            source,
+            input.authorityRoot === undefined ? undefined : `.wsspec/work-items/${input.projection.workItemId}`,
+          );
           verified.push(reference);
         } catch {
           if (outputId !== undefined && requiredOutputIds.has(outputId)) invalidRequiredOutputIds.add(outputId);
@@ -454,14 +461,18 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
         continue;
       }
       try {
-        const actual = await verifyArtifact(path.join(input.worktree, reference.path), {
-          repositoryRoot: input.worktree,
+        const artifactRoot = input.authorityRoot ?? input.worktree;
+        const physicalPath = input.authorityRoot === undefined
+          ? reference.path
+          : reference.path.replace(`.wsspec/work-items/${input.projection.workItemId}/`, "");
+        const actual = await verifyArtifact(path.join(artifactRoot, physicalPath), {
+          repositoryRoot: artifactRoot,
           artifactType: reference.artifactType,
           workItemId: input.projection.workItemId,
           stageId: instance.stepInstanceId,
           attemptId: attempt.workPackage.attemptId,
         }, { allowUnregisteredType: true });
-        if (!sameArtifactReference(actual, reference)) throw new Error("Artifact reference mismatch");
+        if (!sameArtifactReference({ ...actual, path: reference.path }, reference)) throw new Error("Artifact reference mismatch");
         verified.push(reference);
       } catch {
         if (outputId !== undefined && requiredOutputIds.has(outputId)) invalidRequiredOutputIds.add(outputId);

@@ -444,8 +444,7 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
     workflowRef: "builtin://workflows/documentation-delivery",
     profile: "governed",
   });
-  const state = await loadApplicationState(fixture.root, started.workItemId);
-  const worktree = state.worktree;
+  let worktree = (await loadApplicationState(fixture.root, started.workItemId)).worktree;
   const gitIntents = new Map<string, Record<string, unknown>>();
   let action = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "fixture-author" });
   let safety = 0;
@@ -475,6 +474,8 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
       throw new Error(`delivery blocked: ${action.problems.map(({ code }) => code).join(",")}`);
     }
     const pkg = action.workPackage;
+    worktree = (await loadApplicationState(fixture.root, started.workItemId)).worktree;
+    const executionRoot = pkg.workspace.materialized ? worktree : fixture.root;
     const artifacts: ArtifactReference[] = [];
     const modifiedFiles: string[] = [];
     const evidence: Array<Record<string, unknown>> = [];
@@ -489,7 +490,7 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
         assert.ok(source);
         artifacts.push(source);
       } else {
-        artifacts.push(await writeArtifact(fixture, worktree, pkg, output.artifactType));
+        artifacts.push(await writeArtifact(fixture, executionRoot, pkg, output.artifactType));
       }
     }
     let intent: Record<string, unknown> | undefined;

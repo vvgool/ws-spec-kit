@@ -62,6 +62,8 @@ export type CaptureRequirementSource =
 export interface CaptureRequirementInput {
   repositoryRoot: string;
   artifactRoot: string;
+  artifactRootRepositoryRoot?: string;
+  artifactPathPrefix?: string;
   workItemId: string;
   source: CaptureRequirementSource;
 }
@@ -424,8 +426,14 @@ export async function captureRequirement(input: CaptureRequirementInput): Promis
   const encoded = canonicalize(artifact);
   if (encoded === undefined) return fail("WSSPEC_SOURCE_INVALID", "Source Artifact 无法规范化。");
   const reference = sourceArtifactReference(input.workItemId, artifact);
-  const relativeDirectory = path.posix.dirname(reference.path);
-  const directory = await ensureArtifactDirectory(input.repositoryRoot, input.artifactRoot, relativeDirectory);
+  const relativeDirectory = input.artifactPathPrefix === undefined
+    ? path.posix.dirname(reference.path)
+    : path.posix.dirname(reference.path).slice(input.artifactPathPrefix.length).replace(/^\//u, "");
+  const directory = await ensureArtifactDirectory(
+    input.artifactRootRepositoryRoot ?? input.repositoryRoot,
+    input.artifactRoot,
+    relativeDirectory,
+  );
   await writeNoClobber(path.join(directory, path.posix.basename(reference.path)), Buffer.from(`${encoded}\n`, "utf8"));
   return artifact;
 }
@@ -464,7 +472,7 @@ function strictArtifact(value: unknown): SourceArtifact {
   return rebuilt;
 }
 
-export async function verifySourceArtifact(artifactRoot: string, workItemId: string, reference: SourceArtifactReference): Promise<SourceArtifact> {
+export async function verifySourceArtifact(artifactRoot: string, workItemId: string, reference: SourceArtifactReference, artifactPathPrefix?: string): Promise<SourceArtifact> {
   const expectedPath = referencePath(workItemId, reference.artifactId);
   const match = artifactIdPattern.exec(reference.artifactId);
   if (reference.artifactType !== "requirement-source" || reference.schemaVersion !== 1 || reference.revision !== 1
@@ -473,7 +481,10 @@ export async function verifySourceArtifact(artifactRoot: string, workItemId: str
     return fail("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source Artifact 引用不合法。");
   }
   const root = (await authenticateArtifactRoot(undefined, artifactRoot)).root;
-  const filename = path.join(root, reference.path);
+  const relativePath = artifactPathPrefix === undefined
+    ? reference.path
+    : reference.path.slice(artifactPathPrefix.length).replace(/^\//u, "");
+  const filename = path.join(root, relativePath);
   const relative = path.relative(root, filename);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return fail("WSSPEC_SOURCE_PATH_INVALID", "Source Artifact 越出允许边界。");
   let canonicalFilename: string;

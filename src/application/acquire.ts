@@ -5,7 +5,7 @@ import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import type { AgentAction, AcquireInput, StepFailureCode, SubmitResult } from "../protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../protocol/work-package.js";
 import type { ExecutorRegistry } from "../registry/executors/registry.js";
-import { revalidateGlobalSkillLock } from "../registry/skills/resolver.js";
+import { revalidateSkillLock } from "../registry/skills/resolver.js";
 import { validate } from "../schemas/index.js";
 import { applicationCloseEvidenceKey, recoverControlPlane, type ApplicationCloseEvidence, type RuntimeClaim, type RuntimeProjection } from "../storage/control-plane.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
@@ -30,6 +30,8 @@ import {
   stepFailureProblem,
 } from "../engine/control/retry.js";
 import { rebindAdditionalGlobalRoots } from "../storage/project-config.js";
+import { loadWorkflowPackage } from "../workflow-package/loader.js";
+import { lockWorkflowPackage } from "../workflow-package/lock.js";
 import { assertImplementHasTrustedRed, fixedTestGateForState, tddRedEvidenceKey } from "../engine/verification.js";
 import type { TrustedEvidence } from "../engine/tdd/types.js";
 import type { ApplicationSnapshot, ApplicationState, SnapshotProfile, SnapshotStep } from "./state.js";
@@ -38,6 +40,7 @@ import type { ExternalActionExecutor, ExternalActionRejection } from "./external
 import { externalActionApprovalSummary, externalActionRejectionKey } from "./external-action.js";
 import { readEvents } from "../storage/events.js";
 import { workPackageIdentityDigest } from "../domain/work-package-identity.js";
+import { materializeWorkItem } from "../storage/work-items.js";
 
 export interface AcquireDependencies {
   now(): Date;
@@ -225,17 +228,7 @@ async function reacquireActiveClaim(input: {
   active: { context: ApplicationAttemptRecord; step: SnapshotStep };
 }): Promise<{ projection: RuntimeProjection; action: AgentAction; reacquired: NonNullable<AcquiredMutation["reacquired"]> }> {
   const { context, step } = input.active;
-  const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
-    root: input.root,
-    rootIds: input.state.snapshot.skillResolution.additionalGlobalRootIds,
-  });
-  await revalidateGlobalSkillLock({
-    lock: input.state.snapshot.skillLock,
-    provider: input.state.snapshot.skillResolution.provider,
-    projectRoot: input.state.worktree,
-    home: input.dependencies.home,
-    additionalGlobalRoots,
-  });
+  await revalidateExecutionSources(input.state, input.root, input.dependencies.home);
   const token = crypto.randomUUID();
   const expiresAt = new Date(input.now.getTime() + input.state.snapshot.leaseTtlSeconds * 1000).toISOString();
   const workPackage: WorkPackage = {
@@ -268,6 +261,30 @@ async function reacquireActiveClaim(input: {
       leaseDigest: sha256(token),
     },
   };
+}
+
+async function revalidateExecutionSources(state: ApplicationState, root: string, home: string): Promise<void> {
+  let pkg;
+  try {
+    pkg = await loadWorkflowPackage({ root: state.worktree, ref: state.snapshot.workflowRef });
+  } catch {
+    throw new ApplicationAcquireError("WSSPEC_WORKFLOW_SNAPSHOT_CHANGED", "Workflow Package 当前来源缺失或已变化。");
+  }
+  if (!isDeepStrictEqual(lockWorkflowPackage(pkg), state.snapshot.workflowPackageLock)) {
+    throw new ApplicationAcquireError("WSSPEC_WORKFLOW_SNAPSHOT_CHANGED", "Workflow Package 当前内容与已有 Lock 不一致。");
+  }
+  const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
+    root,
+    rootIds: state.snapshot.skillResolution.additionalGlobalRootIds,
+  });
+  await revalidateSkillLock({
+    lock: state.snapshot.skillLock,
+    provider: state.snapshot.skillResolution.provider,
+    projectRoot: state.worktree,
+    home,
+    package: pkg,
+    additionalGlobalRoots,
+  });
 }
 
 function completedResults(projection: RuntimeProjection, stageId: string): ApplicationStepResult[] {
@@ -495,6 +512,7 @@ function workPackageFor(input: {
   projection: RuntimeProjection;
   snapshot: ApplicationSnapshot;
   profile: SnapshotProfile;
+  materialized: boolean;
   stepInstanceId?: string;
   artifacts?: ArtifactReference[];
 }): WorkPackage {
@@ -512,6 +530,7 @@ function workPackageFor(input: {
     workItemId: input.workItemId as `WSS-${string}`,
     stepId: input.stepInstanceId ?? input.step.id,
     attemptId: input.attemptId,
+    workspace: { mode: input.step.workspace ?? "isolated-worktree", materialized: input.materialized },
     lease: { token: input.token, expiresAt: input.expiresAt },
     objective: input.step.objective ?? `${input.step.uses}${input.step.action === undefined ? "" : `/${input.step.action}`}`,
     ...(input.step.artifactLevel === undefined ? {} : { artifactLevel: input.step.artifactLevel }),
@@ -639,6 +658,7 @@ async function acquireExecutableStep(input: {
     snapshot: input.state.snapshot,
     profile: input.profile,
     stepInstanceId: input.stepInstanceId,
+    materialized: input.state.item.execution.materialized !== false,
     ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
   });
   const claim: RuntimeClaim = {
@@ -819,7 +839,8 @@ export async function acquireNextLocked(input: {
   root: string;
   dependencies: AcquireDependencies;
 }): Promise<{ projection: RuntimeProjection; action: AgentAction; skippedStepIds: string[]; closeDecision?: CloseDecision; reacquired?: NonNullable<AcquiredMutation["reacquired"]> }> {
-  const { state, actor, dependencies } = input;
+  let { state } = input;
+  const { actor, dependencies } = input;
   let projection = {
     ...input.projection,
     stages: { ...input.projection.stages },
@@ -833,6 +854,7 @@ export async function acquireNextLocked(input: {
   }
   const profile = selectedProfile(state.snapshot);
   const now = dependencies.now();
+  await revalidateExecutionSources(state, input.root, dependencies.home);
   const activeClaims = new Map<string, { context: ApplicationAttemptRecord; step: SnapshotStep }>();
   for (const [stepId, claim] of Object.entries(projection.claims)) {
     if (new Date(claim.expiresAt) > now) {
@@ -922,6 +944,10 @@ export async function acquireNextLocked(input: {
       skippedStepIds: promoted.skippedStepIds,
     };
   }
+  if (step.workspace !== "read-only" && state.item.execution.materialized === false) {
+    await materializeWorkItem({ root: input.root, item: state.item });
+    state = await loadApplicationState(input.root, state.item.workItemId);
+  }
   if (step.id === "implement") {
     const gate = await fixedTestGateForState(state);
     await assertImplementHasTrustedRed({
@@ -933,17 +959,6 @@ export async function acquireNextLocked(input: {
       requireWorkspaceMatch: true,
     });
   }
-  const additionalGlobalRoots = await rebindAdditionalGlobalRoots({
-    root: input.root,
-    rootIds: state.snapshot.skillResolution.additionalGlobalRootIds,
-  });
-  await revalidateGlobalSkillLock({
-    lock: state.snapshot.skillLock,
-    provider: state.snapshot.skillResolution.provider,
-    projectRoot: state.worktree,
-    home: dependencies.home,
-    additionalGlobalRoots,
-  });
   dependencies.executors.assertStep(step as unknown as CompiledStepShape);
   if (step.uses === "control.loop") {
     return acquireLoopStep({
@@ -961,7 +976,7 @@ export async function acquireNextLocked(input: {
   if (step.uses === "control.close") {
     const [workspaceTreeDigest, artifactTreeDigest] = await Promise.all([
       computeWorkspaceTreeDigest(state.worktree),
-      computeArtifactTreeDigest(state.worktree),
+      computeArtifactTreeDigest(state.worktree, state.item.execution.materialized === false ? state.authorityRoot : undefined),
     ]);
     const decision = await closeChecklistForWorktree({
       profile,
@@ -971,6 +986,7 @@ export async function acquireNextLocked(input: {
       workspaceTreeDigest,
       configDigest: state.item.execution.configDigest,
       worktree: state.worktree,
+      ...(state.item.execution.materialized === false ? { authorityRoot: state.authorityRoot } : {}),
       source: state.snapshot.source,
     });
     if (!decision.allowed) {

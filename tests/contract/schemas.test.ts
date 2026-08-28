@@ -51,7 +51,6 @@ const validValues: Record<string, Record<string, unknown>> = {
       baselineTreeDigest: "sha256:baseline",
       workflowDigest: "sha256:workflow",
       configDigest: "sha256:config",
-      schemaDigest: "sha256:schema",
     },
     source: {
       type: "local.file",
@@ -92,6 +91,7 @@ const validValues: Record<string, Record<string, unknown>> = {
   },
   "builtin.work-package.v1": {
     version: 1, workItemId: "WSS-20260816-001", stepId: "build", attemptId: "attempt-3",
+    workspace: { mode: "isolated-worktree", materialized: true },
     lease: { token: "opaque-token", expiresAt: "2026-08-16T18:00:00+08:00" },
     objective: "实现批准的计划",
     skills: [{ ref: "builtin://skills/tdd-implementation", version: "1.0.0", digest: "sha256:skill", description: "执行 TDD" }],

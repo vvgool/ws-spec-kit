@@ -1,6 +1,5 @@
-import { access, lstat, mkdir, open, readFile, readdir, realpath, rmdir, unlink } from "node:fs/promises";
+import { access, cp, lstat, mkdir, open, readFile, realpath, rm, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
@@ -14,7 +13,7 @@ import {
 } from "../registry/connectors/requirement-source.js";
 import { validate } from "../schemas/index.js";
 import { writeFileAtomic } from "./files.js";
-import { runGit } from "./git.js";
+import { runGit, runGitRaw } from "./git.js";
 import { portableProjectConfigText } from "./project-config.js";
 import { loadRepository, type RepositoryIdentity } from "./repository.js";
 
@@ -45,6 +44,7 @@ export interface CreateWorkItemInput {
   title: string;
   source: PromptSource | FileSource | ExternalSource;
   createdAt?: string;
+  materialize?: boolean;
   capturedSource?: {
     type: "prompt" | "file";
     origin: string;
@@ -69,11 +69,12 @@ export interface WorkItem {
   execution: {
     worktree: string;
     branch: string;
+    materialized?: boolean;
     baselineRevision: string;
     baselineTreeDigest: string;
     workflowDigest: string;
     configDigest: string;
-    schemaDigest: string;
+    schemaDigest?: string;
   };
   source: {
     type: NormalizedRequirementSource["type"];
@@ -96,8 +97,6 @@ interface ParsedConfig {
   git: { worktrees: { root: string; branchPrefix: string } };
 }
 
-const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const publicSchemas = path.join(packageRoot, "schemas");
 const workItemIdPattern = /^WSS-[A-Za-z0-9-]+$/;
 const creationOwner = Symbol("wsspec.creationOwner");
 type OwnedWorkItem = WorkItem & { [creationOwner]?: string };
@@ -119,6 +118,27 @@ async function branchExists(root: string, branch: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function baselineTreeDigestForRevision(root: string, revision: string): Promise<string> {
+  const raw = await runGitRaw(root, ["ls-tree", "-r", "-z", revision]);
+  const entries: Array<Record<string, string>> = [];
+  for (const record of raw.split("\0").filter(Boolean)) {
+    const separator = record.indexOf("\t");
+    if (separator < 0) throw new WorkItemError("WSSPEC_GIT_PROCESS_FAILED", "Baseline Git tree 条目不合法。");
+    const parts = record.slice(0, separator).split(" ");
+    const mode = parts[0];
+    const type = parts[1];
+    const object = parts[2];
+    const relativePath = record.slice(separator + 1);
+    if (!mode || !type || !object || !relativePath) throw new WorkItemError("WSSPEC_GIT_PROCESS_FAILED", "Baseline Git tree 条目不完整。");
+    const content = await runGitRaw(root, ["cat-file", "blob", object!]);
+    entries.push(mode === "120000"
+      ? { path: relativePath, type: "symlink", mode, target: content }
+      : { path: relativePath, type: "file", mode, digest: sha256(content) });
+  }
+  entries.sort((left, right) => Buffer.from(left.path ?? "").compare(Buffer.from(right.path ?? "")));
+  return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
 }
 
 function repositoryRelativePath(root: string, configuredPath: string): { absolute: string; relative: string } {
@@ -203,18 +223,6 @@ async function readProjectContracts(root: string, application?: CreateWorkItemIn
   };
 }
 
-async function snapshotSchemas(target: string): Promise<string> {
-  const names = (await readdir(publicSchemas)).filter((name) => name.endsWith(".schema.json")).sort();
-  const contents: string[] = [];
-  await mkdir(target, { recursive: true });
-  for (const name of names) {
-    const content = await readFile(path.join(publicSchemas, name), "utf8");
-    contents.push(`${name}\0${content}`);
-    await writeFileAtomic(path.join(target, name), content);
-  }
-  return sha256(contents.join("\0"));
-}
-
 async function writeFileExclusive(target: string, content: string): Promise<void> {
   await mkdir(path.dirname(target), { recursive: true });
   const handle = await open(target, "wx", 0o600);
@@ -281,24 +289,31 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     throw new WorkItemError("WSSPEC_WORK_ITEM_ID_CONFLICT", `Work Item 目标已存在：${input.workItemId}`);
   }
 
-  await mkdir(worktreeRoot.absolute, { recursive: true });
-  await assertRealPathContained(root, worktreeRoot.absolute);
+  const materialize = input.materialize ?? true;
+  if (materialize) {
+    await mkdir(worktreeRoot.absolute, { recursive: true });
+    await assertRealPathContained(root, worktreeRoot.absolute);
+  }
 
   const createdAt = input.createdAt ?? new Date().toISOString();
   const baselineRevision = await runGit(root, ["rev-parse", "HEAD"]);
   const ownerToken = crypto.randomUUID();
 
-  await runGit(root, ["worktree", "add", "-b", branch, worktree, baselineRevision]);
+  if (materialize) await runGit(root, ["worktree", "add", "-b", branch, worktree, baselineRevision]);
   try {
-    const baselineTreeDigest = await computeWorkspaceTreeDigest(worktree);
-    const itemRoot = path.join(worktree, ".wsspec", "work-items", input.workItemId);
+    const baselineTreeDigest = materialize ? await computeWorkspaceTreeDigest(worktree) : await baselineTreeDigestForRevision(root, baselineRevision);
+    const itemRoot = materialize
+      ? path.join(worktree, ".wsspec", "work-items", input.workItemId)
+      : path.join(identity.commonDir, "wsspec", "work-items", input.workItemId, "authority");
     const snapshotRoot = path.join(itemRoot, "snapshot");
-    await writeFileAtomic(path.join(snapshotRoot, "workflow.yaml"), workflowText);
     await writeFileAtomic(path.join(snapshotRoot, "config.yaml"), portableConfigText);
-    const schemaDigest = await snapshotSchemas(path.join(snapshotRoot, "schemas"));
     const source = await captureRequirement({
       repositoryRoot: root,
-      artifactRoot: worktree,
+      artifactRoot: materialize ? worktree : itemRoot,
+      ...(materialize ? {} : {
+        artifactRootRepositoryRoot: identity.commonDir,
+        artifactPathPrefix: `.wsspec/work-items/${input.workItemId}`,
+      }),
       workItemId: input.workItemId,
       source: requirementCaptureSource(input),
     });
@@ -315,11 +330,11 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
       execution: {
         worktree: worktreeRelative,
         branch,
+        materialized: materialize,
         baselineRevision,
         baselineTreeDigest,
         workflowDigest: sha256(workflowText),
         configDigest: sha256(portableConfigText),
-        schemaDigest,
       },
       source: {
         type: source.type,
@@ -341,7 +356,9 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
           workItemId: input.workItemId,
           worktree: worktreeRelative,
           ownerToken,
-          snapshot: `.wsspec/work-items/${input.workItemId}/snapshot`,
+          ...(materialize ? {} : { authorityRoot: "authority" }),
+          materialized: materialize,
+          snapshot: materialize ? `.wsspec/work-items/${input.workItemId}/snapshot` : "authority/snapshot",
         },
         null,
         2,
@@ -351,7 +368,9 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
     return workItem;
   } catch (error) {
     try {
-      await rollbackWorktreeResources({
+      if (!materialize) {
+        await rm(path.join(identity.commonDir, "wsspec", "work-items", input.workItemId), { recursive: true }).catch(() => undefined);
+      } else await rollbackWorktreeResources({
         identity,
         workItemId: input.workItemId,
         worktree: worktreeRelative,
@@ -362,6 +381,70 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
       });
     } catch {
       throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_FAILED", "Work Item 创建失败且无法安全回滚。");
+    }
+    throw error;
+  }
+}
+
+/** Materialize a delayed Work Item. The caller must hold its control-plane lock. */
+export async function materializeWorkItem(input: { root: string; item: WorkItem }): Promise<WorkItem> {
+  const identity = await loadRepository(input.root);
+  if (input.item.repositoryId !== identity.repositoryId) {
+    throw new WorkItemError("WSSPEC_REPOSITORY_ID_MISMATCH", "Work Item 与当前仓库身份不一致。");
+  }
+  if (input.item.execution.materialized !== false) return input.item;
+  const worktree = path.resolve(identity.repositoryRoot, input.item.execution.worktree);
+  await mkdir(path.dirname(worktree), { recursive: true });
+  await assertRealPathContained(identity.repositoryRoot, path.dirname(worktree));
+  if (await exists(worktree) || await branchExists(identity.repositoryRoot, input.item.execution.branch)) {
+    throw new WorkItemError("WSSPEC_WORK_ITEM_ID_CONFLICT", `Work Item 目标已存在：${input.item.workItemId}`);
+  }
+  const workItemRoot = path.join(identity.commonDir, "wsspec", "work-items", input.item.workItemId);
+  const manifestPath = path.join(workItemRoot, "authority", "work-item.yaml");
+  const locatorPath = path.join(workItemRoot, "locator.json");
+  const anchorPath = path.join(workItemRoot, "control-plane", "application-anchor.json");
+  const [originalManifest, originalLocator] = await Promise.all([
+    readFile(manifestPath, "utf8"),
+    readFile(locatorPath, "utf8"),
+  ]);
+  const locator = JSON.parse(originalLocator) as Record<string, unknown>;
+  if (locator.version !== 1 || locator.repositoryId !== identity.repositoryId || locator.workItemId !== input.item.workItemId
+    || locator.worktree !== input.item.execution.worktree || locator.ownerToken === undefined
+    || locator.authorityRoot !== "authority" || locator.materialized !== false) {
+    throw new WorkItemError("WSSPEC_WORK_ITEM_LOCATION_INVALID", "未物化 Work Item locator 与 authority 不一致。");
+  }
+  let originalAnchor: string | undefined;
+  try { originalAnchor = await readFile(anchorPath, "utf8"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  try {
+    await runGit(identity.repositoryRoot, ["worktree", "add", "-b", input.item.execution.branch, worktree, input.item.execution.baselineRevision]);
+    const updated: WorkItem = { ...input.item, execution: { ...input.item.execution, materialized: true } };
+    validate("builtin.work-item.v1", updated);
+    await writeFileAtomic(manifestPath, stringify(updated, { lineWidth: 0 }));
+    await writeFileAtomic(locatorPath, `${JSON.stringify({ ...locator, materialized: true }, null, 2)}\n`);
+    if (originalAnchor !== undefined) {
+      const anchor = JSON.parse(originalAnchor) as Record<string, unknown>;
+      await writeFileAtomic(anchorPath, `${JSON.stringify({ ...anchor, manifestDigest: sha256(stringify(updated, { lineWidth: 0 })) }, null, 2)}\n`);
+    }
+    const worktreeItemRoot = path.join(worktree, ".wsspec", "work-items", input.item.workItemId);
+    await mkdir(path.dirname(worktreeItemRoot), { recursive: true });
+    await cp(path.join(workItemRoot, "authority"), worktreeItemRoot, { recursive: true, force: false });
+    await writeFileAtomic(path.join(worktreeItemRoot, "work-item.yaml"), stringify(updated, { lineWidth: 0 }));
+    return updated;
+  } catch (error) {
+    const restored = await Promise.allSettled([
+      writeFileAtomic(manifestPath, originalManifest),
+      writeFileAtomic(locatorPath, originalLocator),
+      ...(originalAnchor === undefined ? [] : [writeFileAtomic(anchorPath, originalAnchor)]),
+    ]);
+    const worktreeRemoved = await exists(worktree)
+      ? await runGit(identity.repositoryRoot, ["worktree", "remove", "--force", worktree]).then(() => true, () => false)
+      : true;
+    const branchRemoved = worktreeRemoved && await branchExists(identity.repositoryRoot, input.item.execution.branch)
+      ? await runGit(identity.repositoryRoot, ["branch", "-D", "--", input.item.execution.branch]).then(() => true, () => false)
+      : worktreeRemoved;
+    if (restored.some(({ status }) => status === "rejected") || !worktreeRemoved || !branchRemoved) {
+      throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_FAILED", "Worktree 物化失败且无法安全回滚。");
     }
     throw error;
   }
@@ -461,6 +544,28 @@ export async function rollbackCreatedWorkItem(input: { root: string; item: WorkI
     throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_REFUSED", "回滚目标与当前仓库身份不一致。");
   }
   const ownerToken = creationOwnerForWorkItem(input.item);
+  if (input.item.execution.materialized === false) {
+    const workItemRoot = path.join(identity.commonDir, "wsspec", "work-items", input.item.workItemId);
+    const locatorPath = path.join(workItemRoot, "locator.json");
+    let locator: Record<string, unknown>;
+    try {
+      locator = JSON.parse(await readFile(locatorPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_REFUSED", "未物化 Work Item locator 不可验证。");
+    }
+    if (locator.repositoryId !== identity.repositoryId || locator.workItemId !== input.item.workItemId
+      || locator.ownerToken !== ownerToken || locator.materialized !== false) {
+      throw new WorkItemError("WSSPEC_WORK_ITEM_ROLLBACK_REFUSED", "未物化 Work Item locator 与本次创建身份不一致。");
+    }
+    await removeOwnedApplicationControlPlane({
+      workItemRoot,
+      repositoryId: identity.repositoryId,
+      workItemId: input.item.workItemId,
+      ownerToken,
+    });
+    await rm(workItemRoot, { recursive: true });
+    return;
+  }
   await rollbackWorktreeResources({
     identity,
     workItemId: input.item.workItemId,

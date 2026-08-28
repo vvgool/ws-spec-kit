@@ -4,12 +4,14 @@ import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } f
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 
 import { runWorkflowCommand } from "../../src/adapters/cli/workflow.js";
 import { createApplication } from "../../src/application/application.js";
 import { resolveProjectWorkflowContext } from "../../src/application/start.js";
 import type { WorkflowTrustSummary } from "../../src/workflow-package/types.js";
 import { readControlPlane } from "../../src/storage/control-plane.js";
+import { materializeWorkItem, type WorkItem } from "../../src/storage/work-items.js";
 import { loadWorkflowPackage } from "../../src/workflow-package/loader.js";
 import { createGitRepository, git } from "../integration/helpers/git.js";
 
@@ -128,7 +130,12 @@ async function decideTrust(current: CustomProject, summary: WorkflowTrustSummary
 
 async function worktreeFor(root: string, workItemId: string): Promise<string> {
   const projection = await readControlPlane(root, workItemId);
-  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
+  const workItemRoot = path.dirname(projection.controlPlane);
+  const locator = JSON.parse(await readFile(path.join(workItemRoot, "locator.json"), "utf8")) as { worktree: string; materialized?: boolean };
+  if (locator.materialized === false) {
+    const item = parse(await readFile(path.join(workItemRoot, "authority", "work-item.yaml"), "utf8")) as WorkItem;
+    await materializeWorkItem({ root, item });
+  }
   return path.join(root, locator.worktree);
 }
 
@@ -188,7 +195,7 @@ test("公开 CLI 串联 Workflow 自定义与四类 Skill Resolver，并记录 G
   assert.equal(selected?.ref, "builtin://skills/code-review");
 });
 
-test("活动 Work Item 固定 Workflow、Package 与 Project 快照，并在绑定 Step 使用锁定 Skill", async () => {
+test("活动 Work Item 固定编译合同与 Locks，并在绑定 Step 使用锁定 Skill", async () => {
   const current = await installCustomProject();
   const beforeSelection = await readFile(path.join(current.root, ".wsspec", "workflow.yaml"), "utf8");
   const nonInteractive = await cli(current.root, ["workflow", "use", current.workflowRef, "--provider", "codex"], current.home);
@@ -221,14 +228,19 @@ test("活动 Work Item 固定 Workflow、Package 与 Project 快照，并在绑�
   const worktree = await worktreeFor(current.root, started.workItemId);
   const snapshotRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot");
   const applicationPath = path.join(snapshotRoot, "application.json");
-  const workflowSnapshotPath = path.join(snapshotRoot, "workflow", "workflow.yaml");
-  const packageSkillSnapshotPath = path.join(snapshotRoot, "workflow", "skills", "security-review", "SKILL.md");
-  const projectSkillSnapshotPath = path.join(snapshotRoot, "skills", "project", "project-security-review", "SKILL.md");
-  const [applicationBefore, workflowBefore, packageSkillBefore, projectSkillBefore] = await Promise.all([
-    readFile(applicationPath, "utf8"),
-    readFile(workflowSnapshotPath, "utf8"),
-    readFile(packageSkillSnapshotPath, "utf8"),
-    readFile(projectSkillSnapshotPath, "utf8"),
+  const snapshotPaths = [
+    applicationPath,
+    path.join(snapshotRoot, "config.yaml"),
+    path.join(snapshotRoot, "skill.lock.json"),
+    path.join(snapshotRoot, "workflow.lock.json"),
+  ];
+  const snapshotBefore = await Promise.all(snapshotPaths.map((file) => readFile(file, "utf8")));
+  const applicationBefore = snapshotBefore[0]!;
+  assert.deepEqual((await readdir(snapshotRoot)).sort(), [
+    "application.json",
+    "config.yaml",
+    "skill.lock.json",
+    "workflow.lock.json",
   ]);
   const snapshot = JSON.parse(applicationBefore) as {
     workflowRef: string;
@@ -281,12 +293,7 @@ test("活动 Work Item 固定 Workflow、Package 与 Project 快照，并在绑�
     }
     assert.ok(acquired.workPackage.constraints.forbiddenActions.includes("unapproved-external-write"));
   }
-  assert.deepEqual(await Promise.all([
-    readFile(applicationPath, "utf8"),
-    readFile(workflowSnapshotPath, "utf8"),
-    readFile(packageSkillSnapshotPath, "utf8"),
-    readFile(projectSkillSnapshotPath, "utf8"),
-  ]), [applicationBefore, workflowBefore, packageSkillBefore, projectSkillBefore]);
+  assert.deepEqual(await Promise.all(snapshotPaths.map((file) => readFile(file, "utf8"))), snapshotBefore);
 });
 
 test("活动 Work Item 的 Global 主项漂移或消失都 fail closed，且不会静默改选 fallback", async () => {
@@ -323,6 +330,48 @@ test("活动 Work Item 的 Global 主项漂移或消失都 fail closed，且不�
   const global = lock.skills.find(({ requested }) => requested === "global://global-security-review");
   assert.equal(global?.selection, "primary");
   assert.equal(global?.selected.ref, "global://global-security-review");
+});
+
+test("活动 Work Item 的 Project Workflow 或 Skill 来源漂移时 fail closed", async (t) => {
+  for (const scenario of [
+    {
+      name: "Workflow",
+      mutate: async (worktree: string) => writeFile(
+        path.join(worktree, ".wsspec", "workflows", "custom-delivery", "workflow.yaml"),
+        "version: 1\nworkflow: { id: forged }\n",
+        "utf8",
+      ),
+      code: "WSSPEC_WORKFLOW_SNAPSHOT_CHANGED",
+    },
+    {
+      name: "Project Skill",
+      mutate: async (worktree: string) => writeFile(
+        path.join(worktree, ".wsspec", "skills", "project-security-review", "SKILL.md"),
+        "# 已漂移的 Project Skill\n",
+        "utf8",
+      ),
+      code: "WSSPEC_SKILL_LOCK_CHANGED",
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const current = await installCustomProject();
+      await decideTrust(current, await requestTrust(current), "trusted");
+      const app = application(current);
+      const started = await app.start({
+        root: current.root,
+        source: { type: "prompt", text: `${scenario.name} 来源漂移` },
+        workflowRef: current.workflowRef,
+        profile: "quick",
+      });
+      await scenario.mutate(await worktreeFor(current.root, started.workItemId));
+
+      await assert.rejects(
+        app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }),
+        (error: unknown) => error instanceof Error && "code" in error
+          && (error as Error & { code: string }).code === scenario.code,
+      );
+    });
+  }
 });
 
 test("Workflow 信任不能替代生产 Connector 的独立外部写入授权", async () => {

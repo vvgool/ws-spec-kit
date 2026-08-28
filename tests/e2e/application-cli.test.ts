@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,13 +46,19 @@ async function runCli(
   return startCli(cwd, args, home, entrypoint, environment).result;
 }
 
-async function waitForWorktree(root: string): Promise<{ workItemId: string; worktree: string }> {
+async function waitForWorkItem(root: string): Promise<{ workItemId: string; itemRoot: string }> {
   for (let attempt = 0; attempt < 5_000; attempt += 1) {
     const workItemId = (await readdir(root).catch(() => [])).find((candidate) => candidate.startsWith("WSS-"));
-    if (workItemId !== undefined) return { workItemId, worktree: path.join(root, workItemId) };
+    if (workItemId !== undefined) {
+      const itemRoot = path.join(root, workItemId);
+      try {
+        await access(path.join(itemRoot, "locator.json"));
+        return { workItemId, itemRoot };
+      } catch {}
+    }
     await new Promise<void>((resolve) => setTimeout(resolve, 1));
   }
-  throw new Error("timed out waiting for injected CLI worktree");
+  throw new Error("timed out waiting for injected CLI Work Item");
 }
 
 test("公开 CLI 只暴露 Application 命令并将旧命令拒绝为未知命令", async () => {
@@ -194,19 +200,19 @@ test("CLI 对 malformed result JSON 只输出固定 internal 错误且不泄露 
   assert.doesNotMatch(result.stdout, /cli-round4-secret|Unexpected token|not valid JSON/u);
 });
 
-test("CLI 对 Work Item 创建与 rollback 双失败只输出固定安全消息", async () => {
+test("CLI 对 delayed Start 与 rollback 双失败只输出固定安全消息", async () => {
   const root = await createGitRepository();
   const home = await mkdtemp(path.join(os.tmpdir(), "wspec-cli-home-"));
   const secret = `cli-rollback-secret-${crypto.randomUUID()}`;
-  const worktreesRoot = path.join(root, ".worktrees", secret);
+  const workItemsRoot = path.join(root, ".git", "wsspec", "work-items");
   await initRepository(root);
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
     ...defaultProjectConfig(),
     git: { worktrees: { enabled: true, root: `.worktrees/${secret}`, branchPrefix: "wspec/" } },
   }, null, 2)}\n`, "utf8");
   const running = startCli(root, ["start", "--prompt", "rollback fault injection"], home);
-  const { workItemId, worktree } = await waitForWorktree(worktreesRoot);
-  const configSnapshot = path.join(worktree, ".wsspec", "work-items", workItemId, "snapshot", "config.yaml");
+  const { itemRoot } = await waitForWorkItem(workItemsRoot);
+  const configSnapshot = path.join(itemRoot, "authority", "snapshot", "config.yaml");
   for (let attempt = 0; attempt < 5_000; attempt += 1) {
     try {
       await access(configSnapshot);
@@ -216,9 +222,14 @@ test("CLI 对 Work Item 创建与 rollback 双失败只输出固定安全消息"
       await new Promise<void>((resolve) => setTimeout(resolve, 1));
     }
   }
-  const movedWorktree = `${worktree}-moved`;
-  await rename(worktree, movedWorktree);
-  await writeFile(worktree, `credential=${secret}\n`, "utf8");
+  const locatorPath = path.join(itemRoot, "locator.json");
+  const locator = JSON.parse(await readFile(locatorPath, "utf8")) as Record<string, unknown>;
+  const replacementLocator = `${locatorPath}.${crypto.randomUUID()}.tmp`;
+  await writeFile(replacementLocator, `${JSON.stringify({ ...locator, ownerToken: secret })}\n`, "utf8");
+  await rename(replacementLocator, locatorPath);
+  const snapshotRoot = path.join(itemRoot, "authority", "snapshot");
+  await rename(snapshotRoot, `${snapshotRoot}-moved`);
+  await writeFile(snapshotRoot, `credential=${secret}\n`, "utf8");
 
   const result = await running.result;
 
@@ -226,9 +237,9 @@ test("CLI 对 Work Item 创建与 rollback 双失败只输出固定安全消息"
   assert.equal(result.stderr, "");
   assert.deepEqual(JSON.parse(result.stdout), {
     ok: false,
-    error: { code: "WSSPEC_WORK_ITEM_ROLLBACK_FAILED", message: "Work Item 创建失败且无法安全回滚。" },
+    error: { code: "WSSPEC_START_ROLLBACK_FAILED", message: "Start 失败且无法安全回滚新建 Work Item。" },
   });
-  assert.doesNotMatch(result.stdout, new RegExp(`${secret}|${worktreesRoot}|ENOTDIR|ENOENT|Git command failed|stack|details`, "u"));
+  assert.doesNotMatch(result.stdout, new RegExp(`${secret}|${workItemsRoot}|ENOTDIR|ENOENT|Git command failed|stack|details`, "u"));
 });
 
 test("CLI acquire 将当前 host 配置缺失报告为 Global root 未绑定", async () => {

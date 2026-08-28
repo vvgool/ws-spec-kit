@@ -10,7 +10,8 @@ import { transitionRuntime } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
 import { withControlPlaneLock } from "../../src/storage/events.js";
 import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
-import { stringify } from "yaml";
+import { parse, stringify } from "yaml";
+import { materializeWorkItem, type WorkItem } from "../../src/storage/work-items.js";
 import { createGitRepository, git } from "./helpers/git.js";
 
 async function prepare() {
@@ -28,7 +29,12 @@ async function prepare() {
   const app = createApplication({ provider: "codex", terminal: { isTTY: true }, now: () => new Date("2026-08-18T00:00:00.000Z") });
   const { workItemId } = await app.start({ root, source: { type: "prompt", text: "审批" }, profile: "standard" });
   const projection = await readControlPlane(root, workItemId);
-  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
+  const workItemRoot = path.dirname(projection.controlPlane);
+  const locator = JSON.parse(await readFile(path.join(workItemRoot, "locator.json"), "utf8")) as { worktree: string; materialized?: boolean };
+  if (locator.materialized === false) {
+    const item = parse(await readFile(path.join(workItemRoot, "authority", "work-item.yaml"), "utf8")) as WorkItem;
+    await materializeWorkItem({ root, item });
+  }
   const worktree = path.join(root, locator.worktree);
   for (const [to, key] of [["running", "run"], ["validating", "validate"]] as const) {
     await transitionRuntime({ cwd: root, workItemId, scope: "stage", stageId: "intake", to, idempotencyKey: key });

@@ -9,6 +9,7 @@ const workPackage = {
   workItemId: "WSS-20260817-001",
   stepId: "implement",
   attemptId: "attempt-01",
+  workspace: { mode: "isolated-worktree", materialized: true },
   lease: {
     token: "lease-token",
     expiresAt: "2026-08-17T12:00:00+08:00",

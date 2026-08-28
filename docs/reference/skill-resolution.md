@@ -60,6 +60,6 @@ skills:
 
 Skill Lock v1 固定 requested/resolved URI、source、provider、逻辑 root、摘要、候选集、required 标记与 primary/fallback 选择。`start` 写入 Work Item 时，配置快照只保留附加根 `id`，Application Snapshot 只保留 `additionalGlobalRootIds`；Skill Lock、事件和其他快照也不得持久化 HOME、本机绝对路径或 `path` 绑定。
 
-恢复或后续 `acquire` 会从当前宿主工作树的 `.wsspec/config.yaml` 按快照中的 `id` 重新绑定 `path`，再重算候选集和摘要。当前宿主缺少某个绑定时返回 `WSSPEC_GLOBAL_ROOT_NOT_CONFIGURED`；已选摘要或候选集漂移时返回 `WSSPEC_SKILL_LOCK_CHANGED`，不得静默选择新内容。无效 Lock 返回 `WSSPEC_SKILL_LOCK_INVALID`。
+恢复或后续 `acquire` 会从当前宿主 checkout 的 `.wsspec/config.yaml` 按快照中的 `id` 重新绑定 Global `path`，并从 Work Item worktree 重新解析 Builtin、Package 与 Project Skill，再重算候选集和摘要。当前宿主缺少某个绑定时返回 `WSSPEC_GLOBAL_ROOT_NOT_CONFIGURED`；任一已选来源、摘要或候选集漂移时返回 `WSSPEC_SKILL_LOCK_CHANGED`，不得静默选择新内容。无效 Lock 返回 `WSSPEC_SKILL_LOCK_INVALID`。
 
-Workflow Package 自身的 `workflow.lock` 还锁定 Package 文件和 `package://skills/<name>` 内容。它与 Skill Lock 共同保证新 Agent 会话读取的是同一份已批准的执行说明，而不是将旧公开协议转换到新格式。
+Workflow Package 自身的 `workflow.lock` 还锁定 Package 文件和 `package://skills/<name>` 内容。后续 `acquire` 从 Work Item worktree 重新加载 Package 并比对 Workflow Lock；来源缺失或漂移时返回 `WSSPEC_WORKFLOW_SNAPSHOT_CHANGED`。它与 Skill Lock 共同保证新 Agent 会话只在已批准的执行说明仍可验证时继续，而不是将旧公开协议转换到新格式。

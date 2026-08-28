@@ -6,7 +6,7 @@ import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import { verifyArtifact } from "../domain/artifacts.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
-import { readControlPlane, type RuntimeApproval } from "../storage/control-plane.js";
+import { readControlPlane, resolveWorkItemContext, type RuntimeApproval } from "../storage/control-plane.js";
 import { mutateControlPlane } from "./scheduler.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
@@ -62,11 +62,16 @@ export async function prepareArtifactApproval(input: {
   actor?: string;
   now?: Date;
 }): Promise<RuntimeApproval> {
-  const worktree = await worktreeFor(input.cwd, input.workItemId);
+  const context = await resolveWorkItemContext(input.cwd, input.workItemId);
+  const worktree = context.executionWorktree;
+  const artifactRoot = context.materialized ? worktree : context.authorityRoot;
+  const physicalArtifactPath = (referencePath: string): string => context.materialized
+    ? path.join(artifactRoot, referencePath)
+    : path.join(artifactRoot, referencePath.replace(`.wsspec/work-items/${input.workItemId}/`, ""));
   const artifacts = await Promise.all(input.artifacts.map(async (reference) => {
     if (reference.path === undefined) throw new ApprovalError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 缺少路径。`);
-    const verified = await verifyArtifact(path.join(worktree, reference.path), {
-      repositoryRoot: worktree,
+    const verified = await verifyArtifact(physicalArtifactPath(reference.path), {
+      repositoryRoot: artifactRoot,
       artifactType: reference.artifactType,
       workItemId: input.workItemId,
       stageId: input.stageId,
@@ -76,12 +81,12 @@ export async function prepareArtifactApproval(input: {
       || (reference.revision !== undefined && reference.revision !== verified.revision)) {
       throw new ApprovalError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 引用与文件不一致。`);
     }
-    return verified;
+    return { ...verified, path: reference.path };
   }));
   const sortedArtifacts = sortApprovalArtifacts(artifacts);
   const artifactContents = await Promise.all(sortedArtifacts.map(async (artifact) => ({
     artifact,
-    content: await readFile(path.join(worktree, artifact.path), "utf8"),
+    content: await readFile(physicalArtifactPath(artifact.path), "utf8"),
   })));
   const contentHash = approvalBindingDigest({ stageId: input.stageId, attemptId: input.attemptId, artifacts: sortedArtifacts });
   const artifactPath = sortedArtifacts[0]?.path;
@@ -105,10 +110,7 @@ export async function prepareArtifactApproval(input: {
 }
 
 async function worktreeFor(cwd: string, workItemId: string): Promise<string> {
-  const projection = await readControlPlane(cwd, workItemId);
-  const locator = JSON.parse(await readFile(path.join(path.dirname(projection.controlPlane), "locator.json"), "utf8")) as { worktree: string };
-  const cache = JSON.parse(await readFile(path.resolve(projection.controlPlane, "../../../repository.json"), "utf8")) as { repositoryRoot: string };
-  return path.join(cache.repositoryRoot, locator.worktree);
+  return (await resolveWorkItemContext(cwd, workItemId)).executionWorktree;
 }
 
 export async function requestArtifactApproval(input: { cwd: string; workItemId: string; stageId: string; attemptId: string; artifactPath: string; artifactType: string; actor?: string }): Promise<RuntimeApproval> {
@@ -161,7 +163,9 @@ function assertPendingApproval(
   return pending;
 }
 
-async function verifyApprovalArtifacts(worktree: string, workItemId: string, request: RuntimeApproval): Promise<void> {
+async function verifyApprovalArtifacts(cwd: string, workItemId: string, request: RuntimeApproval): Promise<void> {
+  const context = await resolveWorkItemContext(cwd, workItemId);
+  const artifactRoot = context.materialized ? context.executionWorktree : context.authorityRoot;
   const references = request.artifacts ?? (request.artifactPath === undefined ? [] : [{
     artifactType: path.basename(request.artifactPath, ".md"),
     schemaVersion: 1,
@@ -169,13 +173,19 @@ async function verifyApprovalArtifacts(worktree: string, workItemId: string, req
     contentHash: request.contentHash,
     revision: 1,
   }]);
-  const verifiedReferences = await Promise.all(references.map((reference) => verifyArtifact(path.join(worktree, reference.path), {
-    repositoryRoot: worktree,
-    artifactType: reference.artifactType,
-    workItemId,
-    stageId: request.stageId,
-    attemptId: request.attemptId,
-  })));
+  const verifiedReferences = await Promise.all(references.map(async (reference) => {
+    const physicalPath = context.materialized
+      ? reference.path
+      : reference.path.replace(`.wsspec/work-items/${workItemId}/`, "");
+    const verified = await verifyArtifact(path.join(artifactRoot, physicalPath), {
+      repositoryRoot: artifactRoot,
+      artifactType: reference.artifactType,
+      workItemId,
+      stageId: request.stageId,
+      attemptId: request.attemptId,
+    });
+    return { ...verified, path: reference.path };
+  }));
   const sortedVerifiedReferences = sortApprovalArtifacts(verifiedReferences);
   if (request.artifacts !== undefined) {
     const boundReferences = sortApprovalArtifacts(request.artifacts);
@@ -229,7 +239,7 @@ export async function decideArtifactApproval(input: { cwd: string; workItemId: s
         if (await computeWorkspaceTreeDigest(worktree) !== pending.workspaceTreeDigest) {
           throw new ApprovalError("WSSPEC_APPROVAL_EXPIRED", "审批绑定的工作区已经变化，请重新请求审批。");
         }
-        await verifyApprovalArtifacts(worktree, input.workItemId, pending);
+        await verifyApprovalArtifacts(input.cwd, input.workItemId, pending);
         const status = input.decision === "approve" ? "approved" : "rejected";
         const decided: RuntimeApproval = {
           ...pending,

@@ -8,6 +8,7 @@
     "workItemId",
     "stepId",
     "attemptId",
+    "workspace",
     "lease",
     "objective",
     "skills",
@@ -32,6 +33,25 @@
     "attemptId": {
       "type": "string",
       "pattern": "^attempt-.+$"
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "materialized"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "read-only",
+            "isolated-worktree"
+          ]
+        },
+        "materialized": {
+          "type": "boolean"
+        }
+      }
     },
     "lease": {
       "type": "object",

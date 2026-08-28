@@ -539,7 +539,7 @@ export interface StepExecutor {
 
 - [ ] **步骤 4：实现 Start、快照、原子 Acquire/Submit 和 Decide**
 
-Start 解析显式 `workflowRef` 或项目 `activeWorkflow`，并快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、Schema、配置、来源、`ResolvedChangePolicy` 和基线摘要；创建后禁止切换 Workflow。Acquire 在一次控制面变更中创建 Attempt、内部 Lease 和 Work Package；Submit 独立校验身份、摘要、实际 Git diff 路径和 Artifact，文档范围越界返回 `WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`。新增 `src/application/decide.ts`，复用真实 TTY 审批边界，并在批准、拒绝和请求过期后返回下一条 `AgentAction`。
+Start 解析显式 `workflowRef` 或项目 `activeWorkflow`，并快照 Workflow Package、Builtin/Project Skill、Skill Lock、Profile、配置、来源、`ResolvedChangePolicy` 和基线摘要；Workflow、Skill 和 Schema 正文不复制到 Work Item，恢复时按 Lock 从当前允许来源重新验证，来源漂移 fail closed；创建后禁止切换 Workflow。Acquire 在一次控制面变更中创建 Attempt、内部 Lease 和 Work Package；Submit 独立校验身份、摘要、实际 Git diff 路径和 Artifact，文档范围越界返回 `WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`。新增 `src/application/decide.ts`，复用真实 TTY 审批边界，并在批准、拒绝和请求过期后返回下一条 `AgentAction`。
 
 - [ ] **步骤 5：运行 Application、恢复、锁和类型测试**
 

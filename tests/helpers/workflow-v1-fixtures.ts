@@ -5,12 +5,14 @@ inputs:
 steps:
   - id: review-fix
     uses: control.loop
+    workspace: isolated-worktree
     needs: [intake]
     retry: { maxAttempts: 2 }
     outputs: [review-result]
     steps:
       - id: review
         uses: agent.execute
+        workspace: read-only
         actorRole: review
         outputs: [review-result]
 gates:

@@ -18,9 +18,11 @@ export interface WorkflowArtifactOutput { outputId: string; artifactType: string
 export interface WorkflowRetry { maxAttempts: number }
 export interface WorkflowLoop { until: string; maxIterations: number }
 export type WorkflowActorRole = "implementation" | "review" | "fix";
+export type WorkspaceMode = "read-only" | "isolated-worktree";
 export interface WorkflowStep {
   id: string;
   uses: string;
+  workspace: WorkspaceMode;
   actorRole?: WorkflowActorRole;
   needs?: string[];
   when?: string;

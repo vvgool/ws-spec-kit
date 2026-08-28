@@ -1,4 +1,5 @@
 import type { WorkItemId } from "../domain/ids.js";
+import type { WorkspaceMode } from "../workflow-package/types.js";
 
 export interface ArtifactReference {
   artifactType: string;
@@ -37,6 +38,10 @@ export interface WorkPackage {
   workItemId: WorkItemId;
   stepId: string;
   attemptId: string;
+  workspace: {
+    mode: WorkspaceMode;
+    materialized: boolean;
+  };
   lease: {
     token: string;
     expiresAt: string;

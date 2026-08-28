@@ -15,7 +15,7 @@ async function packageFixture(root: string, id = "team-feature"): Promise<string
   const directory = path.join(root, ".wsspec", "workflows", id);
   await mkdir(path.join(directory, "skills", "review"), { recursive: true });
   await writeFile(path.join(directory, "manifest.yaml"), "version: 1\nid: team-feature\nentry: workflow.yaml\nprofiles: []\ncapabilities: [external-read]\nskills: [review]\n");
-  await writeFile(path.join(directory, "workflow.yaml"), `version: 1\nworkflow: { id: ${id}, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n`);
+  await writeFile(path.join(directory, "workflow.yaml"), `version: 1\nworkflow: { id: ${id}, version: 1 }\ninputs: {}\nsteps:\n  - id: review\n    uses: agent.execute\n    workspace: read-only\n    skills: [{ ref: package://skills/review, required: true }]\ngates: []\nchangePolicy: { kind: feature, allowedPaths: ['**'] }\n`);
   await writeFile(path.join(directory, "skills", "review", "SKILL.md"), "# Review\n");
   await git(root, "add", ".");
   await git(root, "commit", "-m", `test: add ${id}`);

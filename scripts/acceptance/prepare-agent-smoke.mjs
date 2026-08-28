@@ -25,6 +25,16 @@ const sourceRoot = path.resolve(scriptDirectory, "../..");
 const sourceRuntime = process.env.WSSPECKIT_ACCEPTANCE_RUNTIME === "source";
 const wspecCli = path.join(sourceRoot, sourceRuntime ? "src" : "dist", "cli", sourceRuntime ? "main.ts" : "main.js");
 const tsxLoader = path.join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
+const runtimeRoot = path.join(sourceRoot, sourceRuntime ? "src" : "dist");
+const runtimeModulePaths = [
+  path.join(runtimeRoot, "application", `state.${sourceRuntime ? "ts" : "js"}`),
+  path.join(runtimeRoot, "storage", `events.${sourceRuntime ? "ts" : "js"}`),
+  path.join(runtimeRoot, "storage", `work-items.${sourceRuntime ? "ts" : "js"}`),
+];
+const runtimeModules = sourceRuntime
+  ? await import("tsx/esm/api").then(({ tsImport }) => Promise.all(runtimeModulePaths.map((filename) => tsImport(filename, import.meta.url))))
+  : await Promise.all(runtimeModulePaths.map((filename) => import(filename)));
+const [{ loadApplicationState }, { withControlPlaneLock }, { materializeWorkItem }] = runtimeModules;
 
 function wspecArguments(args) {
   return sourceRuntime ? ["--import", tsxLoader, wspecCli, ...args] : [wspecCli, ...args];
@@ -206,7 +216,13 @@ export async function prepareSmoke(input) {
     "--provider", providerForClient(input.client),
   ]);
   recordInvocation("wspec.start");
-  const worktree = path.join(root, ".worktrees", started.workItemId);
+  let state = await loadApplicationState(root, started.workItemId);
+  await withControlPlaneLock(state.projection.controlPlane, async () => {
+    state = await loadApplicationState(root, started.workItemId);
+    await materializeWorkItem({ root, item: state.item });
+  });
+  state = await loadApplicationState(root, started.workItemId);
+  const worktree = state.worktree;
   const indexPath = (await git(runtime, worktree, "rev-parse", "--path-format=absolute", "--git-path", "index")).stdout.trim();
   const indexRelativePath = path.relative(await realpath(root), indexPath).split(path.sep).join("/");
   if (indexRelativePath === "" || indexRelativePath === ".." || indexRelativePath.startsWith("../")) {

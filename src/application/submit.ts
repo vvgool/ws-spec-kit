@@ -221,9 +221,14 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
   if (path.isAbsolute(normalized) || normalized.split("/").includes("..")) {
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", "Artifact 路径必须位于工作区内。 ");
   }
-  const filename = path.join(state.worktree, normalized);
+  const delayed = state.item.execution.materialized === false;
+  const artifactRoot = delayed ? state.authorityRoot : state.worktree;
+  const physicalPath = delayed
+    ? normalized.replace(`.wsspec/work-items/${state.item.workItemId}/`, "")
+    : normalized;
+  const filename = path.join(artifactRoot, physicalPath);
   const verified = await verifyArtifact(filename, {
-    repositoryRoot: state.worktree,
+    repositoryRoot: artifactRoot,
     artifactType: reference.artifactType,
     workItemId: state.item.workItemId,
     stageId: step.id,
@@ -232,7 +237,7 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
   if (verified.artifactType !== reference.artifactType
     || verified.outputId !== reference.outputId
     || verified.schemaVersion !== reference.schemaVersion
-    || verified.path !== normalized
+    || verified.path !== physicalPath
     || verified.revision !== reference.revision
     || verified.contentHash !== reference.contentHash
     || (reference.mediaType !== undefined && verified.mediaType !== reference.mediaType)) {
@@ -259,11 +264,16 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
 
 async function verifyPublicationArtifacts(state: ApplicationState, artifacts: readonly ArtifactReference[]): Promise<string[]> {
   const bodies: string[] = [];
+  const delayed = state.item.execution.materialized === false;
+  const artifactRoot = delayed ? state.authorityRoot : state.worktree;
   for (const reference of artifacts) {
     try {
       if (reference.path === undefined || reference.contentHash === undefined || reference.revision === undefined) throw new Error("incomplete reference");
       const normalized = reference.path.replaceAll("\\", "/");
-      const filename = await resolveRepositoryRegularFile(state.worktree, normalized);
+      const physicalPath = delayed
+        ? normalized.replace(`.wsspec/work-items/${state.item.workItemId}/`, "")
+        : normalized;
+      const filename = await resolveRepositoryRegularFile(artifactRoot, physicalPath);
       const artifact = await readArtifact(filename);
       const { contentHash: storedHash, ...metadataWithoutHash } = artifact.metadata;
       const actualHash = computeArtifactContentHash(metadataWithoutHash, artifact.body);
@@ -391,6 +401,9 @@ async function validateResult(input: SubmitInput, state: ApplicationState, targe
     throw new ApplicationSubmitError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Attempt Lease 已过期。 ");
   }
   const changed = await actualChangedFiles(state, claim.workspaceSnapshot);
+  if (context?.workPackage.workspace.mode === "read-only" && changed.length > 0) {
+    throw new ApplicationSubmitError("WSSPEC_WORKSPACE_MODE_VIOLATION", "read-only Step 不允许修改 workspace。 ");
+  }
   if (state.snapshot.changePolicy.kind === "documentation-only" && changed.some((file) => !permitted(file, state.snapshot.changePolicy.allowedPaths))) {
     throw new ApplicationSubmitError("WSSPEC_DOCUMENTATION_SCOPE_VIOLATION", "实际 Git diff 越出 documentation-only 路径边界。 ");
   }

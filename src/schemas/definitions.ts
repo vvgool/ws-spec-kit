@@ -304,12 +304,16 @@ const governedReceiptConditions: JsonSchema[] = [
 const workPackageSchema: JsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["version", "workItemId", "stepId", "attemptId", "lease", "objective", "skills", "artifacts", "constraints", "requiredOutputs", "gates", "resultSchema"],
+  required: ["version", "workItemId", "stepId", "attemptId", "workspace", "lease", "objective", "skills", "artifacts", "constraints", "requiredOutputs", "gates", "resultSchema"],
   properties: {
     version: { const: 1 },
     workItemId: { type: "string", pattern: workItemIdPattern },
     stepId: { type: "string", pattern: stepInstanceIdPattern },
     attemptId: { type: "string", pattern: attemptIdPattern },
+    workspace: {
+      type: "object", additionalProperties: false, required: ["mode", "materialized"],
+      properties: { mode: { enum: ["read-only", "isolated-worktree"] }, materialized: { type: "boolean" } },
+    },
     lease: {
       type: "object", additionalProperties: false, required: ["token", "expiresAt"],
       properties: { token: { type: "string", minLength: 1 }, expiresAt: { type: "string", format: "date-time" } },
@@ -534,10 +538,11 @@ export const schemas = {
       execution: {
         type: "object",
         additionalProperties: false,
-        required: ["worktree", "branch", "baselineRevision", "baselineTreeDigest", "workflowDigest", "configDigest", "schemaDigest"],
+        required: ["worktree", "branch", "baselineRevision", "baselineTreeDigest", "workflowDigest", "configDigest"],
         properties: {
           worktree: { type: "string", minLength: 1 },
           branch: { type: "string", minLength: 1 },
+          materialized: { type: "boolean" },
           baselineRevision: { type: "string", minLength: 1 },
           baselineTreeDigest: { type: "string", pattern: digestPattern },
           workflowDigest: { type: "string", pattern: digestPattern },
