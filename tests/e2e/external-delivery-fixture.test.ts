@@ -473,6 +473,7 @@ async function runDelivery(fixture: Fixture, scenario: Scenario): Promise<{ star
       }
       throw new Error(`delivery blocked: ${action.problems.map(({ code }) => code).join(",")}`);
     }
+    if (action.action === "rejection_confirmed") throw new Error("unexpected rejection confirmation");
     const pkg = action.workPackage;
     worktree = (await loadApplicationState(fixture.root, started.workItemId)).worktree;
     const executionRoot = pkg.workspace.materialized ? worktree : fixture.root;

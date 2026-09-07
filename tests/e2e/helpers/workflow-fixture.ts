@@ -625,6 +625,7 @@ export async function executeFeatureWorkflow(
       }
       throw new Error(`workflow blocked: ${action.problems.map(({ code, message }) => `${code}:${message}`).join(",")}`);
     }
+    if (action.action === "rejection_confirmed") throw new Error("unexpected rejection confirmation");
     let pkg = action.workPackage;
     const required = pkg.requiredOutputs.map(({ artifactType }) => artifactType);
     let refs: ArtifactReference[] = [];
@@ -850,6 +851,7 @@ export async function executeDocumentationWorkflow(
     if (action.action === "blocked") {
       throw new Error(`documentation workflow blocked: ${action.problems.map(({ code, message }) => `${code}:${message}`).join(",")}`);
     }
+    if (action.action === "rejection_confirmed") throw new Error("unexpected rejection confirmation");
     let pkg = action.workPackage;
     let refs: ArtifactReference[] = [];
     let modifiedFiles: string[] = [];

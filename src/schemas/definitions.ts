@@ -9,9 +9,12 @@ export const schemaIds = [
   "builtin.application-artifact-create-input.v1",
   "builtin.application-submit-input.v1",
   "builtin.application-decision-input.v1",
+  "builtin.application-decision-input.v2",
   "builtin.application-inspect-input.v1",
   "builtin.agent-action.v1",
+  "builtin.agent-action.v2",
   "builtin.work-package.v1",
+  "builtin.work-package.v2",
   "builtin.submit-result.v1",
   "builtin.evidence.v1",
   "builtin.tdd-trusted-evidence.v1",
@@ -301,12 +304,12 @@ const governedReceiptConditions: JsonSchema[] = [
   },
 ];
 
-const workPackageSchema: JsonSchema = {
+const workPackageV2Schema: JsonSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["version", "workItemId", "stepId", "attemptId", "workspace", "lease", "objective", "skills", "artifacts", "constraints", "requiredOutputs", "gates", "resultSchema"],
+  required: ["version", "workItemId", "stepId", "attemptId", "workspace", "lease", "objective", "revisionRequest", "skills", "artifacts", "constraints", "requiredOutputs", "gates", "resultSchema"],
   properties: {
-    version: { const: 1 },
+    version: { const: 2 },
     workItemId: { type: "string", pattern: workItemIdPattern },
     stepId: { type: "string", pattern: stepInstanceIdPattern },
     attemptId: { type: "string", pattern: attemptIdPattern },
@@ -319,6 +322,13 @@ const workPackageSchema: JsonSchema = {
       properties: { token: { type: "string", minLength: 1 }, expiresAt: { type: "string", format: "date-time" } },
     },
     objective: { type: "string", minLength: 1 },
+    revisionRequest: {
+      type: "object", additionalProperties: false, required: ["approvalRequestId", "feedback"],
+      properties: {
+        approvalRequestId: { type: "string", minLength: 1 },
+        feedback: { type: "string", minLength: 1 },
+      },
+    },
     artifactLevel: { type: "string", minLength: 1 },
     skills: {
       type: "array",
@@ -357,6 +367,80 @@ const workPackageSchema: JsonSchema = {
     resultSchema: { const: "builtin.submit-result.v1" },
   },
 };
+
+const workPackageV1Properties = { ...(workPackageV2Schema.properties as Record<string, JsonSchema>) };
+delete workPackageV1Properties.revisionRequest;
+
+const workPackageV1Schema: JsonSchema = {
+  ...workPackageV2Schema,
+  required: (workPackageV2Schema.required as string[]).filter((field) => field !== "revisionRequest"),
+  properties: {
+    ...workPackageV1Properties,
+    version: { const: 1 },
+  },
+};
+
+function schemasForAgentCommon(): JsonSchema[] {
+  return [
+    {
+      type: "object", additionalProperties: false, required: ["action", "approval"],
+      properties: {
+        action: { const: "await_approval" },
+        approval: {
+          oneOf: [
+            ...(["step", "workflow_trust"] as const).map((kind) => ({
+              type: "object", additionalProperties: false,
+              required: ["kind", "requestId", "workItemId", "title", "digest"],
+              properties: {
+                kind: { const: kind }, requestId: { type: "string", minLength: 1 },
+                workItemId: { type: "string", pattern: workItemIdPattern }, title: { type: "string", minLength: 1 },
+                digest: { type: "string", pattern: digestPattern },
+              },
+            })),
+            {
+              type: "object", additionalProperties: false,
+              required: ["kind", "requestId", "workItemId", "title", "digest", "provider", "action", "target", "sideEffects"],
+              properties: {
+                kind: { const: "external_action" }, requestId: { type: "string", minLength: 1 },
+                workItemId: { type: "string", pattern: workItemIdPattern }, title: { type: "string", minLength: 1 },
+                digest: { type: "string", pattern: digestPattern },
+                provider: { type: "string", pattern: "^[a-z][a-z0-9-]{0,62}$" },
+                action: externalActionIdentityProperties.action, target: externalTargetSchema,
+                sideEffects: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 256 } },
+              },
+            },
+          ],
+        },
+      },
+    },
+    {
+      type: "object", additionalProperties: false, required: ["action", "problems"],
+      properties: {
+        action: { const: "blocked" }, problems: {
+          type: "array", minItems: 1, items: {
+            type: "object", additionalProperties: false, required: ["code", "message", "retryable"],
+            properties: {
+              code: { type: "string", pattern: errorCodePattern }, message: { type: "string", minLength: 1 },
+              retryable: { type: "boolean" },
+            },
+          },
+        },
+      },
+    },
+    {
+      type: "object", additionalProperties: false, required: ["action", "summary"],
+      properties: {
+        action: { const: "completed" }, summary: {
+          type: "object", additionalProperties: false, required: ["workItemId", "status", "message"],
+          properties: {
+            workItemId: { type: "string", pattern: workItemIdPattern }, status: { enum: ["closed", "cancelled"] },
+            message: { type: "string", minLength: 1 },
+          },
+        },
+      },
+    },
+  ];
+}
 
 const publishBinding = (properties: Record<string, JsonSchema>): JsonSchema => ({
   anyOf: [
@@ -680,6 +764,97 @@ export const schemas = {
       },
     ],
   },
+  "builtin.application-decision-input.v2": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-decision-input.v2",
+    oneOf: [
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor"],
+        properties: {
+          kind: { const: "approval" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { const: "approved" }, expectedDigest: { type: "string", pattern: digestPattern },
+          actor: { type: "string", minLength: 1 },
+        },
+      },
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor"],
+        properties: {
+          kind: { const: "approval" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { const: "rejected" }, expectedDigest: { type: "string", pattern: digestPattern },
+          actor: { type: "string", minLength: 1 }, feedback: { type: "string", minLength: 1 },
+          rejectionToken: { type: "string", minLength: 1 },
+        },
+        dependentRequired: { rejectionToken: ["feedback"] },
+      },
+      {
+        type: "object", additionalProperties: false,
+        required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor", "feedback"],
+        properties: {
+          kind: { const: "approval" }, root: { type: "string", minLength: 1 },
+          workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+          decision: { const: "confirm_rejection" }, expectedDigest: { type: "string", pattern: digestPattern },
+          actor: { type: "string", minLength: 1 }, feedback: { type: "string", minLength: 1 },
+        },
+      },
+      ...(({
+        oneOf: [
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "root", "requestId", "decision", "expectedPackageDigest", "expectedCapabilityDigest", "actor"],
+            properties: {
+              kind: { const: "workflow_trust" }, root: { type: "string", minLength: 1 },
+              requestId: { type: "string", minLength: 1 }, decision: { enum: ["trusted", "rejected"] },
+              expectedPackageDigest: { type: "string", pattern: digestPattern },
+              expectedCapabilityDigest: { type: "string", pattern: digestPattern }, actor: { type: "string", minLength: 1 },
+            },
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor"],
+            properties: {
+              kind: { const: "external_action" }, root: { type: "string", minLength: 1 },
+              workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+              decision: { enum: ["approved", "rejected"] }, expectedDigest: { type: "string", pattern: digestPattern },
+              actor: { type: "string", minLength: 1 },
+            },
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "actor"],
+            properties: {
+              kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
+              workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+              decision: { const: "reconcile" }, expectedDigest: strictDigestSchema, actor: { type: "string", minLength: 1 },
+            },
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "evidence", "actor"],
+            properties: {
+              kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
+              workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+              decision: { const: "mark_failed" }, expectedDigest: strictDigestSchema,
+              evidence: { type: "string", minLength: 1, maxLength: 2048 }, actor: { type: "string", minLength: 1 },
+            },
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["kind", "root", "workItemId", "requestId", "decision", "expectedDigest", "externalStableId", "contentDigest", "evidence", "actor"],
+            properties: {
+              kind: { const: "external_reconciliation" }, root: { type: "string", minLength: 1 },
+              workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
+              decision: { const: "adopt_verified" }, expectedDigest: strictDigestSchema,
+              externalStableId: { type: "string", minLength: 1, maxLength: 2048 }, contentDigest: strictDigestSchema,
+              evidence: { type: "string", minLength: 1, maxLength: 2048 }, actor: { type: "string", minLength: 1 },
+            },
+          },
+        ],
+      } as { oneOf: JsonSchema[] }).oneOf),
+    ],
+  },
   "builtin.application-inspect-input.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.application-inspect-input.v1",
     type: "object", additionalProperties: false, required: ["root", "workItemId"],
@@ -690,7 +865,7 @@ export const schemas = {
     oneOf: [
       {
         type: "object", additionalProperties: false, required: ["action", "workPackage"],
-        properties: { action: { const: "execute" }, workPackage: workPackageSchema },
+        properties: { action: { const: "execute" }, workPackage: workPackageV1Schema },
       },
       {
         type: "object", additionalProperties: false, required: ["action", "approval"],
@@ -752,8 +927,42 @@ export const schemas = {
       },
     ],
   },
+  "builtin.agent-action.v2": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.agent-action.v2",
+    oneOf: [
+      {
+        type: "object", additionalProperties: false, required: ["action", "workPackage"],
+        properties: {
+          action: { const: "execute" },
+          workPackage: workPackageV1Schema,
+          resumeSubmission: { const: true },
+        },
+      },
+      {
+        type: "object", additionalProperties: false, required: ["action", "workPackage"],
+        properties: {
+          action: { const: "execute" },
+          workPackage: workPackageV2Schema,
+        },
+      },
+      {
+        type: "object", additionalProperties: false, required: ["action", "rejectionConfirmation"],
+        properties: {
+          action: { const: "rejection_confirmed" },
+          rejectionConfirmation: {
+            type: "object", additionalProperties: false, required: ["token", "feedbackDigest"],
+            properties: { token: { type: "string", minLength: 1 }, feedbackDigest: { type: "string", pattern: digestPattern } },
+          },
+        },
+      },
+      ...((schemasForAgentCommon()) as JsonSchema[]),
+    ],
+  },
   "builtin.work-package.v1": {
-    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.work-package.v1", ...workPackageSchema,
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.work-package.v1", ...workPackageV1Schema,
+  },
+  "builtin.work-package.v2": {
+    $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.work-package.v2", ...workPackageV2Schema,
   },
   "builtin.submit-result.v1": {
     $schema: "https://json-schema.org/draft/2020-12/schema", $id: "builtin.submit-result.v1", ...submitResultSchema,

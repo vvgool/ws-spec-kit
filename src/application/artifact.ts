@@ -459,7 +459,12 @@ function activeWorkPackage(
   const claim = active?.[1];
   const context = active === undefined ? undefined : projection.contexts[active[0]] as { workPackage?: unknown } | undefined;
   let workPackage: WorkPackage;
-  try { workPackage = validate<WorkPackage>("builtin.work-package.v1", context?.workPackage); }
+  try {
+    const version = context?.workPackage !== null && typeof context?.workPackage === "object"
+      ? (context.workPackage as { version?: unknown }).version
+      : undefined;
+    workPackage = validate<WorkPackage>(version === 1 ? "builtin.work-package.v1" : "builtin.work-package.v2", context?.workPackage);
+  }
   catch { return failure("WSSPEC_ARTIFACT_AUTHORING_UNAVAILABLE", "活动 Work Package 不支持受治理的 Artifact authoring。"); }
   if (workPackage.artifactAuthoring?.version !== 1) {
     return failure("WSSPEC_ARTIFACT_AUTHORING_UNAVAILABLE", "活动 Work Package 不支持受治理的 Artifact authoring。");

@@ -139,6 +139,32 @@ test("Work Package 只携带执行引用和约束", () => {
   }
 });
 
+test("AgentAction v2 兼容普通 v1 Work Package，并为修订保留 v2", () => {
+  const ordinary = { action: "execute", workPackage } as const;
+  assert.deepEqual(validate("builtin.agent-action.v2" as SchemaId, ordinary), ordinary);
+
+  const revision = {
+    ...ordinary,
+    workPackage: {
+      ...workPackage,
+      version: 2,
+      revisionRequest: { approvalRequestId: "approval-01", feedback: "请补充回归测试。" },
+    },
+  } as const;
+  assert.deepEqual(validate("builtin.agent-action.v2" as SchemaId, revision), revision);
+  assertSchemaError(() => validate("builtin.agent-action.v1" as SchemaId, revision), "WSSPEC_SCHEMA_UNKNOWN_FIELD");
+  assert.throws(
+    () => validate("builtin.work-package.v2" as SchemaId, { ...workPackage, version: 2 }),
+    (error: unknown) => error instanceof SchemaValidationError,
+  );
+  assert.throws(
+    () => validate("builtin.agent-action.v2" as SchemaId, { ...revision, resumeSubmission: true }),
+    (error: unknown) => error instanceof SchemaValidationError,
+  );
+  const resumed = { action: "execute", workPackage, resumeSubmission: true } as const;
+  assert.deepEqual(validate("builtin.agent-action.v2" as SchemaId, resumed), resumed);
+});
+
 test("失败 SubmitResult 不接受 Agent 自报失败分类或 retryable", () => {
   const base = {
     version: 1,
@@ -219,6 +245,20 @@ test("DecisionInput 只接受执行审批、Workflow Package 信任决定或受�
   };
 
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, approval), approval);
+  const revision = { ...approval, decision: "rejected", feedback: "请按 MR IID 生成稳定任务身份。" };
+  assertSchemaError(
+    () => validate("builtin.application-decision-input.v1" as SchemaId, revision),
+    "WSSPEC_SCHEMA_UNKNOWN_FIELD",
+  );
+  assert.deepEqual(validate("builtin.application-decision-input.v2" as SchemaId, revision), revision);
+  const confirmation = { ...approval, decision: "confirm_rejection", feedback: revision.feedback };
+  assert.deepEqual(validate("builtin.application-decision-input.v2" as SchemaId, confirmation), confirmation);
+  const confirmedRevision = { ...revision, rejectionToken: "one-time-token" };
+  assert.deepEqual(validate("builtin.application-decision-input.v2" as SchemaId, confirmedRevision), confirmedRevision);
+  assertSchemaError(
+    () => validate("builtin.application-decision-input.v1" as SchemaId, { ...approval, feedback: revision.feedback }),
+    "WSSPEC_SCHEMA_UNKNOWN_FIELD",
+  );
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, workflowTrust), workflowTrust);
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, externalReconciliation), externalReconciliation);
   assert.deepEqual(validate("builtin.application-decision-input.v1" as SchemaId, externalAdoption), externalAdoption);

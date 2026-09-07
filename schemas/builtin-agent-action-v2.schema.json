@@ -1,0 +1,867 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "builtin.agent-action.v2",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "workPackage"
+      ],
+      "properties": {
+        "action": {
+          "const": "execute"
+        },
+        "workPackage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "workItemId",
+            "stepId",
+            "attemptId",
+            "workspace",
+            "lease",
+            "objective",
+            "skills",
+            "artifacts",
+            "constraints",
+            "requiredOutputs",
+            "gates",
+            "resultSchema"
+          ],
+          "properties": {
+            "version": {
+              "const": 1
+            },
+            "workItemId": {
+              "type": "string",
+              "pattern": "^WSS-[A-Za-z0-9-]+$"
+            },
+            "stepId": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
+            },
+            "attemptId": {
+              "type": "string",
+              "pattern": "^attempt-.+$"
+            },
+            "workspace": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "materialized"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "read-only",
+                    "isolated-worktree"
+                  ]
+                },
+                "materialized": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "lease": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "token",
+                "expiresAt"
+              ],
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifactLevel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "ref",
+                  "version",
+                  "digest",
+                  "description"
+                ],
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^sha256:.+$"
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "artifactType",
+                  "schemaVersion"
+                ],
+                "properties": {
+                  "artifactType": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "outputId": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "artifactId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "schemaVersion": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "contentHash": {
+                    "type": "string",
+                    "pattern": "^sha256:.+$"
+                  },
+                  "mediaType": {
+                    "type": "string"
+                  },
+                  "contentLevel": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "constraints": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "allowedPaths",
+                "forbiddenActions"
+              ],
+              "properties": {
+                "allowedPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "uniqueItems": true
+                },
+                "forbiddenActions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "uniqueItems": true
+                }
+              }
+            },
+            "requiredOutputs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "artifactType",
+                  "schemaVersion"
+                ],
+                "properties": {
+                  "artifactType": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "outputId": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "schemaVersion": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "contentLevel": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "artifactAuthoring": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version",
+                "maxContentBytes",
+                "draftRoots"
+              ],
+              "properties": {
+                "version": {
+                  "const": 1
+                },
+                "maxContentBytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1048576
+                },
+                "draftRoots": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "gates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "evidence",
+                  "required"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9.-]{0,62}$"
+                  },
+                  "evidence": {
+                    "enum": [
+                      "trusted",
+                      "attested",
+                      "reported"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "resultSchema": {
+              "const": "builtin.submit-result.v1"
+            }
+          }
+        },
+        "resumeSubmission": {
+          "const": true
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "workPackage"
+      ],
+      "properties": {
+        "action": {
+          "const": "execute"
+        },
+        "workPackage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "workItemId",
+            "stepId",
+            "attemptId",
+            "workspace",
+            "lease",
+            "objective",
+            "revisionRequest",
+            "skills",
+            "artifacts",
+            "constraints",
+            "requiredOutputs",
+            "gates",
+            "resultSchema"
+          ],
+          "properties": {
+            "version": {
+              "const": 2
+            },
+            "workItemId": {
+              "type": "string",
+              "pattern": "^WSS-[A-Za-z0-9-]+$"
+            },
+            "stepId": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,62}(?::[1-9][0-9]*:[a-z][a-z0-9-]{0,62})?$"
+            },
+            "attemptId": {
+              "type": "string",
+              "pattern": "^attempt-.+$"
+            },
+            "workspace": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "materialized"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "read-only",
+                    "isolated-worktree"
+                  ]
+                },
+                "materialized": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "lease": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "token",
+                "expiresAt"
+              ],
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1
+            },
+            "revisionRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "approvalRequestId",
+                "feedback"
+              ],
+              "properties": {
+                "approvalRequestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "feedback": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "artifactLevel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "ref",
+                  "version",
+                  "digest",
+                  "description"
+                ],
+                "properties": {
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^sha256:.+$"
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "artifactType",
+                  "schemaVersion"
+                ],
+                "properties": {
+                  "artifactType": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "outputId": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "artifactId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "schemaVersion": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "contentHash": {
+                    "type": "string",
+                    "pattern": "^sha256:.+$"
+                  },
+                  "mediaType": {
+                    "type": "string"
+                  },
+                  "contentLevel": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "constraints": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "allowedPaths",
+                "forbiddenActions"
+              ],
+              "properties": {
+                "allowedPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "uniqueItems": true
+                },
+                "forbiddenActions": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "uniqueItems": true
+                }
+              }
+            },
+            "requiredOutputs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "artifactType",
+                  "schemaVersion"
+                ],
+                "properties": {
+                  "artifactType": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "outputId": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                  },
+                  "schemaVersion": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "contentLevel": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "artifactAuthoring": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "version",
+                "maxContentBytes",
+                "draftRoots"
+              ],
+              "properties": {
+                "version": {
+                  "const": 1
+                },
+                "maxContentBytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1048576
+                },
+                "draftRoots": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "gates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "evidence",
+                  "required"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9.-]{0,62}$"
+                  },
+                  "evidence": {
+                    "enum": [
+                      "trusted",
+                      "attested",
+                      "reported"
+                    ]
+                  },
+                  "required": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "resultSchema": {
+              "const": "builtin.submit-result.v1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "rejectionConfirmation"
+      ],
+      "properties": {
+        "action": {
+          "const": "rejection_confirmed"
+        },
+        "rejectionConfirmation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "token",
+            "feedbackDigest"
+          ],
+          "properties": {
+            "token": {
+              "type": "string",
+              "minLength": 1
+            },
+            "feedbackDigest": {
+              "type": "string",
+              "pattern": "^sha256:.+$"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "approval"
+      ],
+      "properties": {
+        "action": {
+          "const": "await_approval"
+        },
+        "approval": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "requestId",
+                "workItemId",
+                "title",
+                "digest"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "step"
+                },
+                "requestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workItemId": {
+                  "type": "string",
+                  "pattern": "^WSS-[A-Za-z0-9-]+$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:.+$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "requestId",
+                "workItemId",
+                "title",
+                "digest"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "workflow_trust"
+                },
+                "requestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workItemId": {
+                  "type": "string",
+                  "pattern": "^WSS-[A-Za-z0-9-]+$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:.+$"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "requestId",
+                "workItemId",
+                "title",
+                "digest",
+                "provider",
+                "action",
+                "target",
+                "sideEffects"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "external_action"
+                },
+                "requestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workItemId": {
+                  "type": "string",
+                  "pattern": "^WSS-[A-Za-z0-9-]+$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:.+$"
+                },
+                "provider": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                },
+                "action": {
+                  "enum": [
+                    "git.commit",
+                    "issue.update",
+                    "knowledge.publish",
+                    "issue.close"
+                  ]
+                },
+                "target": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "stableId"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "repository",
+                        "issue",
+                        "knowledge"
+                      ]
+                    },
+                    "stableId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    }
+                  }
+                },
+                "sideEffects": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "problems"
+      ],
+      "properties": {
+        "action": {
+          "const": "blocked"
+        },
+        "problems": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^WSSPEC_[A-Z0-9_]+$"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "summary"
+      ],
+      "properties": {
+        "action": {
+          "const": "completed"
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "workItemId",
+            "status",
+            "message"
+          ],
+          "properties": {
+            "workItemId": {
+              "type": "string",
+              "pattern": "^WSS-[A-Za-z0-9-]+$"
+            },
+            "status": {
+              "enum": [
+                "closed",
+                "cancelled"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -33,8 +33,12 @@ export interface WorkPackageGate {
   required: boolean;
 }
 
-export interface WorkPackage {
-  version: 1;
+export interface RevisionRequest {
+  approvalRequestId: string;
+  feedback: string;
+}
+
+interface WorkPackageBase {
   workItemId: WorkItemId;
   stepId: string;
   attemptId: string;
@@ -63,3 +67,15 @@ export interface WorkPackage {
   gates: WorkPackageGate[];
   resultSchema: "builtin.submit-result.v1";
 }
+
+export interface WorkPackageV1 extends WorkPackageBase {
+  version: 1;
+  revisionRequest?: never;
+}
+
+export interface WorkPackageV2 extends WorkPackageBase {
+  version: 2;
+  revisionRequest: RevisionRequest;
+}
+
+export type WorkPackage = WorkPackageV1 | WorkPackageV2;

@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { createApplication } from "../../src/application/application.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
-import { approvalBindingDigest, ApprovalError, decideArtifactApproval, requestArtifactApproval } from "../../src/engine/approvals.js";
+import { approvalBindingDigest, ApprovalError, confirmArtifactRejection, decideArtifactApproval, requestArtifactApproval } from "../../src/engine/approvals.js";
 import { transitionRuntime } from "../../src/engine/scheduler.js";
 import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
 import { withControlPlaneLock } from "../../src/storage/events.js";
@@ -99,6 +99,133 @@ test("multi-Artifact approval digest totally orders complete tied-path reference
 test("non-TTY input cannot approve an Artifact", async () => {
   const fixture = await prepare(); const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
   await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "approve", terminal: { isTTY: false } }), (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_INTERACTIVE_TTY_REQUIRED");
+});
+
+test("non-TTY rejection requires feedback bound to a one-time TTY confirmation", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+
+  await assert.rejects(
+    decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "reject", terminal: { isTTY: false } }),
+    (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_INTERACTIVE_TTY_REQUIRED",
+  );
+  for (const feedback of ["   \n", "token=ghp_1234567890abcdefghijkl", "a".repeat(8193)]) {
+    await assert.rejects(
+      decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "reject", terminal: { isTTY: false }, feedback }),
+      (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_FEEDBACK_INVALID",
+    );
+  }
+  const feedback = "保留 80% 的现有结构并修正身份绑定";
+  const confirmation = await confirmArtifactRejection({
+    cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId,
+    expectedDigest: request.contentHash, actor: "reviewer", feedback, terminal: { isTTY: true },
+  });
+  const beforeDecision = await readControlPlane(fixture.root, fixture.workItemId);
+  const persistedConfirmation = `${await readFile(path.join(beforeDecision.controlPlane, "runtime.json"), "utf8")}\n${await readFile(path.join(beforeDecision.controlPlane, "events.jsonl"), "utf8")}`;
+  assert.doesNotMatch(persistedConfirmation, new RegExp(confirmation.token));
+  await assert.rejects(
+    decideArtifactApproval({
+      cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "reject",
+      expectedDigest: request.contentHash, actor: "another-reviewer", feedback, rejectionToken: confirmation.token,
+      terminal: { isTTY: false },
+    }),
+    (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_REJECTION_CONFIRMATION_MISMATCH",
+  );
+  await assert.rejects(
+    decideArtifactApproval({
+      cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "reject",
+      expectedDigest: request.contentHash, actor: "reviewer", feedback: `${feedback}。`, rejectionToken: confirmation.token,
+      terminal: { isTTY: false },
+    }),
+    (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_REJECTION_CONFIRMATION_MISMATCH",
+  );
+  const rejected = await decideArtifactApproval({
+    cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, decision: "reject",
+    expectedDigest: request.contentHash, actor: "reviewer", feedback, rejectionToken: confirmation.token,
+    terminal: { isTTY: false },
+  });
+  assert.equal(rejected.status, "rejected");
+});
+
+test("repeating or concurrently retrying the same rejection confirmation returns the first token", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({
+    cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval",
+    artifactPath: fixture.artifactPath, artifactType: "specification",
+  });
+  const input = {
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: request.requestId,
+    expectedDigest: request.contentHash,
+    actor: "reviewer",
+    feedback: "请补齐并发回归测试",
+    terminal: { isTTY: true },
+  } as const;
+
+  const [first, concurrent] = await Promise.all([
+    confirmArtifactRejection(input),
+    confirmArtifactRejection(input),
+  ]);
+  const repeated = await confirmArtifactRejection(input);
+
+  assert.deepEqual(concurrent, first);
+  assert.deepEqual(repeated, first);
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  const persisted = `${await readFile(path.join(projection.controlPlane, "runtime.json"), "utf8")}\n${await readFile(path.join(projection.controlPlane, "events.jsonl"), "utf8")}`;
+  assert.equal(persisted.includes(first.token), false);
+});
+
+test("TTY rejection rejects a rejection token instead of bypassing token binding", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    stageId: "intake",
+    attemptId: "attempt-approval",
+    artifactPath: fixture.artifactPath,
+    artifactType: "specification",
+  });
+
+  await assert.rejects(
+    decideArtifactApproval({
+      cwd: fixture.root,
+      workItemId: fixture.workItemId,
+      requestId: request.requestId,
+      decision: "reject",
+      terminal: { isTTY: true },
+      feedback: "需要修订",
+      rejectionToken: "unbound-token",
+    }),
+    (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_FEEDBACK_NOT_ALLOWED",
+  );
+});
+
+test("approval feedback enforces UTF-8 and secret boundaries without treating percent as URI encoding", async () => {
+  const accepted = await prepare();
+  const acceptedRequest = await requestArtifactApproval({ cwd: accepted.root, workItemId: accepted.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: accepted.artifactPath, artifactType: "specification" });
+  const feedback = `保留 80% 的结构，${"改".repeat(100)}`;
+  const result = await decideArtifactApproval({
+    cwd: accepted.root, workItemId: accepted.workItemId, requestId: acceptedRequest.requestId,
+    decision: "reject", terminal: { isTTY: true }, feedback,
+  });
+  assert.equal(result.feedback, feedback);
+
+  for (const invalid of [
+    "改".repeat(2731),
+    "\uD800",
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret",
+    "AKIAABCDEFGHIJKLMNOP",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123",
+    "postgresql://user:password@example.com/database",
+  ]) {
+    const current = await prepare();
+    const request = await requestArtifactApproval({ cwd: current.root, workItemId: current.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: current.artifactPath, artifactType: "specification" });
+    await assert.rejects(
+      decideArtifactApproval({ cwd: current.root, workItemId: current.workItemId, requestId: request.requestId, decision: "reject", terminal: { isTTY: true }, feedback: invalid }),
+      (error: unknown) => error instanceof ApprovalError && error.code === "WSSPEC_APPROVAL_FEEDBACK_INVALID",
+    );
+  }
 });
 
 test("approval expires when the bound workspace changes", async () => {

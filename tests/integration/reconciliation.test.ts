@@ -107,12 +107,370 @@ test("reconciliation only reads stable identity/content and resolves verified, f
       await executeExternalAction({ root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
         payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z" });
       const result = await reconcileExternalAction({ root: fixture.root, workItemId: fixture.workItemId,
-        requestId: fixture.requestId, executor, now: "2026-08-18T04:00:30.000Z" });
+        requestId: fixture.requestId, executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:30.000Z") });
       assert.equal(result.status, outcome === "unknown" ? "reconciliation_required" : outcome);
       assert.equal(writes, 1);
       assert.equal(reads, 1);
     });
   }
+});
+
+test("concurrent reconciliation calls with different timestamps share one Provider readback and one state transition", async () => {
+  const fixture = await approvedAction();
+  let reads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ request }) {
+      reads += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return {
+        outcome: "verified",
+        targetStableId: request.target.stableId,
+        contentDigest: request.payloadDigest,
+        checkedAt: "2026-08-18T04:00:30.000Z",
+      };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    requestId: fixture.requestId,
+    payload: fixture.input.payload,
+    executor,
+    now: "2026-08-18T04:00:20.000Z",
+  });
+
+  const results = await Promise.all([
+    reconcileExternalAction({ root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId, executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:32.000Z") }),
+    reconcileExternalAction({ root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId, executor, now: "2026-08-18T04:00:31.000Z", completionTime: () => new Date("2026-08-18T04:00:32.000Z") }),
+  ]);
+
+  assert.equal(reads, 1);
+  assert.deepEqual(results[1], results[0]);
+});
+
+test("a hanging reconciliation Provider does not hold the control-plane lock", async () => {
+  const fixture = await approvedAction();
+  let release!: () => void;
+  const providerBlocked = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const providerEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile() {
+      entered();
+      await providerBlocked;
+      return { outcome: "unknown", checkedAt: "2026-08-18T04:00:30.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+  const reconciliation = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:31.000Z"),
+  });
+  await providerEntered;
+
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:provider-does-not-hold-lock:${fixture.requestId}`,
+    operationInput: { requestId: fixture.requestId },
+    mutate: (projection) => ({ projection, value: null }),
+  });
+  release();
+  assert.equal((await reconciliation).status, "reconciliation_required");
+});
+
+test("reconciliation Provider may re-enter the same control plane without self-deadlock", async () => {
+  const fixture = await approvedAction();
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ request }) {
+      await mutateControlPlane({
+        cwd: fixture.root,
+        workItemId: fixture.workItemId,
+        eventType: "projection.invalidated",
+        idempotencyKey: `test:provider-reentry:${request.requestId}`,
+        operationInput: { requestId: request.requestId },
+        mutate: (projection) => ({ projection, value: null }),
+      });
+      return { outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest, checkedAt: "2026-08-18T04:00:30.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+
+  const result = await reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:31.000Z"),
+  });
+  assert.equal(result.status, "verified");
+});
+
+test("reconciliation discards Provider results when the Lease expires during readback", async () => {
+  const fixture = await approvedAction();
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ request }) {
+      return { outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest, checkedAt: "2026-08-18T04:00:30.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+
+  await assert.rejects(reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T05:00:00.000Z"),
+  }), (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH");
+  const action = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId];
+  assert.equal(action?.status, "reconciliation_required");
+  if (action?.status !== "reconciliation_required") throw new Error("expected reconciliation-required action");
+  assert.equal(action.reconciliationOwner, undefined);
+});
+
+test("an expired reconciliation owner can be replaced after a coordinator crash", async () => {
+  const fixture = await approvedAction();
+  let releaseFirst!: () => void;
+  let firstEntered!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+  let reads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ request }) {
+      reads += 1;
+      if (reads === 1) {
+        firstEntered();
+        await firstBlocked;
+      }
+      return { outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest, checkedAt: "2026-08-18T04:00:40.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+  const abandoned = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:31.000Z"),
+  });
+  await entered;
+
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:expire-reconciliation-owner:${fixture.requestId}`,
+    operationInput: { requestId: fixture.requestId },
+    mutate: (projection) => {
+      const action = projection.externalActions[fixture.requestId];
+      assert.equal(action?.status, "reconciliation_required");
+      if (action?.status !== "reconciliation_required") throw new Error("expected reconciliation owner");
+      return {
+        projection: {
+          ...projection,
+          externalActions: {
+            ...projection.externalActions,
+            [fixture.requestId]: {
+              ...action,
+              reconciliationStartedAt: "2026-08-18T04:00:00.000Z",
+              reconciliationExpiresAt: "2026-08-18T04:00:29.000Z",
+            },
+          },
+        },
+        value: null,
+      };
+    },
+  });
+
+  const recovered = await reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:36.000Z", completionTime: () => new Date("2026-08-18T04:00:37.000Z"),
+  });
+  releaseFirst();
+  assert.equal(recovered.status, "verified");
+  assert.equal((await abandoned).status, "verified");
+  assert.equal(reads, 2);
+});
+
+test("a waiter follows a reconciliation owner takeover instead of returning an intermediate state", async () => {
+  const fixture = await approvedAction();
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  let firstEntered!: () => void;
+  let secondEntered!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+  const takeoverEntered = new Promise<void>((resolve) => { secondEntered = resolve; });
+  let reads = 0;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ request }) {
+      reads += 1;
+      if (reads === 1) {
+        firstEntered();
+        await firstBlocked;
+      } else if (reads === 2) {
+        secondEntered();
+        await secondBlocked;
+      }
+      return { outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest, checkedAt: "2026-08-18T04:00:40.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+
+  const first = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:31.000Z"),
+  });
+  await entered;
+  const waiter = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:31.000Z", completionTime: () => new Date("2026-08-18T04:00:32.000Z"),
+  });
+
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:waiter-owner-takeover:${fixture.requestId}`,
+    operationInput: { requestId: fixture.requestId },
+    mutate: (projection) => {
+      const action = projection.externalActions[fixture.requestId];
+      assert.equal(action?.status, "reconciliation_required");
+      if (action?.status !== "reconciliation_required") throw new Error("expected reconciliation owner");
+      return {
+        projection: {
+          ...projection,
+          externalActions: {
+            ...projection.externalActions,
+            [fixture.requestId]: {
+              ...action,
+              reconciliationStartedAt: "2026-08-18T04:00:00.000Z",
+              reconciliationExpiresAt: "2026-08-18T04:00:29.000Z",
+            },
+          },
+        },
+        value: null,
+      };
+    },
+  });
+
+  const recovered = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:36.000Z", completionTime: () => new Date("2026-08-18T04:00:37.000Z"),
+  });
+  await takeoverEntered;
+  releaseFirst();
+  assert.equal((await first).status, "reconciliation_required");
+  releaseSecond();
+  assert.equal((await recovered).status, "verified");
+  assert.equal((await waiter).status, "verified");
+  assert.equal(reads, 2);
+});
+
+test("reconciliation Provider timeout respects the absolute deadline", async () => {
+  const fixture = await approvedAction();
+  let entered!: () => void;
+  const providerEntered = new Promise<void>((resolve) => { entered = resolve; });
+  let aborted = false;
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ signal }) {
+      entered();
+      return new Promise<never>((_, reject) => signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(signal.reason);
+      }, { once: true }));
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+  const deadline = Date.now() + 5_000;
+  const started = Date.now();
+  const result = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:31.000Z"), deadline,
+  });
+  const rejection = assert.rejects(result, (error: unknown) => error instanceof ExternalActionError && error.code === "WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED");
+  await providerEntered;
+  await rejection;
+  assert.equal(aborted, true);
+  assert.ok(Date.now() - started < 7_000);
+  const action = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId];
+  assert.equal(action?.status, "reconciliation_required");
+  if (action?.status !== "reconciliation_required") throw new Error("expected reconciliation-required action");
+  assert.equal(action.reconciliationOwner, undefined);
+});
+
+test("an expired reconciliation owner cannot commit a late Provider result without takeover", async () => {
+  const fixture = await approvedAction();
+  let release!: () => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const providerEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const executor: ExternalActionExecutor = {
+    async execute({ markDispatched }) { await markDispatched(); throw new Error("unknown after send"); },
+    async reconcile({ request }) {
+      entered();
+      await blocked;
+      return { outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest, checkedAt: "2026-08-18T04:00:40.000Z" };
+    },
+  };
+  await executeExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    payload: fixture.input.payload, executor, now: "2026-08-18T04:00:20.000Z",
+  });
+
+  const result = reconcileExternalAction({
+    root: fixture.root, workItemId: fixture.workItemId, requestId: fixture.requestId,
+    executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:31.000Z"),
+    deadline: Date.now() + 5_000,
+  });
+  await providerEntered;
+  await mutateControlPlane({
+    cwd: fixture.root,
+    workItemId: fixture.workItemId,
+    eventType: "projection.invalidated",
+    idempotencyKey: `test:expire-owner-without-takeover:${fixture.requestId}`,
+    operationInput: { requestId: fixture.requestId },
+    mutate: (projection) => {
+      const action = projection.externalActions[fixture.requestId];
+      assert.equal(action?.status, "reconciliation_required");
+      if (action?.status !== "reconciliation_required") throw new Error("expected reconciliation owner");
+      return {
+        projection: { ...projection, externalActions: {
+          ...projection.externalActions,
+          [fixture.requestId]: {
+            ...action,
+            reconciliationStartedAt: "2026-08-18T04:00:00.000Z",
+            reconciliationExpiresAt: "2026-08-18T04:00:29.000Z",
+          },
+        } },
+        value: null,
+      };
+    },
+  });
+  release();
+  assert.equal((await result).status, "reconciliation_required");
+  const released = (await readControlPlane(fixture.root, fixture.workItemId)).externalActions[fixture.requestId];
+  assert.equal(released?.status, "reconciliation_required");
+  if (released?.status !== "reconciliation_required") throw new Error("expected reconciliation-required action");
+  assert.equal(released.reconciliationOwner, undefined);
 });
 
 test("external action events replay after projection loss", async () => {
@@ -868,7 +1226,7 @@ test("Provider errors and reconciliation reasons never expose credentials in err
     });
     const failed = await reconcileExternalAction({
       root: after.root, workItemId: after.workItemId, requestId: after.requestId,
-      executor, now: "2026-08-18T04:00:30.000Z",
+      executor, now: "2026-08-18T04:00:30.000Z", completionTime: () => new Date("2026-08-18T04:00:30.000Z"),
     });
     assert.equal(failed.status, "failed");
     if (failed.status !== "failed") throw new Error("expected failed reconciliation");
@@ -1003,6 +1361,49 @@ test("expired-Lease recovery renews the original post-dispatch Attempt for recon
   assert.equal(writes, 1);
 });
 
+test("reconciliation after Lease expiry resumes the original Attempt without redispatch", async () => {
+  let currentTime = "2026-08-18T04:00:00.000Z";
+  let writes = 0;
+  const fixture = await applicationExternalActionFixture({
+    async execute({ markDispatched }) { await markDispatched(); writes += 1; throw new Error("response lost"); },
+    async reconcile({ request }) {
+      return {
+        outcome: "verified", targetStableId: request.target.stableId, contentDigest: request.payloadDigest,
+        checkedAt: currentTime,
+      };
+    },
+  }, { now: () => new Date(currentTime) });
+  const pending = await submitExternalAction(fixture);
+  assert.equal(pending.action, "await_approval");
+  if (pending.action !== "await_approval") throw new Error("expected approval");
+  await fixture.app.decide({
+    kind: "external_action", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "approved", expectedDigest: pending.approval.digest, actor: "maintainer",
+  });
+  assert.equal((await submitExternalAction(fixture)).action, "blocked");
+
+  currentTime = "2026-08-18T05:00:00.000Z";
+  const resumed = await fixture.app.decide({
+    kind: "external_reconciliation", root: fixture.root, workItemId: fixture.workItemId,
+    requestId: pending.approval.requestId, decision: "reconcile", expectedDigest: pending.approval.digest, actor: "codex",
+  });
+
+  assert.equal(resumed.action, "execute");
+  if (resumed.action !== "execute") throw new Error("expected original Attempt receipt adoption");
+  assert.equal(resumed.resumeSubmission, true);
+  assert.equal(resumed.workPackage.attemptId, fixture.workPackage.attemptId);
+  const completed = await fixture.app.submit({
+    root: fixture.root,
+    workItemId: fixture.workItemId,
+    stepId: resumed.workPackage.stepId,
+    attemptId: resumed.workPackage.attemptId,
+    leaseToken: resumed.workPackage.lease.token,
+    result: fixture.result,
+  });
+  assert.equal(completed.action, "completed");
+  assert.equal(writes, 1);
+});
+
 test("inspect recovers a dispatched-only event tail into a payload-free reconciliation view", async () => {
   const fixture = await approvedAction();
   await mutateControlPlane({
@@ -1091,6 +1492,7 @@ test("failed knowledge reconciliation becomes a warning only when the selected p
         requestId: pending.approval.requestId,
         executor,
         now: "2026-08-18T04:00:30.000Z",
+        completionTime: () => new Date("2026-08-18T04:00:30.000Z"),
       });
 
       const next = await fixture.app.acquire({ root: fixture.root, workItemId: fixture.workItemId, actor: "codex" });

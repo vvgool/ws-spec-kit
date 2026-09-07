@@ -69,7 +69,7 @@ test("spawnJson does not inherit HOME or credential-bearing environment variable
 
 test("spawnJson uses deterministic PATH for env-node shebangs", async (t) => {
   const fixture = await executableFixture(t, "#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ok:true,PATH:process.env.PATH}))\n");
-  const result = await spawnJson({ ...request(""), executable: fixture.executable, argv: [] });
+  const result = await spawnJson({ ...request("", { timeoutMs: 60_000 }), executable: fixture.executable, argv: [] });
 
   assert.deepEqual(result.value, { ok: true, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin` });
 });
@@ -187,6 +187,25 @@ test("timeout terminates the complete process group before rejecting", async () 
   assert.equal(error.diagnostic, "");
   await new Promise((resolve) => setTimeout(resolve, 450));
   await assert.rejects(readFile(marker), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  await rm(marker, { force: true });
+});
+
+test("abort terminates the complete process group before rejecting", async () => {
+  const marker = path.join(os.tmpdir(), `wspec-abort-survivor-${crypto.randomUUID()}`);
+  const descendant = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'survived'),300);setInterval(()=>{},1000)`;
+  const script = [
+    "const {spawn}=await import('node:child_process')",
+    `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'})`,
+    "setInterval(()=>{},1000)",
+  ].join(";");
+  const controller = new AbortController();
+  const result = spawnJson(request(script, { signal: controller.signal }));
+  setTimeout(() => controller.abort(), 40);
+
+  const error = await rejectsWithCode(result, "WSSPEC_PROCESS_ABORTED");
+  assert.equal(error.diagnostic, "");
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await assert.rejects(readFile(marker), (caught: unknown) => (caught as NodeJS.ErrnoException).code === "ENOENT");
   await rm(marker, { force: true });
 });
 

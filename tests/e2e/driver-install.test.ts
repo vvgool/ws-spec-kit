@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { access, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -110,10 +110,10 @@ test("安装器只幂等复验当前 canonical Driver", async () => {
   const first = await readFile(ownedTarget, "utf8");
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
   assert.equal(await readFile(ownedTarget, "utf8"), first);
-  assert.match(first, /wsspeckit-driver-version: 7/);
+  assert.match(first, /wsspeckit-driver-version: 9/);
 });
 
-test("安装器拒绝原地升级所有已登记的历史 canonical Driver", async (t) => {
+test("安装器拒绝原地升级历史 canonical Driver", async (t) => {
   for (const revision of ["initial", "chineseGuidance"] as const) {
     for (const agent of ["codex", "claude", "cursor", "generic"] as const) {
       await t.test(`${revision}/${agent}`, async () => {
@@ -129,9 +129,7 @@ test("安装器拒绝原地升级所有已登记的历史 canonical Driver", asy
             && "code" in error
             && (error as Error & { code: string }).code === "WSSPEC_SKILL_INSTALL_CONFLICT",
         );
-
-        const updated = await readFile(path.join(target, "SKILL.md"), "utf8");
-        assert.equal(updated, before);
+        assert.equal(await readFile(path.join(target, "SKILL.md"), "utf8"), before);
       });
     }
   }
@@ -255,4 +253,29 @@ test("安全 helper 用已记录 inode 拒绝 parent swap 且外部目录零副�
   assert.equal(failure?.message.includes(outside), false);
   assert.deepEqual(await readdir(outside), []);
   await assert.rejects(access(path.join(moved, "SKILL.md")), /ENOENT/);
+});
+
+test("安全 helper 拒绝在 JS 预检后新增的 hardlink", async () => {
+  const home = await temporaryHome();
+  const target = path.join(home, ".agents", "skills", "wsspeckit-driver");
+  const outside = path.join(home, "outside-hardlink.md");
+  await mkdir(target, { recursive: true });
+  await installDriverSkill({ agent: "codex", home });
+  const install = createDriverSkillInstaller({
+    secureInstall: async (request) => {
+      await link(path.join(target, "SKILL.md"), outside);
+      try {
+        await secureInstallDriverFile(request);
+      } finally {
+        await unlink(outside).catch(() => undefined);
+      }
+    },
+  });
+
+  await assert.rejects(
+    install({ agent: "codex", home }),
+    (error: unknown) => error instanceof Error
+      && "code" in error
+      && (error as Error & { code: string }).code === "WSSPEC_SKILL_INSTALL_CONFLICT",
+  );
 });

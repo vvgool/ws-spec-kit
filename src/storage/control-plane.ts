@@ -73,6 +73,7 @@ export interface RuntimeApproval {
   workspaceTreeDigest: string;
   requestedBy?: string;
   decidedBy?: string;
+  feedback?: string;
   status: "pending" | "approved" | "rejected" | "expired";
   createdAt: string;
   decidedAt?: string;

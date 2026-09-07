@@ -25,20 +25,19 @@ wspec agent install --client generic --target <安装目录>
 Codex、Claude、Cursor 分别安装到宿主约定的 `~/.agents/skills/wsspeckit-driver/SKILL.md`、
 `~/.claude/skills/wsspeckit-driver/SKILL.md` 和 `~/.cursor/skills/wsspeckit-driver/SKILL.md`。
 Generic 没有可推断的宿主目录，必须显式提供 `--target`。四类目标目录都必须预先存在，安装器不会创建
-任何祖先或目标目录。安装器支持 `--dry-run`；同 v4 canonical 摘要只读复验并保持幂等，历史 v1-v3、
-未知或被修改的同名内容都拒绝覆盖或原地升级。四类安装只生成中文说明的 `SKILL.md`，不生成 `.mdc`
+任何祖先或目标目录。安装器支持 `--dry-run`；同 v9 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
+同名内容均拒绝原地覆盖，必须由用户人工迁移。四类安装只生成中文说明的 `SKILL.md`，不生成 `.mdc`
 或后台 Runner。
 
 安全 helper 固定使用 canonical、root-owned 且不可 group/world write 的 `/usr/bin/python3 -I -S`；请求只从
 stdin 接收结构化 JSON，stdout 仅允许有界固定 JSON，不继承 HOME、PYTHONPATH 或用户凭据，并受超时和
 输出上限约束。helper 从根目录开始以 `dir_fd`、`O_DIRECTORY`、`O_NOFOLLOW` 逐段打开预创建目标并核对
-最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v4 只读复验，不执行
-pathname `mkdir` 或 `rename`。祖先/最终 symlink、hardlink、非普通文件和两个 parent-swap race 都 fail
+最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v9 只读复验，不执行 pathname `mkdir` 或替换。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
 closed，且对抗测试验证外部目录无新增或修改。
 
 ## 模拟协议循环
 
-Driver v4 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
+Driver v9 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
 功能/文档 Workflow 选择、`new`/`recovery` 入口、四条命令的 argv 模板、输出 capture、action 分支与终点。
 验收解释器只从安装后的 JSON 合同派生命令，不在测试代码中维护第二套协议。
 
@@ -59,6 +58,7 @@ claim 下一份 Work Package，Host 必须直接执行并继续 submit；若同�
 `WSSPEC_STAGE_ALREADY_CLAIMED`。Runtime 在区分 actor 前先把完整 Claim/Context/Work Package 与事件链中的
 可信投影逐字段绑定；Skill、Artifact、forbidden action、required output、Gate、result schema、Lease 或任一
 嵌套结构损坏都以 `WSSPEC_ACTIVE_CLAIM_INVALID` fail closed。
+审批修改意见使用两阶段拒绝：WSSpecKit 本地真实 TTY 先签发绑定 Request、摘要、actor 和 feedback digest 的一次性 token，非 TTY Host 再携带同一 feedback 与 token 提交拒绝。Driver 只在 `execute.resumeSubmission: true` 时复用原 SubmitResult；其余步骤批准、修订拒绝和过期替换都重新 author Artifact，不再从 `revisionRequest` 是否存在反向猜测路由。
 每条 Fixture 都验证 fresh-process recovery、至少两个 execute grants 和至少两次 submit，并到达明确 blocked
 终点；功能 Fixture 由本地可信门禁边界停止，文档 Fixture 在不执行真实编辑的边界显式提交 failed 后停止。
 

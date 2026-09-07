@@ -196,6 +196,7 @@ async function prepareApproval(current: Fixture): Promise<{
   const worktree = await worktreeFor(current.root, started.workItemId);
   const application = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"), "utf8")) as { source: ArtifactReference };
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  assert.equal(intake.version, 1);
   assert.deepEqual(intake.artifacts, [application.source]);
   const explore = requireExecute(await submitPackage(current, intake));
   assert.deepEqual(explore.artifacts, [application.source]);
@@ -1421,6 +1422,30 @@ test("decide uses the TTY approval boundary and returns the next AgentAction", a
   assert.equal(requireExecute(next).stepId, "design");
 });
 
+test("repeated and concurrent approval decisions replay the same next Work Package", async () => {
+  for (const concurrent of [false, true]) {
+    const current = await fixture();
+    const { started, awaiting } = await prepareApproval(current);
+    const input = {
+      kind: "approval" as const,
+      root: current.root,
+      workItemId: started.workItemId,
+      requestId: awaiting.approval.requestId,
+      decision: "approved" as const,
+      expectedDigest: awaiting.approval.digest,
+      actor: "reviewer",
+    };
+    const actions = concurrent
+      ? await Promise.all([current.app.decide(input), current.app.decide(input)])
+      : [await current.app.decide(input), await current.app.decide(input)];
+    assert.deepEqual(actions[1], actions[0]);
+    const pkg = requireExecute(actions[0]!);
+    const projection = await readControlPlane(current.root, started.workItemId);
+    assert.equal(projection.claims[pkg.stepId]?.claimToken, pkg.lease.token);
+    assert.equal(projection.contexts[pkg.stepId] && (projection.contexts[pkg.stepId] as { workPackage: WorkPackage }).workPackage.lease.token, pkg.lease.token);
+  }
+});
+
 test("decide rechecks the caller digest after acquiring the control-plane owner lock", async () => {
   const current = await fixture();
   const { started, awaiting } = await prepareApproval(current);
@@ -1505,6 +1530,130 @@ test("rejected or expired approval returns a replacement execution action", asyn
   }));
   assert.equal(expiredNext.stepId, "clarify");
   assert.notEqual(expiredNext.attemptId, expiredApproval.clarify.attemptId);
+});
+
+test("rejected approval persists revision feedback in the replacement Work Package", async () => {
+  const current = await fixture({ terminal: { isTTY: false } });
+  const approval = await prepareApproval(current);
+  const feedback = "MR URL 不应作为任务身份；缺少 MR IID 时回退到源分支和目标分支。";
+  const signer = createApplication({ provider: "codex", home: os.homedir(), terminal: { isTTY: true }, now: current.now });
+  const confirmed = await signer.decide({
+    kind: "approval", root: current.root, workItemId: approval.started.workItemId,
+    requestId: approval.awaiting.approval.requestId, decision: "confirm_rejection",
+    expectedDigest: approval.awaiting.approval.digest, feedback, actor: "opencode",
+  });
+  assert.equal(confirmed.action, "rejection_confirmed");
+  if (confirmed.action !== "rejection_confirmed") throw new Error("expected rejection confirmation");
+
+  const next = requireExecute(await current.app.decide({
+    kind: "approval",
+    root: current.root,
+    workItemId: approval.started.workItemId,
+    requestId: approval.awaiting.approval.requestId,
+    decision: "rejected",
+    expectedDigest: approval.awaiting.approval.digest,
+    feedback,
+    rejectionToken: confirmed.rejectionConfirmation.token,
+    actor: "opencode",
+  }));
+
+  assert.equal(next.stepId, "clarify");
+  assert.equal(next.version, 2);
+  assert.deepEqual(next.revisionRequest, {
+    approvalRequestId: approval.awaiting.approval.requestId,
+    feedback,
+  });
+  const projection = await readControlPlane(current.root, approval.started.workItemId);
+  assert.equal(projection.approvals[approval.awaiting.approval.requestId]?.feedback, feedback);
+
+  await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
+  await recoverControlPlane({ cwd: current.root, workItemId: approval.started.workItemId });
+  const reacquired = requireExecute(await current.app.acquire({
+    root: current.root,
+    workItemId: approval.started.workItemId,
+    actor: "opencode",
+  }));
+  assert.notEqual(reacquired.attemptId, approval.clarify.attemptId);
+  assert.deepEqual(reacquired.revisionRequest, next.revisionRequest);
+});
+
+test("latest rejection without feedback does not reuse stale revision feedback", async () => {
+  const current = await fixture();
+  const approval = await prepareApproval(current);
+  const firstRevision = requireExecute(await current.app.decide({
+    kind: "approval",
+    root: current.root,
+    workItemId: approval.started.workItemId,
+    requestId: approval.awaiting.approval.requestId,
+    decision: "rejected",
+    expectedDigest: approval.awaiting.approval.digest,
+    feedback: "第一轮修改意见",
+    actor: "reviewer",
+  }));
+  const revised = await authorArtifact({
+    current,
+    worktree: approval.worktree,
+    workPackage: firstRevision,
+    artifactType: "specification",
+    body: [
+      "# 规格", "", "## 目标与背景", "目标", "## 范围", "范围", "## 需求", "修订需求",
+      "## 验收条件", "条件", "## 约束", "约束", "## 排除项", "无", "## 开放问题", "无", "",
+    ].join("\n"),
+  });
+  const secondApproval = await submitPackage(current, firstRevision, completedResult(firstRevision, [revised]));
+  assert.equal(secondApproval.action, "await_approval");
+  if (secondApproval.action !== "await_approval") throw new Error("expected replacement approval");
+
+  const secondRevision = requireExecute(await current.app.decide({
+    kind: "approval",
+    root: current.root,
+    workItemId: approval.started.workItemId,
+    requestId: secondApproval.approval.requestId,
+    decision: "rejected",
+    expectedDigest: secondApproval.approval.digest,
+    actor: "reviewer",
+  }));
+  assert.equal(secondRevision.revisionRequest, undefined);
+});
+
+test("revision feedback follows the causal approval binding instead of approval object order", async () => {
+  const current = await fixture({ terminal: { isTTY: false } });
+  const approval = await prepareApproval(current);
+  const feedback = "使用当前审批明确绑定的修改意见";
+  const signer = createApplication({ provider: "codex", home: os.homedir(), terminal: { isTTY: true }, now: current.now });
+  const confirmed = await signer.decide({
+    kind: "approval", root: current.root, workItemId: approval.started.workItemId,
+    requestId: approval.awaiting.approval.requestId, decision: "confirm_rejection",
+    expectedDigest: approval.awaiting.approval.digest, feedback, actor: "opencode",
+  });
+  assert.equal(confirmed.action, "rejection_confirmed");
+  if (confirmed.action !== "rejection_confirmed") throw new Error("expected rejection confirmation");
+  const revision = requireExecute(await current.app.decide({
+    kind: "approval",
+    root: current.root,
+    workItemId: approval.started.workItemId,
+    requestId: approval.awaiting.approval.requestId,
+    decision: "rejected",
+    expectedDigest: approval.awaiting.approval.digest,
+    feedback,
+    rejectionToken: confirmed.rejectionConfirmation.token,
+    actor: "opencode",
+  }));
+  const projection = await readControlPlane(current.root, approval.started.workItemId);
+  const decided = projection.approvals[approval.awaiting.approval.requestId]!;
+  projection.approvals = {
+    [approval.awaiting.approval.requestId]: decided,
+    "approval-stale": { ...decided, requestId: "approval-stale", feedback: "陈旧意见" },
+  };
+  await writeProjection(projection);
+
+  const reacquired = requireExecute(await current.app.acquire({
+    root: current.root,
+    workItemId: approval.started.workItemId,
+    actor: "opencode",
+  }));
+  assert.notEqual(reacquired.attemptId, approval.clarify.attemptId);
+  assert.deepEqual(reacquired.revisionRequest, revision.revisionRequest);
 });
 
 test("explicit recovery resumes an interrupted Attempt from any Git worktree", async () => {

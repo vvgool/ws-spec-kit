@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -132,6 +132,41 @@ test("git.commit reconciliation remains unknown while HEAD is still the approved
     { outcome: "unknown" },
   );
   assert.equal(await git(setup.root, "rev-parse", "HEAD"), setup.baselineRevision);
+});
+
+test("git.commit reconciliation abort cleans the complete process group before rejecting", async () => {
+  if (process.platform !== "darwin" && process.platform !== "linux") return;
+  const setup = await fixture();
+  await writeFile(path.join(setup.root, "src/a.txt"), "approved\n", "utf8");
+  const input = await approval(setup, ["src/a.txt"]);
+  const helperRoot = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-git-abort-")));
+  const executable = path.join(helperRoot, "git");
+  const entered = path.join(helperRoot, "entered");
+  const marker = path.join(helperRoot, "survivor");
+  const descendant = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(marker)},'survived'),500)`;
+  const script = [
+    `#!${process.execPath}`,
+    "const {spawn}=require('node:child_process')",
+    "const {writeFileSync}=require('node:fs')",
+    `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'}).unref()`,
+    `writeFileSync(${JSON.stringify(entered)},'entered')`,
+    "setInterval(()=>{},1000)",
+  ].join("\n");
+  await writeFile(executable, script, { mode: 0o755 });
+  const controller = new AbortController();
+  const result = reconcileGitCommit({ executable, approval: input, signal: controller.signal });
+  try {
+    while (true) {
+      try { await access(entered); break; } catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+    }
+    controller.abort();
+    await assert.rejects(result, hasCode("WSSPEC_GIT_PROCESS_FAILED"));
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    await assert.rejects(access(marker), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  } finally {
+    controller.abort();
+    await rm(helperRoot, { recursive: true, force: true });
+  }
 });
 
 test("git.commit reconciliation fails closed for a non-approved HEAD", async (t) => {

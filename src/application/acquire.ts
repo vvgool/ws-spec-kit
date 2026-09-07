@@ -20,6 +20,7 @@ import {
   succeedLoop,
 } from "../engine/control/loop.js";
 import { implementationActors } from "../engine/actor-roles.js";
+import { approvalRevisionEvidenceKey } from "../engine/approvals.js";
 import {
   acquireRetry,
   interruptedRetry,
@@ -187,7 +188,8 @@ async function activeClaimContext(input: {
       || !rawClaim.allowedPaths.every((value) => typeof value === "string") || !Array.isArray(rawClaim.workspaceSnapshot)) {
       throw new Error("active Claim or Context shape is invalid");
     }
-    const workPackage = validate<WorkPackage>("builtin.work-package.v1", context.workPackage);
+    const workPackageVersion = objectRecord(context.workPackage)?.version;
+    const workPackage = validate<WorkPackage>(workPackageVersion === 1 ? "builtin.work-package.v1" : "builtin.work-package.v2", context.workPackage);
     const step = claimedSnapshotStep(input);
     const stageStatus = input.projection.stages[input.stageId]?.status;
     const claimedAt = Date.parse(rawClaim.claimedAt);
@@ -391,7 +393,10 @@ function pendingExternalAction(projection: RuntimeProjection, workItemId: string
         if (candidate.status === "verified") continue;
         return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH", message: "外部动作 Grant 绑定的 Attempt/Lease 已失效。", retryable: false }] };
       }
-      return { action: "execute", workPackage: context.workPackage };
+      if (context.workPackage.version !== 1) {
+        return { action: "blocked", problems: [{ code: "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH", message: "外部动作恢复只允许绑定普通 v1 Work Package。", retryable: false }] };
+      }
+      return { action: "execute", workPackage: context.workPackage, resumeSubmission: true };
     }
   }
   return undefined;
@@ -525,8 +530,15 @@ function workPackageFor(input: {
       ...(output.contentLevel === undefined ? {} : { contentLevel: output.contentLevel }),
     } as const;
   });
-  const value: WorkPackage = {
-    version: 1,
+  const stepInstanceId = input.stepInstanceId ?? input.step.id;
+  const revisionRequestId = input.projection.evidence[approvalRevisionEvidenceKey(stepInstanceId)];
+  const revisionApproval = typeof revisionRequestId === "string"
+    ? input.projection.approvals[revisionRequestId]
+    : undefined;
+  const revisionRequest = revisionApproval?.stageId !== stepInstanceId || revisionApproval.status !== "rejected" || revisionApproval.feedback === undefined
+    ? undefined
+    : { approvalRequestId: revisionApproval.requestId, feedback: revisionApproval.feedback };
+  const common = {
     workItemId: input.workItemId as `WSS-${string}`,
     stepId: input.stepInstanceId ?? input.step.id,
     attemptId: input.attemptId,
@@ -542,14 +554,17 @@ function workPackageFor(input: {
     },
     requiredOutputs,
     artifactAuthoring: {
-      version: 1,
+      version: 1 as const,
       maxContentBytes: 1_048_576,
       draftRoots: [".acceptance", `.wsspec/work-items/${input.workItemId}/drafts`],
     },
     gates: input.step.gates.map((id) => ({ id, evidence: gatesById.get(id)?.evidence ?? "trusted", required: true })),
-    resultSchema: "builtin.submit-result.v1",
+    resultSchema: "builtin.submit-result.v1" as const,
   };
-  return validate<WorkPackage>("builtin.work-package.v1", value);
+  const value: WorkPackage = revisionRequest === undefined
+    ? { ...common, version: 1 }
+    : { ...common, version: 2, revisionRequest };
+  return validate<WorkPackage>(value.version === 1 ? "builtin.work-package.v1" : "builtin.work-package.v2", value);
 }
 
 function completed(workItemId: string, status: "closed" | "cancelled", message: string): AgentAction {

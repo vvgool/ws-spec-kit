@@ -89,7 +89,7 @@ export interface ExternalActionExecutor {
     readBackContentDigest: `sha256:${string}`;
     verifiedAt: string;
   }>;
-  reconcile(input: { root: string; request: ExternalActionRequest; grant: ExternalActionGrant }): Promise<ExternalReadBack>;
+  reconcile(input: { root: string; request: ExternalActionRequest; grant: ExternalActionGrant; signal: AbortSignal }): Promise<ExternalReadBack>;
   adopt?(input: {
     root: string;
     request: ExternalActionRequest;
@@ -490,6 +490,44 @@ async function reconciliationRequired(input: { root: string; workItemId: string;
   }) as Promise<Extract<ExternalActionState, { status: "reconciliation_required" }>>;
 }
 
+const reconciliationProviderTimeoutMs = 25_000;
+const reconciliationAbortCleanupMs = 1_500;
+const reconciliationOwnerTtlMs = 30_000;
+const reconciliationPollMs = 10;
+
+function withoutReconciliationOwner(
+  action: Extract<ExternalActionState, { status: "reconciliation_required" }>,
+): Extract<ExternalActionState, { status: "reconciliation_required" }> {
+  const {
+    reconciliationOwner: _owner,
+    reconciliationStartedAt: _startedAt,
+    reconciliationExpiresAt: _expiresAt,
+    ...released
+  } = action;
+  return released;
+}
+
+async function awaitReconciliationOwner(input: {
+  root: string;
+  workItemId: string;
+  requestId: string;
+  owner: string;
+  retry: () => Promise<Extract<ExternalActionState, { status: "verified" | "failed" | "reconciliation_required" }>>;
+  deadline: number;
+}): Promise<Extract<ExternalActionState, { status: "verified" | "failed" | "reconciliation_required" }>> {
+  while (true) {
+    const action = currentAction(await readControlPlane(input.root, input.workItemId), input.requestId);
+    if (action.status === "verified" || action.status === "failed") return action;
+    if (action.status !== "reconciliation_required") {
+      throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "协调恢复状态在等待期间发生了无效变化。");
+    }
+    if (action.reconciliationOwner !== input.owner) return input.retry();
+    if (Date.parse(action.reconciliationExpiresAt ?? "") <= Date.now()) return input.retry();
+    if (Date.now() >= input.deadline) throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED", "协调恢复等待超时，未改变外部动作状态。");
+    await new Promise((resolve) => setTimeout(resolve, reconciliationPollMs));
+  }
+}
+
 export async function executeExternalAction(input: {
   root: string;
   workItemId: string;
@@ -615,76 +653,214 @@ export async function reconcileExternalAction(input: {
   requestId: string;
   executor: ExternalActionExecutor;
   now: string;
+  completionTime: () => Date;
+  deadline?: number;
 }): Promise<Extract<ExternalActionState, { status: "verified" | "failed" | "reconciliation_required" }>> {
-  const current = currentAction(await readControlPlane(input.root, input.workItemId), input.requestId);
-  if (current.status === "verified" || current.status === "failed") return current;
-  if (current.status !== "reconciliation_required") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "当前外部动作不允许协调回查。");
+  const deadline = input.deadline ?? (Date.now() + reconciliationProviderTimeoutMs + 5_000);
+  const startedAt = new Date(input.now);
+  const reconciliationOwner = `external-reconciliation-${crypto.randomUUID()}`;
+  const claimed = await mutateControlPlane<{ action: ExternalActionState; owned: boolean; existingOwner?: string }>({
+    cwd: input.root,
+    workItemId: input.workItemId,
+    eventType: "external-action.reconciliation-started",
+    idempotencyKey: `external-action:reconciliation-owner:${input.requestId}:${reconciliationOwner}`,
+    actor: "external-coordinator",
+    operationInput: { decision: "reconcile", reconciliationOwner, startedAt: input.now },
+    stageId: (value) => value.action.request.stepId,
+    attemptId: (value) => value.action.request.attemptId,
+    mutate: (currentProjection) => {
+      const action = currentAction(currentProjection, input.requestId);
+      if (action.status === "verified" || action.status === "failed") {
+        return { projection: currentProjection, value: { action, owned: false as const } };
+      }
+      if (action.status !== "reconciliation_required") {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "当前外部动作不允许协调回查。");
+      }
+      assertActiveAttempt(currentProjection, action.request, startedAt);
+      const ownerExpiresAt = Date.parse(action.reconciliationExpiresAt ?? "");
+      if (action.reconciliationOwner !== undefined && Number.isFinite(ownerExpiresAt) && ownerExpiresAt > startedAt.getTime()) {
+        return {
+          projection: currentProjection,
+          value: { action, owned: false as const, existingOwner: action.reconciliationOwner },
+        };
+      }
+      const owned = {
+        ...withoutReconciliationOwner(action),
+        reconciliationOwner,
+        reconciliationStartedAt: input.now,
+        reconciliationExpiresAt: new Date(startedAt.getTime() + reconciliationOwnerTtlMs).toISOString(),
+      };
+      return {
+        projection: { ...currentProjection, externalActions: { ...currentProjection.externalActions, [input.requestId]: owned } },
+        value: { action: owned, owned: true as const },
+      };
+    },
+  });
+  if (claimed.action.status === "verified" || claimed.action.status === "failed") return claimed.action;
+  if (!claimed.owned) {
+    if (claimed.existingOwner === undefined) {
+      if (claimed.action.status !== "reconciliation_required") {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "协调恢复状态无效。");
+      }
+      return claimed.action;
+    }
+    return awaitReconciliationOwner({
+      ...input,
+      owner: claimed.existingOwner,
+      deadline,
+      retry: () => {
+        if (Date.now() >= deadline) throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED", "协调恢复等待超时，未改变外部动作状态。");
+        return reconcileExternalAction({ ...input, now: input.completionTime().toISOString(), deadline });
+      },
+    });
+  }
+  if (claimed.action.status !== "reconciliation_required") {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED", "当前外部动作不允许协调回查。");
+  }
+  if (Date.now() >= deadline) {
+    await persistAction({
+      ...input,
+      eventType: "external-action.reconciled",
+      suffix: `reconciliation-owner-released:${reconciliationOwner}`,
+      operationInput: { reconciliationOwner, outcome: "deadline_exhausted" },
+      update: (action) => action.status === "reconciliation_required" && action.reconciliationOwner === reconciliationOwner
+        ? withoutReconciliationOwner(action)
+        : action,
+    });
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED", "协调恢复等待超时，未改变外部动作状态。");
+  }
+
   let readBack: ExternalReadBack;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const reconciliationController = new AbortController();
+  const claimedAction = claimed.action;
+  const providerReadBack = Promise.resolve().then(() => input.executor.reconcile({
+      root: input.root,
+      request: claimedAction.request,
+      grant: claimedAction.grant,
+      signal: reconciliationController.signal,
+    }));
   try {
-    readBack = await input.executor.reconcile({ root: input.root, request: current.request, grant: current.grant });
+    readBack = await Promise.race([
+      providerReadBack,
+      new Promise<never>((_, reject) => {
+        const timeoutMs = Math.max(0, Math.min(reconciliationProviderTimeoutMs, deadline - Date.now()));
+        timeoutHandle = setTimeout(() => {
+          reconciliationController.abort(new Error("reconciliation timeout"));
+          reject(new Error("reconciliation timeout"));
+        }, timeoutMs);
+      }),
+    ]);
   } catch {
+    if (reconciliationController.signal.aborted) {
+      let cleanupHandle: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          providerReadBack.then(() => undefined, () => undefined),
+          new Promise<void>((resolve) => { cleanupHandle = setTimeout(resolve, reconciliationAbortCleanupMs); }),
+        ]);
+      } finally {
+        if (cleanupHandle !== undefined) clearTimeout(cleanupHandle);
+      }
+    }
+    await persistAction({
+      ...input,
+      eventType: "external-action.reconciled",
+      suffix: `reconciliation-owner-released:${reconciliationOwner}`,
+      operationInput: { reconciliationOwner, outcome: "provider_error" },
+      update: (action) => action.status === "reconciliation_required" && action.reconciliationOwner === reconciliationOwner
+        ? withoutReconciliationOwner(action)
+        : action,
+    });
     throw new ExternalAuthorizationError(
       "WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED",
       "Provider 只读协调回查失败，未改变外部动作状态。",
     );
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
   }
-  if (readBack.outcome === "unknown") {
-    const safeReadBack = { outcome: "unknown" as const, checkedAt: input.now };
-    return persistAction({
-      ...input,
-      eventType: "external-action.reconciled",
-      suffix: `reconciled-unknown:${canonicalDigest(safeReadBack).slice("sha256:".length)}`,
-      operationInput: safeReadBack,
-      update: (action) => action.status !== "reconciliation_required" ? action : { ...action, lastCheckedAt: input.now },
-    }) as Promise<Extract<ExternalActionState, { status: "reconciliation_required" }>>;
-  }
-  if (readBack.outcome === "failed") {
-    const safeReadBack = { outcome: "failed" as const, checkedAt: input.now };
-    return persistAction({
-      ...input,
-      eventType: "external-action.reconciled",
-      suffix: `reconciled-failed:${canonicalDigest(safeReadBack).slice("sha256:".length)}`,
-      operationInput: safeReadBack,
-      update: (action) => {
-        if (action.status !== "reconciliation_required") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID", "协调失败结果需要 reconciliation_required 状态。");
-        return transitionExternalAction(action, {
+
+  const completedAt = input.completionTime().toISOString();
+  const settled = await mutateControlPlane<{ action: ExternalActionState; leaseExpired: boolean; deadlineExpired: boolean }>({
+    cwd: input.root,
+    workItemId: input.workItemId,
+    eventType: "external-action.reconciled",
+    idempotencyKey: `external-action:reconciliation-result:${input.requestId}:${reconciliationOwner}`,
+    actor: "external-coordinator",
+    stageId: claimed.action.request.stepId,
+    attemptId: claimed.action.request.attemptId,
+    operationInput: { reconciliationOwner, completedAt, readBack },
+    mutate: (currentProjection) => {
+      const action = currentAction(currentProjection, input.requestId);
+      if (action.status === "verified" || action.status === "failed") {
+        return { projection: currentProjection, value: { action, leaseExpired: false, deadlineExpired: false } };
+      }
+      if (action.status !== "reconciliation_required" || action.reconciliationOwner !== reconciliationOwner
+        || action.request.requestId !== claimed.action.request.requestId
+        || action.request.requestDigest !== claimed.action.request.requestDigest
+        || action.request.attemptId !== claimed.action.request.attemptId) {
+        return { projection: currentProjection, value: { action, leaseExpired: false, deadlineExpired: false } };
+      }
+      const committedAt = input.completionTime().toISOString();
+      try {
+        assertActiveAttempt(currentProjection, action.request, new Date(committedAt));
+      } catch (error) {
+        if (!(error instanceof ExternalAuthorizationError) || error.code !== "WSSPEC_EXTERNAL_ATTEMPT_MISMATCH") throw error;
+        const released = withoutReconciliationOwner(action);
+        return {
+          projection: { ...currentProjection, externalActions: { ...currentProjection.externalActions, [input.requestId]: released } },
+          value: { action: released, leaseExpired: true, deadlineExpired: false },
+        };
+      }
+      const ownerExpiresAt = Date.parse(action.reconciliationExpiresAt ?? "");
+      const committedAtMs = Date.parse(committedAt);
+      if (!Number.isFinite(ownerExpiresAt) || ownerExpiresAt <= committedAtMs || Date.now() >= deadline) {
+        const released = withoutReconciliationOwner(action);
+        return {
+          projection: { ...currentProjection, externalActions: { ...currentProjection.externalActions, [input.requestId]: released } },
+          value: { action: released, leaseExpired: false, deadlineExpired: Date.now() >= deadline },
+        };
+      }
+      let next: ExternalActionState;
+      if (readBack.outcome === "failed") {
+        next = transitionExternalAction(action, {
           status: "failed",
           request: action.request,
           grant: action.grant,
           reason: "provider read-back did not verify approved content",
-          failedAt: input.now,
+          failedAt: completedAt,
         });
-      },
-    }) as Promise<Extract<ExternalActionState, { status: "failed" }>>;
-  }
-  let confirmed: ExternalWriteReceipt;
-  try {
-    confirmed = receipt(current.request, current.grant, {
-      targetStableId: readBack.targetStableId,
-      publishedContentDigest: readBack.contentDigest,
-      readBackContentDigest: readBack.contentDigest,
-      verifiedAt: input.now,
-    });
-  }
-  catch {
-    return persistAction({
-      ...input,
-      eventType: "external-action.reconciled",
-      suffix: `reconciled-mismatch:${canonicalDigest({ outcome: "unknown", checkedAt: input.now }).slice("sha256:".length)}`,
-      operationInput: { outcome: "unknown", checkedAt: input.now },
-      update: (action) => action.status !== "reconciliation_required" ? action : { ...action, lastCheckedAt: input.now },
-    }) as Promise<Extract<ExternalActionState, { status: "reconciliation_required" }>>;
-  }
-  return persistAction({
-    ...input,
-    eventType: "external-action.reconciled",
-    suffix: `reconciled-verified:${canonicalDigest(confirmed).slice("sha256:".length)}`,
-    operationInput: confirmed,
-    update: (action) => {
-      if (action.status !== "reconciliation_required") throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID", "协调确认需要 reconciliation_required 状态。");
-      return transitionExternalAction(action, { status: "verified", request: action.request, grant: action.grant, receipt: confirmed });
+      } else if (readBack.outcome === "verified") {
+        try {
+          const confirmed = receipt(action.request, action.grant, {
+            targetStableId: readBack.targetStableId,
+            publishedContentDigest: readBack.contentDigest,
+            readBackContentDigest: readBack.contentDigest,
+            verifiedAt: completedAt,
+          });
+          next = transitionExternalAction(action, { status: "verified", request: action.request, grant: action.grant, receipt: confirmed });
+        } catch {
+          next = { ...withoutReconciliationOwner(action), lastCheckedAt: completedAt };
+        }
+      } else {
+        next = { ...withoutReconciliationOwner(action), lastCheckedAt: completedAt };
+      }
+      return {
+        projection: {
+          ...currentProjection,
+          externalActions: { ...currentProjection.externalActions, [input.requestId]: next },
+        },
+        value: { action: next, leaseExpired: false, deadlineExpired: false },
+      };
     },
-  }) as Promise<Extract<ExternalActionState, { status: "verified" }>>;
+  });
+  if (settled.leaseExpired) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_ATTEMPT_MISMATCH", "Provider 回查完成时原 Attempt/Lease 已失效，未提交结果。");
+  }
+  if (settled.deadlineExpired) {
+    throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED", "协调恢复已超过截止时间，未提交 Provider 结果。");
+  }
+  return settled.action as Extract<ExternalActionState, { status: "verified" | "failed" | "reconciliation_required" }>;
 }
 
 export async function markExternalActionFailed(input: {

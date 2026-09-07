@@ -19,7 +19,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=2 tests/**/*.test.ts",
     "test:contract": "node --import tsx --test tests/contract/**/*.test.ts",
     "test:e2e": "node --import tsx --test tests/e2e/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

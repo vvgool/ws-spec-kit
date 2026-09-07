@@ -24,6 +24,7 @@ export interface GitlabIssueReadInput {
   executable: string;
   target: GitlabIssueTarget;
   environment?: GitlabEnvironment;
+  signal?: AbortSignal;
 }
 
 export interface GitlabIssueWriteInput extends GitlabIssueReadInput {
@@ -131,6 +132,7 @@ async function execute(input: GitlabIssueReadInput, argv: readonly string[], pay
       input: payload,
       timeoutMs,
       maxStdoutBytes,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(() => {
         const environment = validateIssueProviderEnvironment(input.environment, new Set(["HOME", "XDG_CONFIG_HOME", "GLAB_CONFIG_DIR"]));
         return environment === undefined ? {} : { environment };

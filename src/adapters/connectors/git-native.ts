@@ -14,6 +14,9 @@ import {
 
 const timeoutMs = 30_000;
 const maximumOutputBytes = 16 * 1024 * 1024;
+const cleanupGraceMs = 250;
+const cleanupDeadlineMs = 3_000;
+const cleanupPollMs = 25;
 const safeEnvironmentNames = ["LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "TERM", "TZ"] as const;
 
 export interface GitCommitInput {
@@ -21,6 +24,10 @@ export interface GitCommitInput {
   approval: GitCommitApproval;
   environment?: Readonly<Partial<Record<"HOME" | "XDG_CONFIG_HOME", string | undefined>>>;
   markDispatched?(): Promise<void>;
+}
+
+export interface GitCommitReconciliationInput extends Omit<GitCommitInput, "markDispatched"> {
+  signal?: AbortSignal;
 }
 
 export type GitCommitReconciliation =
@@ -113,8 +120,13 @@ async function runGit(input: {
   argv: readonly string[];
   environment: NodeJS.ProcessEnv;
   stdin?: Buffer | string;
+  signal?: AbortSignal;
 }): Promise<GitResult> {
   return new Promise((resolve, reject) => {
+    if (input.signal?.aborted === true) {
+      reject(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 命令执行已取消。"));
+      return;
+    }
     const detached = process.platform === "darwin" || process.platform === "linux";
     const child = spawn(input.executable, ["-c", "core.fsmonitor=false", ...input.argv], {
       cwd: input.cwd,
@@ -127,23 +139,79 @@ async function runGit(input: {
     const stderr: Buffer[] = [];
     let outputBytes = 0;
     let settled = false;
+    let closed = false;
+    let cleanupComplete = true;
     let termination: GitCommitError | undefined;
+    let spawnFailed = false;
+    const processGroupExists = (): boolean => {
+      if (!detached || child.pid === undefined) return !closed;
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    };
+    const signalProcessGroup = (signal: NodeJS.Signals): void => {
+      try {
+        if (detached && child.pid !== undefined) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    };
+    const cleanupProcessGroup = async (): Promise<void> => {
+      if (!processGroupExists()) return;
+      const deadline = Date.now() + cleanupDeadlineMs;
+      try {
+        signalProcessGroup("SIGTERM");
+        const graceDeadline = Math.min(deadline, Date.now() + cleanupGraceMs);
+        while (processGroupExists() && Date.now() < graceDeadline) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, cleanupPollMs));
+        }
+        if (!processGroupExists()) return;
+        signalProcessGroup("SIGKILL");
+        while (processGroupExists()) {
+          if (Date.now() >= deadline) throw new Error("cleanup deadline");
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, cleanupPollMs));
+        }
+      } catch {
+        throw new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 子进程组无法清理。");
+      }
+    };
+    const finish = (): void => {
+      if (settled || !closed || !cleanupComplete) return;
+      settled = true;
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", abort);
+      if (termination !== undefined) {
+        reject(termination);
+        return;
+      }
+      if (spawnFailed) {
+        reject(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "无法启动 Git 命令。"));
+        return;
+      }
+      const stdoutValue = Buffer.concat(stdout);
+      const stderrValue = Buffer.concat(stderr);
+      resolve({ stdout: stdoutValue, stderr: stderrValue });
+    };
     const terminate = (error: GitCommitError): void => {
       if (settled || termination !== undefined) return;
       termination = error;
-      try {
-        if (detached && child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch (signalError) {
-        if ((signalError as NodeJS.ErrnoException).code !== "ESRCH") {
-          termination = new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 子进程组无法清理。");
-        }
-      }
+      cleanupComplete = false;
+      void cleanupProcessGroup().then(
+        () => { cleanupComplete = true; finish(); },
+        (cleanupError: GitCommitError) => { termination = cleanupError; cleanupComplete = true; finish(); },
+      );
     };
     const timer = setTimeout(() => {
       terminate(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 命令执行超时。"));
     }, timeoutMs);
     timer.unref();
+    const abort = (): void => terminate(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 命令执行已取消。"));
+    input.signal?.addEventListener("abort", abort, { once: true });
+    if (Boolean(input.signal?.aborted)) abort();
     const capture = (target: Buffer[]) => (chunk: Buffer): void => {
       outputBytes += chunk.byteLength;
       if (outputBytes > maximumOutputBytes) {
@@ -156,25 +224,18 @@ async function runGit(input: {
     child.stderr.on("data", capture(stderr));
     child.once("error", () => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "无法启动 Git 命令。"));
+      spawnFailed = true;
+      closed = true;
+      finish();
     });
     child.once("close", (code, signal) => {
       if (settled) return;
-      clearTimeout(timer);
-      settled = true;
-      if (termination !== undefined) {
-        reject(termination);
-        return;
-      }
-      const stdoutValue = Buffer.concat(stdout);
-      const stderrValue = Buffer.concat(stderr);
+      closed = true;
       if (code !== 0 || signal !== null) {
-        reject(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 命令执行失败。"));
+        terminate(new GitCommitError("WSSPEC_GIT_PROCESS_FAILED", "Git 命令执行失败。"));
         return;
       }
-      resolve({ stdout: stdoutValue, stderr: stderrValue });
+      finish();
     });
     child.stdin.on("error", () => undefined);
     child.stdin.end(input.stdin);
@@ -370,11 +431,12 @@ async function stagedProposal(input: {
   return { files, diffDigest, treeOid };
 }
 
-export async function reconcileGitCommit(input: Omit<GitCommitInput, "markDispatched">): Promise<GitCommitReconciliation> {
+export async function reconcileGitCommit(input: GitCommitReconciliationInput): Promise<GitCommitReconciliation> {
   if (input === null || typeof input !== "object" || Array.isArray(input)
     || (Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null)
-    || Reflect.ownKeys(input).some((key) => typeof key !== "string" || !["approval", "environment", "executable"].includes(key))
+    || Reflect.ownKeys(input).some((key) => typeof key !== "string" || !["approval", "environment", "executable", "signal"].includes(key))
     || !Object.hasOwn(input, "approval") || !Object.hasOwn(input, "executable")
+    || (input.signal !== undefined && !(input.signal instanceof AbortSignal))
     || Object.values(Object.getOwnPropertyDescriptors(input)).some((descriptor) => !descriptor.enumerable || !("value" in descriptor))) {
     return failGitCommit("WSSPEC_GIT_REQUEST_INVALID", "Git commit 协调回查输入无效。");
   }
@@ -388,6 +450,7 @@ export async function reconcileGitCommit(input: Omit<GitCommitInput, "markDispat
     cwd: root,
     argv,
     environment,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(stdin === undefined ? {} : { stdin }),
   });
   const actualRoot = await canonicalRepositoryPath(text(await git(["rev-parse", "--path-format=absolute", "--show-toplevel"])));

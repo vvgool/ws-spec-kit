@@ -101,7 +101,17 @@ export type ExternalActionState =
   | { status: "prepared"; request: ExternalActionRequest }
   | { status: "approved"; request: ExternalActionRequest; grant: ExternalActionGrant }
   | { status: "executing"; request: ExternalActionRequest; grant: ExternalActionGrant; dispatch: "not_sent" | "sent_or_unknown"; startedAt: string; executionOwner?: string; dispatchedAt?: string }
-  | { status: "reconciliation_required"; request: ExternalActionRequest; grant: ExternalActionGrant; reason: string; requiredAt: string; lastCheckedAt?: string }
+  | {
+    status: "reconciliation_required";
+    request: ExternalActionRequest;
+    grant: ExternalActionGrant;
+    reason: string;
+    requiredAt: string;
+    lastCheckedAt?: string;
+    reconciliationOwner?: string;
+    reconciliationStartedAt?: string;
+    reconciliationExpiresAt?: string;
+  }
   | { status: "verified"; request: ExternalActionRequest; grant: ExternalActionGrant; receipt: ExternalWriteReceipt }
   | { status: "failed"; request: ExternalActionRequest; grant: ExternalActionGrant; reason: string; failedAt: string };
 
@@ -310,6 +320,14 @@ export function assertExternalActionProjection(
     if (state.status === "reconciliation_required") {
       if (state.reason === "" || !Number.isFinite(Date.parse(state.requiredAt))) {
         throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROJECTION_INVALID", "协调恢复投影无效。");
+      }
+      const ownerFields = [state.reconciliationOwner, state.reconciliationStartedAt, state.reconciliationExpiresAt];
+      if (ownerFields.some((value) => value !== undefined)
+        && (state.reconciliationOwner === undefined || state.reconciliationOwner === ""
+          || state.reconciliationStartedAt === undefined || !Number.isFinite(Date.parse(state.reconciliationStartedAt))
+          || state.reconciliationExpiresAt === undefined || !Number.isFinite(Date.parse(state.reconciliationExpiresAt))
+          || Date.parse(state.reconciliationExpiresAt) <= Date.parse(state.reconciliationStartedAt))) {
+        throw new ExternalAuthorizationError("WSSPEC_EXTERNAL_PROJECTION_INVALID", "协调恢复 owner 投影无效。");
       }
       continue;
     }

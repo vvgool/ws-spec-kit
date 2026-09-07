@@ -165,7 +165,7 @@ export function createBuiltinExternalExecutor(
         verifiedAt: new Date().toISOString(),
       };
     },
-    async reconcile({ root, request }): Promise<ExternalReadBack> {
+    async reconcile({ root, request, signal }): Promise<ExternalReadBack> {
       await resolveProvider(provider, action);
       const payload = await durablePayload(root, request);
       const checkedAt = new Date().toISOString();
@@ -178,7 +178,7 @@ export function createBuiltinExternalExecutor(
           || canonicalDigest(approval) !== canonicalDigest(payload)) {
           throw new ExternalActionError("WSSPEC_EXTERNAL_BINDING_INVALID", "Git commit approval 与持久 Request 不一致。");
         }
-        const actual = await reconcileGitCommit({ executable: runtime.executables.git, approval });
+        const actual = await reconcileGitCommit({ executable: runtime.executables.git, approval, signal });
         if (actual.outcome !== "verified") return { outcome: actual.outcome, checkedAt };
         return actual.repositoryCommonDir === request.target.stableId
           && actual.diffDigest === request.expectedContentDigest
@@ -188,8 +188,8 @@ export function createBuiltinExternalExecutor(
       if (normalized === "github-cli" || normalized === "gitlab-cli") {
         const value = issuePayload(payload);
         const actual = normalized === "github-cli"
-          ? await readGithubIssue({ executable: runtime.executables.gh, target: value.target as Parameters<typeof readGithubIssue>[0]["target"], ...(runtime.environments?.github === undefined ? {} : { environment: runtime.environments.github }) })
-          : await readGitlabIssue({ executable: runtime.executables.glab, target: value.target as Parameters<typeof readGitlabIssue>[0]["target"], ...(runtime.environments?.gitlab === undefined ? {} : { environment: runtime.environments.gitlab }) });
+          ? await readGithubIssue({ executable: runtime.executables.gh, target: value.target as Parameters<typeof readGithubIssue>[0]["target"], signal, ...(runtime.environments?.github === undefined ? {} : { environment: runtime.environments.github }) })
+          : await readGitlabIssue({ executable: runtime.executables.glab, target: value.target as Parameters<typeof readGitlabIssue>[0]["target"], signal, ...(runtime.environments?.gitlab === undefined ? {} : { environment: runtime.environments.gitlab }) });
         const matches = issueMatches(actual, value.action);
         if (matches === undefined) return { outcome: "unknown", checkedAt };
         return matches && actual.stableId === request.target.stableId
@@ -203,6 +203,7 @@ export function createBuiltinExternalExecutor(
         executable: runtime.executables["lark-cli"],
         document: target.documentToken,
         identity: runtime.larkIdentity ?? "user",
+        signal,
         ...(runtime.environments?.feishu === undefined ? {} : { environment: runtime.environments.feishu }),
       });
       return actual.stableId === request.target.stableId && actual.title === target.title && actual.body === target.markdown

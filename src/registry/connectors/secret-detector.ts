@@ -2,6 +2,10 @@ const tokenFamily = /(?:github_pat_[A-Za-z0-9_]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|
 const credentialHeader = /\b(?:authorization|cookie|set-cookie)\s*[:=]\s*\S/iu;
 const authorizationScheme = /\b(?:bearer|basic)\s+[A-Za-z0-9+/=._~-]{4,}/iu;
 const labelledSecret = /\b(?:api[-_ ]?key|client[-_ ]?secret|credential|password|private[-_ ]?key|refresh[-_ ]?token|session(?:id)?|secret|token)\s*[:=]\s*\S/iu;
+const privateKeyBlock = /-----BEGIN (?:[A-Z0-9]+ )?(?:PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----/u;
+const awsAccessKey = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u;
+const jwt = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/u;
+const credentialConnectionString = /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis):\/\/[^\s/@:]+:[^\s/@]+@/iu;
 const larkTokenCandidate = /(?:^|[^A-Za-z0-9])([tua]-[A-Za-z0-9_-]{24,})(?=$|[^A-Za-z0-9])/gu;
 const invalidPercentEscape = /%(?![A-Fa-f0-9]{2})/u;
 const defaultMaximumSurfaceBytes = 8_192;
@@ -39,7 +43,16 @@ export function credentialLikeValue(value: string): boolean {
     || larkAccessToken(value)
     || credentialHeader.test(value)
     || authorizationScheme.test(value)
-    || labelledSecret.test(value);
+    || labelledSecret.test(value)
+    || privateKeyBlock.test(value)
+    || awsAccessKey.test(value)
+    || jwt.test(value)
+    || credentialConnectionString.test(value);
+}
+
+export function inspectCredentialText(text: string, maximumBytes: number): DecodedCredentialSurfaceResult {
+  if (Buffer.byteLength(text, "utf8") > maximumBytes) return { ok: false, reason: "too-large" };
+  return credentialLikeValue(text) ? { ok: false, reason: "credential" } : { ok: true, value: text };
 }
 
 export function credentialLikeField(value: string): boolean {

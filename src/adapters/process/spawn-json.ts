@@ -23,6 +23,7 @@ export interface SpawnJsonRequest {
   maxStdoutBytes: number;
   secrets?: readonly string[];
   environment?: Readonly<Record<string, string | undefined>>;
+  signal?: AbortSignal;
 }
 
 export interface ProcessJsonResult {
@@ -61,6 +62,7 @@ export type ProcessJsonErrorCode =
   | "WSSPEC_PROCESS_REQUEST_INVALID"
   | "WSSPEC_PROCESS_SPAWN_FAILED"
   | "WSSPEC_PROCESS_EXECUTABLE_CHANGED"
+  | "WSSPEC_PROCESS_ABORTED"
   | "WSSPEC_PROCESS_TIMEOUT"
   | "WSSPEC_PROCESS_OUTPUT_LIMIT"
   | "WSSPEC_PROCESS_CLEANUP_FAILED"
@@ -191,6 +193,7 @@ async function assertExecutableUnchanged(executable: ResolvedExecutable): Promis
 function assertRequest(request: SpawnJsonRequest): void {
   if (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1
     || !Number.isSafeInteger(request.maxStdoutBytes) || request.maxStdoutBytes < 1
+    || (request.signal !== undefined && !(request.signal instanceof AbortSignal))
     || request.argv.some((part) => typeof part !== "string" || part.includes("\0"))) {
     throw new ProcessJsonError("WSSPEC_PROCESS_REQUEST_INVALID", "进程请求参数无效。", "");
   }
@@ -268,7 +271,11 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
   const stderrChunks: Buffer[] = [];
   let stdoutBytes = 0;
   let stderrBytes = 0;
-  let termination: "timeout" | "output_limit" | undefined;
+  let termination: "aborted" | "timeout" | "output_limit" | undefined;
+
+  if (request.signal?.aborted === true) {
+    throw new ProcessJsonError("WSSPEC_PROCESS_ABORTED", "Connector 子进程执行已取消。", "");
+  }
 
   const child = spawn(executable.path, [...request.argv], {
     shell: false,
@@ -302,6 +309,9 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
     };
     const timeoutTimer = setTimeout(() => terminate("timeout"), request.timeoutMs);
     timeoutTimer.unref();
+    const abort = (): void => terminate("aborted");
+    request.signal?.addEventListener("abort", abort, { once: true });
+    if (request.signal?.aborted === true) abort();
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes = boundedAppend(stdoutChunks, stdoutBytes, chunk, request.maxStdoutBytes);
@@ -313,6 +323,7 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
     });
     child.once("error", () => {
       clearTimeout(timeoutTimer);
+      request.signal?.removeEventListener("abort", abort);
       void cleanupFailure().then(
         () => reject(new ProcessJsonError("WSSPEC_PROCESS_SPAWN_FAILED", "无法启动 Connector 子进程。", "")),
         reject,
@@ -320,6 +331,7 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
     });
     child.once("close", (code, closeSignal) => {
       clearTimeout(timeoutTimer);
+      request.signal?.removeEventListener("abort", abort);
       closed = true;
       exitCode = code;
       signal = closeSignal;
@@ -330,6 +342,9 @@ async function runProcess(request: SpawnJsonRequest): Promise<RawProcessResult> 
   child.stdin.end(`${serializedInput}\n`);
   const result = await resultPromise;
   try {
+    if (termination === "aborted") {
+      throw new ProcessJsonError("WSSPEC_PROCESS_ABORTED", "Connector 子进程执行已取消。", "");
+    }
     if (termination === "timeout") {
       throw new ProcessJsonError("WSSPEC_PROCESS_TIMEOUT", "Connector 子进程执行超时。", "");
     }

@@ -24,6 +24,7 @@ export interface GithubIssueReadInput {
   executable: string;
   target: GithubIssueTarget;
   environment?: GithubEnvironment;
+  signal?: AbortSignal;
 }
 
 export interface GithubIssueWriteInput extends GithubIssueReadInput {
@@ -131,6 +132,7 @@ async function execute(input: GithubIssueReadInput, argv: readonly string[], pay
       input: payload,
       timeoutMs,
       maxStdoutBytes,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(() => {
         const environment = validateIssueProviderEnvironment(input.environment, new Set(["HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"]));
         return environment === undefined ? {} : { environment };

@@ -38,6 +38,7 @@ interface CliRun {
 type DriverState = "start" | "inspect" | "acquire" | "artifact" | "submit" | "decide";
 type DriverOperationName = DriverState;
 type DriverTerminal = "await_approval" | "blocked" | "completed";
+type DriverAction = "execute" | "rejection_confirmed" | DriverTerminal;
 
 interface DriverCollectionRule {
   target: "artifactRefs";
@@ -66,11 +67,21 @@ interface DriverOperation {
   next?: DriverState;
   branch?: {
     field: string;
-    cases: Record<"execute" | DriverTerminal, {
+    cases: Record<DriverAction, {
       next: DriverState | DriverTerminal;
       capture?: Record<string, string>;
       initialize?: DriverCollectionRule;
       humanGate?: { required: true; approval: "result.approval" };
+      routeByPresence?: {
+        field: string;
+        present: { next: DriverState; initialize?: DriverCollectionRule };
+        absent: { next: DriverState; initialize?: DriverCollectionRule };
+      };
+      routeByValue?: {
+        field: string;
+        cases: Record<string, { next: DriverState; initialize?: DriverCollectionRule }>;
+        default: { next: DriverState; initialize?: DriverCollectionRule };
+      };
     }>;
   };
 }
@@ -162,7 +173,7 @@ function requiredString(value: unknown, label: string): string {
 function requiredWorkPackage(value: unknown, label: string): WorkPackage {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), `${label}: Work Package 必须是对象`);
   const candidate = value as Partial<WorkPackage>;
-  assert.equal(candidate.version, 1, `${label}: Work Package version`);
+  assert.ok(candidate.version === 1 || candidate.version === 2, `${label}: Work Package version`);
   assert.equal(typeof candidate.workItemId, "string", `${label}: workItemId`);
   assert.equal(typeof candidate.stepId, "string", `${label}: stepId`);
   assert.equal(typeof candidate.attemptId, "string", `${label}: attemptId`);
@@ -217,6 +228,13 @@ function driverContract(body: string): DriverContract {
 function valueAt(source: unknown, pointer: string): unknown {
   return pointer.split(".").reduce<unknown>((current, segment) => {
     assert.ok(current !== null && typeof current === "object" && !Array.isArray(current), `无法从 ${pointer} 读取 ${segment}`);
+    return (current as Record<string, unknown>)[segment];
+  }, source);
+}
+
+function optionalValueAt(source: unknown, pointer: string): unknown {
+  return pointer.split(".").reduce<unknown>((current, segment) => {
+    if (current === null || typeof current !== "object" || Array.isArray(current)) return undefined;
     return (current as Record<string, unknown>)[segment];
   }, source);
 }
@@ -293,6 +311,10 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.match(body, /builtin:\/\/workflows\/feature-delivery/u, `${client}: 功能 workflowRef`);
       assert.match(body, /builtin:\/\/workflows\/documentation-delivery/u, `${client}: 文档 workflowRef`);
       assert.match(body, /创建后不得自动切换 Workflow/u, `${client}: Workflow 不切换`);
+      assert.match(body, /明确提出修改要求.*feedback.*rejected/su, `${client}: 修改意见自动退回`);
+      assert.match(body, /revisionRequest\.feedback/u, `${client}: 修订 Work Package 携带反馈`);
+      assert.match(body, /本地真实 TTY.*confirm_rejection/u, `${client}: 修改意见必须先经本地 TTY 确认`);
+      assert.match(body, /rejectionToken/u, `${client}: 拒绝决定携带一次性确认凭据`);
       assert.match(body, /不冒充.*真实 Agent Host/u, `${client}: Host 边界`);
       assert.equal(contract.operations.acquire.branch?.field, "result.action", `${client}: acquire action 分支`);
       assert.deepEqual(contract.operations.acquire.branch?.cases, {
@@ -385,7 +407,6 @@ test("Driver 对受治理外部动作在人工决定后以返回 Work Package �
       const decide = contract.operations.decide;
       assert.deepEqual(decide.argv, ["wspec", "decide", "--input", "${decisionPath}", "--actor", "${actor}"], `${client}: decide must use the public human-gated decision entrypoint`);
       assert.deepEqual(decide.branch?.cases.execute, {
-        next: "submit",
         capture: {
           workPackage: "result.workPackage",
           stepId: "result.workPackage.stepId",
@@ -393,9 +414,21 @@ test("Driver 对受治理外部动作在人工决定后以返回 Work Package �
           leaseToken: "result.workPackage.lease.token",
           requiredOutputs: "result.workPackage.requiredOutputs",
         },
+        routeByValue: {
+          field: "result.resumeSubmission",
+          cases: { true: { next: "submit" } },
+          default: {
+            next: "artifact",
+            initialize: contract.operations.acquire.branch?.cases.execute.initialize,
+          },
+        },
       }, `${client}: human-approved action must retain the returned package identity and re-submit the existing result`);
-      assert.equal(decide.branch?.cases.execute?.initialize, undefined, `${client}: resumed submit must not rebuild ArtifactRef inputs`);
-      assert.equal(decide.branch?.cases.execute?.next, "submit", `${client}: resumed action must bypass artifact authoring`);
+      assert.equal(decide.branch?.cases.execute?.routeByValue?.default.next, "artifact", `${client}: approval and rejection replacement attempts must rebuild ArtifactRef inputs`);
+      assert.equal(decide.branch?.cases.execute?.routeByValue?.cases.true.next, "submit", `${client}: explicitly resumed external action must bypass artifact authoring`);
+      assert.deepEqual(decide.branch?.cases.rejection_confirmed, {
+        next: "decide",
+        capture: { rejectionToken: "result.rejectionConfirmation.token" },
+      }, `${client}: confirmation token must feed the rejection decision`);
       assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" }, `${client}: recovery remains inspect then acquire`);
       assert.equal(contract.operations.inspect.next, "acquire", `${client}: inspect is only the recovery bridge to acquire`);
     });
@@ -689,8 +722,21 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
             const branchCase = branch === undefined
               ? undefined
               : branch.cases[requiredString(valueAt(run.value, branch.field), `${client}/${kind}: action.kind`) as keyof typeof branch.cases];
+            const presenceRoute = branchCase?.routeByPresence === undefined
+              ? undefined
+              : optionalValueAt(run.value, branchCase.routeByPresence.field) === undefined
+                ? branchCase.routeByPresence.absent
+                : branchCase.routeByPresence.present;
+            const routeValue = branchCase?.routeByValue === undefined
+              ? undefined
+              : optionalValueAt(run.value, branchCase.routeByValue.field);
+            const valueRoute = branchCase?.routeByValue === undefined
+              ? undefined
+              : branchCase.routeByValue.cases[String(routeValue)] ?? branchCase.routeByValue.default;
             capture(branchCase?.capture, run.value, values);
             initialize(branchCase?.initialize, run.value, values);
+            initialize(presenceRoute?.initialize, run.value, values);
+            initialize(valueRoute?.initialize, run.value, values);
 
             if (state === "start") {
               assert.equal(values.workflowRef, task.workflowRef, `${client}/${kind}: explicit workflowRef`);
@@ -750,7 +796,7 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
               }
             }
 
-            const next = branchCase?.next ?? operation.next;
+            const next = valueRoute?.next ?? presenceRoute?.next ?? branchCase?.next ?? operation.next;
             assert.ok(next !== undefined, `${client}/${kind}: ${state} 必须声明下一状态`);
             if (next in contract.terminals) {
               assert.equal(contract.terminals[next as DriverTerminal].stop, true);

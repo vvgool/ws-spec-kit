@@ -7,11 +7,78 @@ import { verifyArtifact } from "../domain/artifacts.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { readControlPlane, resolveWorkItemContext, type RuntimeApproval } from "../storage/control-plane.js";
+import { inspectCredentialText } from "../registry/connectors/secret-detector.js";
 import { mutateControlPlane } from "./scheduler.js";
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;
 
 type ApprovalArtifactReference = Pick<NonNullable<RuntimeApproval["artifacts"]>[number], "artifactType" | "outputId" | "artifactId" | "schemaVersion" | "path" | "revision" | "contentHash" | "mediaType">;
+
+export function approvalRevisionEvidenceKey(stageId: string): string {
+  return `approval-revision:${stageId}`;
+}
+
+const unpairedSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+const privateKey = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----|(?:^|\s)OPENSSH PRIVATE KEY(?:\s|$)/iu;
+const awsAccessKey = /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/u;
+const jwt = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u;
+const passwordConnectionString = /\b(?:[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@|(?:password|pwd)\s*=\s*[^;\s]+)/iu;
+
+export function normalizeApprovalFeedback(raw: string): string {
+  const feedback = raw.replace(/\r\n?/gu, "\n").trim();
+  if (feedback === "" || unpairedSurrogate.test(feedback) || Buffer.byteLength(feedback, "utf8") > 8192
+    || privateKey.test(feedback) || awsAccessKey.test(feedback) || jwt.test(feedback) || passwordConnectionString.test(feedback)
+    || !inspectCredentialText(feedback, 8192).ok) {
+    throw new ApprovalError("WSSPEC_APPROVAL_FEEDBACK_INVALID", "修改意见为空、过长、编码异常或包含凭据样式内容。");
+  }
+  return feedback;
+}
+
+export function approvalFeedbackDigest(feedback: string): string {
+  return sha256(normalizeApprovalFeedback(feedback));
+}
+
+export interface RejectionConfirmation {
+  requestId: string;
+  expectedDigest: string;
+  actor: string;
+  feedbackDigest: string;
+  tokenHash: string;
+  issuedAt: string;
+  consumedAt?: string;
+}
+
+export function rejectionConfirmationEvidenceKey(tokenHash: string): string {
+  return `approval-rejection-confirmation:${tokenHash}`;
+}
+
+export async function confirmArtifactRejection(input: { cwd: string; workItemId: string; requestId: string; expectedDigest: string; actor: string; feedback: string; terminal: { isTTY?: boolean } }): Promise<{ token: string; feedbackDigest: string }> {
+  if (input.terminal.isTTY !== true) throw new ApprovalError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "修改意见确认必须来自真实交互式 TTY。");
+  const feedbackDigest = approvalFeedbackDigest(input.feedback);
+  const confirmationIdentity = sha256(canonicalize({
+    requestId: input.requestId,
+    expectedDigest: input.expectedDigest,
+    actor: input.actor,
+    feedbackDigest,
+  })!);
+  const token = `rejection-${confirmationIdentity.slice("sha256:".length)}`;
+  const tokenHash = sha256(token);
+  const confirmation: RejectionConfirmation = {
+    requestId: input.requestId, expectedDigest: input.expectedDigest, actor: input.actor, feedbackDigest, tokenHash,
+    issuedAt: new Date().toISOString(),
+  };
+  await mutateControlPlane<RejectionConfirmation>({
+      cwd: input.cwd, workItemId: input.workItemId, eventType: "approval.rejection-confirmed",
+      idempotencyKey: `approval-rejection-confirmation:${confirmationIdentity}`, actor: input.actor,
+      operationInput: { requestId: input.requestId, expectedDigest: input.expectedDigest, actor: input.actor, feedbackDigest },
+      mutate: (current) => {
+        const request = assertPendingApproval(current, current.approvals[input.requestId], input.expectedDigest);
+        if (request.contentHash !== input.expectedDigest) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_MISMATCH", "审批摘要与当前请求不一致。");
+        return { projection: { ...current, evidence: { ...current.evidence, [rejectionConfirmationEvidenceKey(tokenHash)]: confirmation } }, value: confirmation };
+      },
+    });
+  return { token, feedbackDigest };
+}
 
 function normalizedApprovalArtifact(artifact: ApprovalArtifactReference): Record<string, unknown> {
   return {
@@ -224,8 +291,19 @@ async function expireArtifactApproval(input: { cwd: string; workItemId: string; 
   });
 }
 
-export async function decideArtifactApproval(input: { cwd: string; workItemId: string; requestId: string; decision: "approve" | "reject"; terminal: { isTTY?: boolean }; reason?: string; actor?: string; expectedDigest?: string }): Promise<RuntimeApproval> {
-  if (input.terminal.isTTY !== true) throw new ApprovalError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "批准或拒绝必须来自真实交互式 TTY。");
+export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: string; workItemId: string; requestId: string; decision: "approve" | "reject"; terminal: { isTTY?: boolean }; feedback?: string; rejectionToken?: string; reason?: string; actor?: string; expectedDigest?: string; finalize?: (projection: Awaited<ReturnType<typeof readControlPlane>>, approval: RuntimeApproval) => Promise<{ projection: Awaited<ReturnType<typeof readControlPlane>>; value: T }> }): Promise<T> {
+  const rawFeedback = input.feedback ?? (input.terminal.isTTY === true ? input.reason : undefined);
+  const feedback = rawFeedback === undefined ? undefined : normalizeApprovalFeedback(rawFeedback);
+  if (input.decision === "approve" && (feedback !== undefined || input.rejectionToken !== undefined)) {
+    throw new ApprovalError("WSSPEC_APPROVAL_FEEDBACK_NOT_ALLOWED", "批准决定不能携带修改意见或拒绝确认凭据。");
+  }
+  if (input.terminal.isTTY === true && input.rejectionToken !== undefined) {
+    throw new ApprovalError("WSSPEC_APPROVAL_FEEDBACK_NOT_ALLOWED", "TTY 拒绝决定不能携带拒绝确认凭据。");
+  }
+  if (input.terminal.isTTY !== true && !(input.decision === "reject" && feedback !== undefined && input.rejectionToken !== undefined)) {
+    throw new ApprovalError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "批准或无反馈拒绝必须来自真实交互式 TTY。");
+  }
+  const tokenHash = input.rejectionToken === undefined ? undefined : sha256(input.rejectionToken);
   const projection = await readControlPlane(input.cwd, input.workItemId);
   const request = projection.approvals[input.requestId];
   const worktree = await worktreeFor(input.cwd, input.workItemId);
@@ -233,9 +311,21 @@ export async function decideArtifactApproval(input: { cwd: string; workItemId: s
     return await mutateControlPlane({
       cwd: input.cwd, workItemId: input.workItemId, eventType: "approval.decided", idempotencyKey: `approval-decision:${input.requestId}`,
       ...(request === undefined ? {} : { stageId: request.stageId, attemptId: request.attemptId }),
-      actor: input.actor ?? "interactive-user", operationInput: { requestId: input.requestId, decision: input.decision, reason: input.reason ?? null, expectedDigest: input.expectedDigest ?? null },
+      actor: input.actor ?? "interactive-user", operationInput: { requestId: input.requestId, decision: input.decision, feedback: feedback ?? null, tokenHash: tokenHash ?? null, expectedDigest: input.expectedDigest ?? null },
       mutate: async (current) => {
         const pending = assertPendingApproval(current, request, input.expectedDigest);
+        let evidence = current.evidence;
+        if (input.terminal.isTTY !== true) {
+          const key = rejectionConfirmationEvidenceKey(tokenHash!);
+          const confirmation = current.evidence[key] as RejectionConfirmation | undefined;
+          if (confirmation === undefined) throw new ApprovalError("WSSPEC_REJECTION_CONFIRMATION_INVALID", "拒绝确认凭据不存在或无效。");
+          if (confirmation.consumedAt !== undefined) throw new ApprovalError("WSSPEC_REJECTION_CONFIRMATION_USED", "拒绝确认凭据已经使用。");
+          if (confirmation.requestId !== input.requestId || confirmation.expectedDigest !== input.expectedDigest
+            || confirmation.actor !== (input.actor ?? "interactive-user") || confirmation.feedbackDigest !== approvalFeedbackDigest(feedback!)) {
+            throw new ApprovalError("WSSPEC_REJECTION_CONFIRMATION_MISMATCH", "拒绝确认凭据与请求、actor 或修改意见不匹配。");
+          }
+          evidence = { ...current.evidence, [key]: { ...confirmation, consumedAt: new Date().toISOString() } };
+        }
         if (await computeWorkspaceTreeDigest(worktree) !== pending.workspaceTreeDigest) {
           throw new ApprovalError("WSSPEC_APPROVAL_EXPIRED", "审批绑定的工作区已经变化，请重新请求审批。");
         }
@@ -246,14 +336,19 @@ export async function decideArtifactApproval(input: { cwd: string; workItemId: s
           status,
           decidedBy: input.actor ?? "interactive-user",
           decidedAt: new Date().toISOString(),
+          ...(feedback === undefined ? {} : { feedback }),
         };
         const next = {
           ...current,
           workItem: transitionWorkItem(current.workItem, { type: "transition", to: "active" }),
           stages: { ...current.stages, [pending.stageId]: transitionStage(current.stages[pending.stageId]!, { type: "transition", to: input.decision === "approve" ? "succeeded" : "revision_required" }) },
           approvals: { ...current.approvals, [pending.requestId]: decided },
+          evidence: input.decision === "approve" ? evidence : {
+            ...evidence,
+            [approvalRevisionEvidenceKey(pending.stageId)]: pending.requestId,
+          },
         };
-        return { projection: next, value: decided };
+        return input.finalize === undefined ? { projection: next, value: decided as T } : input.finalize(next, decided);
       },
     });
   } catch (error) {

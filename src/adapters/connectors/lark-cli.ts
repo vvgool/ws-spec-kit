@@ -32,6 +32,7 @@ export interface FeishuDocumentReadInput {
   document: string;
   identity?: LarkIdentity;
   environment?: LarkEnvironment;
+  signal?: AbortSignal;
 }
 
 export interface NormalizedFeishuDocument extends NormalizedRequirementSource {
@@ -173,6 +174,7 @@ async function execute(input: {
   payload?: unknown;
   environment?: LarkEnvironment;
   secrets?: readonly string[];
+  signal?: AbortSignal;
 }): Promise<unknown> {
   try {
     return (await spawnJson({
@@ -181,6 +183,7 @@ async function execute(input: {
       input: input.payload ?? {},
       timeoutMs,
       maxStdoutBytes,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(input.secrets === undefined ? {} : { secrets: input.secrets }),
       ...(() => {
         const environment = validateLarkEnvironment(input.environment);
@@ -210,6 +213,7 @@ async function fetchDocument(input: FeishuDocumentReadInput, requiredToken?: str
       executable: input.executable,
       argv: fetchArgv(target.documentToken, identity, nextOffset),
       ...(input.environment === undefined ? {} : { environment: input.environment }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     }), target);
     if (requiredToken !== undefined && page.documentToken !== requiredToken) return invalidResponse();
     const first = pages[0];

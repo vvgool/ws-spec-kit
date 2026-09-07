@@ -350,6 +350,7 @@ test("Red and Green bind PATH resolution to the same executable identity", async
   const gate: FixedTestGate = {
     ...nodeGate(""),
     argv: [command, "--test", "tests/feature.test.mjs"],
+    timeoutMs: 10_000,
   };
   try {
     process.env.PATH = `${redBin}${path.delimiter}${previousPath ?? ""}`;

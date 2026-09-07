@@ -1,14 +1,15 @@
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
-import { ApprovalError, decideArtifactApproval } from "../engine/approvals.js";
+import { approvalRevisionEvidenceKey, ApprovalError, confirmArtifactRejection, decideArtifactApproval } from "../engine/approvals.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
 import type { AgentAction, DecisionInput } from "../protocol/application.js";
 import { validate } from "../schemas/index.js";
 import { readWorkflowTrustRequest } from "../storage/workflow-trust.js";
 import { loadWorkflowPackage } from "../workflow-package/loader.js";
 import { recordWorkflowTrust } from "../workflow-package/trust.js";
-import { acquireApplication, type AcquireDependencies } from "./acquire.js";
+import { acquireApplication, acquireNextLocked, type AcquireDependencies } from "./acquire.js";
 import { adoptVerifiedExternalAction, approveExternalAction, markExternalActionFailed, reconcileExternalAction, rejectExternalAction } from "./external-action.js";
-import { readControlPlane } from "../storage/control-plane.js";
+import { readControlPlane, recoverControlPlane } from "../storage/control-plane.js";
+import { loadApplicationState } from "./state.js";
 
 export interface DecideDependencies extends AcquireDependencies {
   terminal: { isTTY?: boolean };
@@ -40,6 +41,7 @@ async function resetExpiredApproval(input: Extract<DecisionInput, { kind: "appro
           ...current,
           workItem: transitionWorkItem(current.workItem, { type: "transition", to: "active" }),
           stages: { ...current.stages, [approval.stageId]: transitionStage(revision, { type: "transition", to: "ready" }) },
+          evidence: { ...current.evidence, [approvalRevisionEvidenceKey(approval.stageId)]: approval.requestId },
         },
         value: undefined,
       };
@@ -48,7 +50,7 @@ async function resetExpiredApproval(input: Extract<DecisionInput, { kind: "appro
 }
 
 export async function decideApplication(input: DecisionInput, dependencies: DecideDependencies): Promise<AgentAction> {
-  validate("builtin.application-decision-input.v1", input);
+  validate("builtin.application-decision-input.v2", input);
   if (input.kind === "workflow_trust") {
     if (dependencies.terminal.isTTY !== true) {
       throw new ApplicationDecisionError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "Workflow Package 信任决定必须来自真实交互式 TTY。 ");
@@ -71,6 +73,7 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
   }
 
   if (input.kind === "external_reconciliation") {
+    await recoverControlPlane({ cwd: input.root, workItemId: input.workItemId });
     const projection = await readControlPlane(input.root, input.workItemId);
     const state = projection.externalActions[input.requestId];
     if (state === undefined) throw new ApplicationDecisionError("WSSPEC_EXTERNAL_REQUEST_NOT_FOUND", "外部动作请求不存在。 ");
@@ -109,6 +112,7 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
         requestId: input.requestId,
         executor: dependencies.externalExecutor(state.request.provider, state.request.action),
         now: dependencies.now().toISOString(),
+        completionTime: dependencies.now,
       });
     }
     return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
@@ -149,8 +153,25 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
     return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
   }
 
+  if (input.decision === "confirm_rejection") {
+    const rejectionConfirmation = await confirmArtifactRejection({
+      cwd: input.root,
+      workItemId: input.workItemId,
+      requestId: input.requestId,
+      expectedDigest: input.expectedDigest,
+      actor: input.actor,
+      feedback: input.feedback,
+      terminal: dependencies.terminal,
+    });
+    return { action: "rejection_confirmed", rejectionConfirmation };
+  }
+  if (dependencies.terminal.isTTY !== true
+    && !(input.decision === "rejected" && input.feedback !== undefined && input.rejectionToken !== undefined)) {
+    throw new ApplicationDecisionError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "批准或无反馈拒绝必须来自真实交互式 TTY。 ");
+  }
+  const state = await loadApplicationState(input.root, input.workItemId);
   try {
-    await decideArtifactApproval({
+    return await decideArtifactApproval<AgentAction>({
       cwd: input.root,
       workItemId: input.workItemId,
       requestId: input.requestId,
@@ -158,10 +179,22 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
       terminal: dependencies.terminal,
       actor: input.actor,
       expectedDigest: input.expectedDigest,
+      ...(input.decision !== "rejected" || input.feedback === undefined ? {} : { feedback: input.feedback }),
+      ...(input.decision !== "rejected" || input.rejectionToken === undefined ? {} : { rejectionToken: input.rejectionToken }),
+      finalize: async (projection) => {
+        const acquired = await acquireNextLocked({
+          state: { ...state, projection },
+          projection,
+          actor: input.actor,
+          root: input.root,
+          dependencies,
+        });
+        return { projection: acquired.projection, value: acquired.action };
+      },
     });
   } catch (error) {
     if (!(error instanceof ApprovalError) || error.code !== "WSSPEC_APPROVAL_EXPIRED") throw error;
     await resetExpiredApproval(input);
+    return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
   }
-  return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
 }

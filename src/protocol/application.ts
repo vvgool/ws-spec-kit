@@ -1,5 +1,5 @@
 import type { WorkItemId } from "../domain/ids.js";
-import type { ArtifactReference, WorkPackage } from "./work-package.js";
+import type { ArtifactReference, WorkPackage, WorkPackageV1 } from "./work-package.js";
 
 export type WorkflowProfile = "auto" | "quick" | "standard" | "governed";
 
@@ -64,15 +64,24 @@ export interface SubmitInput {
   result: SubmitResult;
 }
 
-export interface ApprovalDecision {
+interface BaseApprovalDecision {
   kind: "approval";
   root: string;
   workItemId: WorkItemId;
   requestId: string;
-  decision: "approved" | "rejected";
   expectedDigest: string;
   actor: string;
 }
+
+export interface RejectionConfirmationInput extends BaseApprovalDecision {
+  decision: "confirm_rejection";
+  feedback: string;
+}
+
+export type ApprovalDecision = BaseApprovalDecision & (
+  | { decision: "approved" }
+  | { decision: "rejected"; feedback?: string; rejectionToken?: string }
+);
 
 export interface WorkflowTrustDecisionInput {
   kind: "workflow_trust";
@@ -133,7 +142,7 @@ export type ExternalActionReconciliationInput =
   | ExternalActionMarkFailedInput
   | ExternalActionAdoptVerifiedInput;
 
-export type DecisionInput = ApprovalDecision | WorkflowTrustDecisionInput | ExternalActionDecisionInput | ExternalActionReconciliationInput;
+export type DecisionInput = ApprovalDecision | RejectionConfirmationInput | WorkflowTrustDecisionInput | ExternalActionDecisionInput | ExternalActionReconciliationInput;
 
 export interface InspectInput {
   root: string;
@@ -192,7 +201,9 @@ export interface WorkItemView {
 }
 
 export type AgentAction =
-  | { action: "execute"; workPackage: WorkPackage }
+  | { action: "execute"; workPackage: WorkPackage; resumeSubmission?: never }
+  | { action: "execute"; workPackage: WorkPackageV1; resumeSubmission: true }
+  | { action: "rejection_confirmed"; rejectionConfirmation: { token: string; feedbackDigest: string } }
   | { action: "await_approval"; approval: ApprovalSummary }
   | { action: "blocked"; problems: Problem[] }
   | { action: "completed"; summary: CompletionSummary };
