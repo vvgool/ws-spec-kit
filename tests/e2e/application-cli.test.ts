@@ -332,6 +332,7 @@ test("每个公开 CLI route 至少保留一个可机器恢复的进程级领域
       await Promise.all([
         cp(path.join(repositoryRoot, "src"), path.join(runtime, "src"), { recursive: true }),
         cp(path.join(repositoryRoot, "resources"), path.join(runtime, "resources"), { recursive: true }),
+        cp(path.join(repositoryRoot, "package.json"), path.join(runtime, "package.json")),
       ]);
       await writeFile(path.join(runtime, "resources", "catalog.yaml"), "version: 99\nskills: []\nworkflows: []\n", "utf8");
       const result = await runCli(initialized, ["workflow", "list"], home, path.join(runtime, "src/cli/main.ts"));
