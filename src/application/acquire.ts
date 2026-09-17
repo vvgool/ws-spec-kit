@@ -645,6 +645,25 @@ function permanentFailureProblem(projection: RuntimeProjection, stageId: string)
     : undefined;
 }
 
+// Recover only an engine-recorded implementation baseline bound to this Red.
+// Historical events also cover installations that already discarded expired Claims.
+async function implementationBaseline(projection: RuntimeProjection): Promise<RuntimeClaim | undefined> {
+  const key = tddRedEvidenceKey(projection.workItemId);
+  const red = projection.evidence[key] as TrustedEvidence | undefined;
+  if (red === undefined) return undefined;
+  const events = await readEvents(projection.controlPlane);
+  for (let index = events.length - 1; index >= 0; index--) {
+    const snapshot = objectRecord(objectRecord(events[index]?.result)?.projection);
+    if (snapshot === undefined) continue;
+    const historicalRed = objectRecord(objectRecord(snapshot.evidence)?.[key]);
+    if (historicalRed?.evidenceId !== red.evidenceId) break;
+    const claim = objectRecord(objectRecord(snapshot.claims)?.implement) as unknown as RuntimeClaim | undefined;
+    if (claim?.stageId === "implement" && claim.inputWorkspaceTreeDigest === red.workspaceDigest
+      && Array.isArray(claim.workspaceSnapshot) && workspaceSnapshotDigest(claim.workspaceSnapshot) === red.workspaceDigest) return claim;
+  }
+  return undefined;
+}
+
 async function acquireExecutableStep(input: {
   state: ApplicationState;
   projection: RuntimeProjection;
@@ -676,6 +695,7 @@ async function acquireExecutableStep(input: {
     materialized: input.state.item.execution.materialized !== false,
     ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
   });
+  const baseline = input.stageId === "implement" ? await implementationBaseline(input.projection) : undefined;
   const claim: RuntimeClaim = {
     stageId: input.stepInstanceId,
     attemptId,
@@ -683,9 +703,9 @@ async function acquireExecutableStep(input: {
     actor: input.actor,
     claimedAt: input.now.toISOString(),
     expiresAt,
-    inputWorkspaceTreeDigest: await computeWorkspaceTreeDigest(input.state.worktree),
+    inputWorkspaceTreeDigest: baseline?.inputWorkspaceTreeDigest ?? await computeWorkspaceTreeDigest(input.state.worktree),
     allowedPaths: [...input.state.snapshot.changePolicy.allowedPaths],
-    workspaceSnapshot: await computeWorkspaceSnapshot(input.state.worktree),
+    workspaceSnapshot: baseline?.workspaceSnapshot ?? await computeWorkspaceSnapshot(input.state.worktree),
     workPackageDigest: workPackageIdentityDigest(workPackage),
   };
   let projection: RuntimeProjection = {
@@ -971,7 +991,7 @@ export async function acquireNextLocked(input: {
       gate,
       worktree: state.worktree,
       redEvidence: projection.evidence[tddRedEvidenceKey(state.item.workItemId)] as TrustedEvidence | undefined,
-      requireWorkspaceMatch: true,
+      requireWorkspaceMatch: await implementationBaseline(projection) === undefined,
     });
   }
   dependencies.executors.assertStep(step as unknown as CompiledStepShape);

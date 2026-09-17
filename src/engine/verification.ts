@@ -138,13 +138,19 @@ export function assertImplementHasTrustedRed(input: {
     if (evidence.commandId !== input.commandId || evidence.commandDigest !== commandDigest) {
       throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 的命令、环境或可执行文件已变化。 ");
     }
-    if (manifest.digest !== evidence.testPathsDigest
-      || assets.digest !== evidence.testAssetsDigest
-      || (input.gate !== undefined && (JSON.stringify(input.gate.testAssetPaths) !== JSON.stringify(evidence.testAssetPaths)
-        || JSON.stringify(input.gate.testAssetRoots) !== JSON.stringify(evidence.testAssetRoots)
-        || JSON.stringify(input.gate.productPaths) !== JSON.stringify(evidence.productPaths)))
-      || (input.requireWorkspaceMatch === true && workspaceDigest !== evidence.workspaceDigest)) {
-      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red 测试内容已修改或删除。 ");
+    if (input.gate !== undefined && (JSON.stringify(input.gate.testAssetPaths) !== JSON.stringify(evidence.testAssetPaths)
+      || JSON.stringify(input.gate.testAssetRoots) !== JSON.stringify(evidence.testAssetRoots)
+      || JSON.stringify(input.gate.productPaths) !== JSON.stringify(evidence.productPaths))) {
+      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 的测试资产范围或生产路径配置已变化。");
+    }
+    if (manifest.digest !== evidence.testPathsDigest || assets.digest !== evidence.testAssetsDigest) {
+      const previous = new Map(evidence.testAssets.filter(file => isTrustedTestAssetPath(file.path, evidence)).map(file => [file.path, file.digest]));
+      const current = new Map(assets.files.filter(file => isTrustedTestAssetPath(file.path, evidence)).map(file => [file.path, file.digest]));
+      const changed = [...new Set([...previous.keys(), ...current.keys()])].filter(filename => previous.get(filename) !== current.get(filename)).sort();
+      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", `Red 测试资产已修改、新增或删除：${changed.slice(0, 20).join(", ") || evidence.testPaths.join(", ")}。`);
+    }
+    if (input.requireWorkspaceMatch === true && workspaceDigest !== evidence.workspaceDigest) {
+      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "首次领取 implement 前工作区已变化，且没有与当前 Red 绑定的实现基线；测试资产校验已通过。");
     }
   });
 }

@@ -396,3 +396,7 @@ wspec acquire <id> --actor <actor>
 Vitest Gate 使用完整默认测试资产规则时，规则相对于命令中唯一的仓库相对 `--root`（或 `-r`）生效；省略 root 或使用 `.` 时保持仓库范围。init/config suggest 会直接输出带子工作区前缀的规则；旧配置快照保持原字节，由引擎按同一规则计算有效范围。自定义 testAssetPaths 保持仓库相对含义，不隐式截断跨包的 fixture/helper。apps/<包> 与 packages/<包> 下的普通选择器以包为 ownership 边界，仍绑定该包中的测试目录与辅助资产。范围变化会使旧 Red Evidence 校验失效，不可沿用旧证据。
 
 1 MiB 字节预算仅累计 trusted 测试资产，包括测试、测试目录中的 fixture/helper 及未声明为生产文件的辅助文件。生产文件仍计算摘要并保留在扫描清单中，但不占用测试资产字节预算；文件读取使用流式摘要。4096 个扫描文件限制与 canonical/symlink 校验继续生效，node_modules 不参与资产扫描。超限错误同时报告当前文件，便于定位配置范围或过大的测试资产。
+
+### 实现租约过期后的续作
+
+首次领取 implement 仍要求工作区与可信 Red 基线一致。已领取过 implement 的任务可从事件日志恢复与同一 Red Evidence 绑定的原始 Claim 基线，租约过期后重新分配 Attempt 时保留该 workspaceSnapshot 与 inputWorkspaceTreeDigest，已有生产改动仍必须完整列入后续 modifiedFiles；不会以当前文件重新设立基线。测试内容、测试资产范围和测试工具摘要仍须一致，重试次数限制不变。无匹配历史基线时不能放宽首次领取校验。错误信息区分命令环境变化、资产范围变化、测试资产变化及首次领取工作区变化；资产变化列出具体路径。

@@ -1404,3 +1404,42 @@ test("large product files do not consume the trusted test asset byte budget", as
   await writeFile(path.join(root, "apps/web/tests/fixture.bin"), Buffer.alloc(1024 * 1024 + 1));
   await assert.rejects(testAssetScopeManifest(root, scope), { code: "WSSPEC_TDD_TEST_PATH_INVALID" });
 });
+
+test("expired implementation resumes production edits with the original baseline and still rejects test edits", async () => {
+  let now = new Date("2026-08-18T04:00:00.000Z");
+  const current = await controlRuntimeFixture({ now: () => now });
+  await mkdir(path.join(current.root, "tests"), { recursive: true });
+  await mkdir(path.join(current.root, "src"), { recursive: true });
+  await writeFile(path.join(current.root, "tests/feature.test.mjs"), featureTestSource());
+  await writeFile(path.join(current.root, "src/feature.mjs"), "export const value = 0;\n");
+  await configureGate(current.root, featureGate());
+  await git(current.root, "add", ".");
+  await git(current.root, "commit", "-m", "seed implementation recovery");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "resume implementation" }, profile: "standard" });
+  await rewriteSelectedSnapshot(current, started.workItemId, profile => {
+    const step = profile.steps.find(s => s.id === "implement")!;
+    step.inputs = [];
+  });
+  const tree = await worktreeFor(current.root, started.workItemId);
+  const red = await recordRedEvidence(await redInput(tree, featureGate(), { taskId: started.workItemId }));
+  await retainOnlyReadyStage(current, started.workItemId, "implement");
+  await mutateControlPlane({ cwd: current.root, workItemId: started.workItemId, eventType: "evidence.recorded", idempotencyKey: "test:resume-red", operationInput: {}, mutate: projection => ({ projection: { ...projection, evidence: { ...projection.evidence, [tddRedEvidenceKey(started.workItemId)]: red } }, value: null }) });
+  await writeFile(path.join(tree, "src/feature.mjs"), "export const value = 1;\n");
+  await assert.rejects(current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "agent" }), (error: unknown) => error instanceof VerificationError && error.message.includes("首次领取"));
+  await writeFile(path.join(tree, "src/feature.mjs"), "export const value = 0;\n");
+  const first = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "agent" }));
+  const original = (await readControlPlane(current.root, started.workItemId)).claims.implement!;
+  await writeFile(path.join(tree, "src/feature.mjs"), "export const value = 1;\n");
+  now = new Date(new Date(first.lease.expiresAt).getTime() + 1000);
+  // Model old installations that persisted expiry cleanup before reacquisition.
+  await mutateControlPlane({ cwd: current.root, workItemId: started.workItemId, eventType: "projection.invalidated", idempotencyKey: "test:legacy-expiry", operationInput: {}, mutate: projection => ({ projection: { ...projection, claims: {}, contexts: {}, stages: { ...projection.stages, implement: { status: "ready" } }, retries: { ...projection.retries, implement: { ...projection.retries.implement!, status: "ready" } } }, value: null }) });
+  const next = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "agent" }));
+  assert.notEqual(next.attemptId, first.attemptId);
+  const resumed = (await readControlPlane(current.root, started.workItemId)).claims.implement!;
+  assert.deepEqual(resumed.workspaceSnapshot, original.workspaceSnapshot);
+  assert.equal(resumed.inputWorkspaceTreeDigest, original.inputWorkspaceTreeDigest);
+  await assert.rejects(submitPackage(current, next, completedResult(next, [])), { code: "WSSPEC_MODIFIED_FILES_MISMATCH" });
+  now = new Date(new Date(next.lease.expiresAt).getTime() + 1000);
+  await writeFile(path.join(tree, "tests/feature.test.mjs"), featureTestSource("changed"));
+  await assert.rejects(current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "agent" }), (error: unknown) => error instanceof VerificationError && error.message.includes("tests/feature.test.mjs"));
+});
