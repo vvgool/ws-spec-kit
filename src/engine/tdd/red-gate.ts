@@ -119,6 +119,7 @@ function normalizedRelative(filename: string): string {
 
 export function isTestPath(filename: string, rules: readonly TestPathRule[] = []): boolean {
   const normalized = filename.replaceAll("\\", "/");
+  if (normalized.split("/").includes("node_modules")) return false;
   const basename = path.posix.basename(normalized);
   return rules.some((rule) => {
     if (rule === "node") {
@@ -171,7 +172,7 @@ function scopeRoot(pattern: string): string {
 }
 
 export function deriveTestAssetRoots(patterns: readonly string[]): string[] {
-  if (patterns.length === 0 || patterns.some((pattern) => !isRepositoryRelativePattern(pattern))) {
+  if (patterns.length === 0 || patterns.some((pattern) => !isRepositoryRelativePattern(pattern) || pattern.split("/").includes("node_modules"))) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Test Gate 缺少有限且规范的测试资产 pattern。 ");
   }
   return [...new Set(patterns.map(scopeRoot))].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
@@ -182,6 +183,7 @@ function withinRoot(filename: string, root: string): boolean {
 }
 
 export function isTrustedTestAssetPath(filename: string, scope: TestingScope): boolean {
+  if (filename.split("/").includes("node_modules")) return false;
   if (!scope.testAssetRoots.some((root) => withinRoot(filename, root))) return false;
   if (scope.testAssetPaths.some((pattern) => matchesRepositoryPath(pattern, filename))) return true;
   if (filename.split("/").some(isTestOwnershipMarker)) return true;
@@ -229,7 +231,9 @@ export async function testAssetScopeManifest(worktree: string, scope: TestingSco
     }
     entries.sort((left, right) => Buffer.from(left.name).compare(Buffer.from(right.name)));
     for (const entry of entries) {
-      if (relativeDirectory === "." && entry.name === ".git") continue;
+      // Dependency installations are bound by the runner digest, not test ownership.
+      // Skip before symlink validation: pnpm and workspace installs use symlinks.
+      if (entry.name === "node_modules" || (relativeDirectory === "." && entry.name === ".git")) continue;
       const relative = relativeDirectory === "." ? entry.name : `${relativeDirectory}/${entry.name}`;
       if (entry.isSymbolicLink()) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 不允许 symlink：${relative}`);
       if (entry.isDirectory()) {

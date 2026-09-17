@@ -1311,3 +1311,29 @@ test("Red infrastructure failures persist the failed Attempt and use retry polic
   assert.equal((projection.contexts["verify-red"] as { result?: { status?: string; failureCode?: string } }).result?.status, "failed");
   assert.equal((projection.contexts["verify-red"] as { result?: { status?: string; failureCode?: string } }).result?.failureCode, "WSSPEC_STEP_FAILED");
 });
+
+test("test asset scans exclude dependency installations at every depth while retaining fixture protection", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-pnpm-assets-"));
+  const scope = { testAssetPaths: ["**/*.test.*"], testAssetRoots: ["."], productPaths: ["apps/**"] };
+  await mkdir(path.join(root, "apps/web/src"), { recursive: true });
+  await writeFile(path.join(root, "apps/web/src/nav.test.ts"), "test source");
+  await mkdir(path.join(root, "apps/api/node_modules/@aws-sdk"), { recursive: true });
+  await symlink("/missing/pnpm/client-s3", path.join(root, "apps/api/node_modules/@aws-sdk/client-s3"));
+  await symlink("/missing/pnpm/root", path.join(root, "node_modules"));
+  await mkdir(path.join(root, "apps/web/tests/node_modules/fixture"), { recursive: true });
+  await writeFile(path.join(root, "apps/web/tests/node_modules/fixture/index.test.js"), "dependency".repeat(200_000));
+  const manifest = await testAssetScopeManifest(root, scope);
+  assert.deepEqual(manifest.files.map(({ path: filename }) => filename), ["apps/web/src/nav.test.ts"]);
+  assert.equal(isTestPath("apps/api/node_modules/pkg/index.test.ts", ["node"]), false);
+  assert.equal(isTrustedTestAssetPath("apps/api/node_modules/pkg/index.test.ts", scope), false);
+  await symlink("/missing/fixture", path.join(root, "apps/web/src/fixture"));
+  await assert.rejects(testAssetScopeManifest(root, scope), (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_TEST_PATH_INVALID");
+});
+
+test("explicit dependency test asset roots are rejected", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wsspec-dependency-assets-"));
+  const patterns = ["node_modules/pkg/tests/**"];
+  await assert.rejects(async () => testAssetScopeManifest(root, {
+    testAssetPaths: patterns, testAssetRoots: deriveTestAssetRoots(patterns), productPaths: ["src/**"],
+  }), (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_GATE_CONFIGURATION_INVALID");
+});
