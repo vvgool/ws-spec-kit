@@ -1,7 +1,8 @@
 import { runnerInstallationDigest } from "./runner-digest.js";
 import { vitestReporterSource } from "./vitest-reporter.js";
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { access, lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import { computeWorkspaceTreeDigest, sha256 } from "../../domain/digests.js";
 import { isRepositoryRelativePattern, matchesRepositoryPath, resolveRepositoryRegularFile } from "../../domain/repository-path.js";
 import { validate } from "../../schemas/index.js";
 import {
+  defaultTestAssetPaths,
   testPathRules as supportedTestPathRules,
   type FixedTestGate,
   type RedEvidenceInput,
@@ -168,6 +170,8 @@ function scopeRoot(pattern: string): string {
     return segments.slice(0, ownershipMarker + 1).join("/");
   }
   const staticPrefix = firstPattern < 0 ? segments.slice(0, -1) : segments.slice(0, firstPattern);
+  // Preserve package ownership for monorepos instead of absorbing sibling apps.
+  if (["apps", "packages"].includes(staticPrefix[0] ?? "") && staticPrefix.length >= 2) return staticPrefix.slice(0, 2).join("/");
   return staticPrefix[0] ?? ".";
 }
 
@@ -175,6 +179,13 @@ export function deriveTestAssetRoots(patterns: readonly string[]): string[] {
   if (patterns.length === 0 || patterns.some((pattern) => !isRepositoryRelativePattern(pattern) || pattern.split("/").includes("node_modules"))) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Test Gate 缺少有限且规范的测试资产 pattern。 ");
   }
+  // A complete default bundle anchored at a workspace owns exactly that root,
+  // including nonstandard and deeper layouts (services/web, apps/web/client).
+  const firstDefault = defaultTestAssetPaths[0];
+  const anchor = patterns.find(pattern => pattern.endsWith(`/${firstDefault}`));
+  const prefix = anchor?.slice(0, -firstDefault.length - 1);
+  if (prefix && !/[*?]/u.test(prefix) && patterns.length === defaultTestAssetPaths.length
+    && defaultTestAssetPaths.every(pattern => patterns.includes(`${prefix}/${pattern}`))) return [prefix];
   return [...new Set(patterns.map(scopeRoot))].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
 }
 
@@ -252,10 +263,18 @@ export async function testAssetScopeManifest(worktree: string, scope: TestingSco
     let canonical: string;
     try { canonical = await resolveRepositoryRegularFile(canonicalRoot, filename); }
     catch { throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产必须是工作区内 canonical regular file：${filename}`); }
-    const content = await readFile(canonical);
-    totalBytes += content.byteLength;
-    if (totalBytes > testAssetByteLimit) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域超过 ${testAssetByteLimit} 字节。`);
-    files.push({ path: filename, digest: sha256(content) });
+    const trusted = isTrustedTestAssetPath(filename, scope);
+    const hash = createHash("sha256");
+    // Stream product files as well: they remain in the manifest but do not spend
+    // the test/fixture budget or require allocating their whole content.
+    for await (const chunk of createReadStream(canonical)) {
+      if (trusted) {
+        totalBytes += chunk.length;
+        if (totalBytes > testAssetByteLimit) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产作用域超过 ${testAssetByteLimit} 字节（${filename}）。`);
+      }
+      hash.update(chunk);
+    }
+    files.push({ path: filename, digest: `sha256:${hash.digest("hex")}` });
   }
   const trustedFiles = trustedTestAssetFiles(files, scope);
   if (trustedFiles.length === 0) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", "Test Gate 配置的 trusted test asset roots 为空。 ");

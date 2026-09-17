@@ -45,7 +45,7 @@ export async function suggestTestingConfig(root: string, testRoot?: string): Pro
     : ["node", runner, "run", ...(selected === "." ? [] : ["--root", selected])];
   return {
     version: 1,
-    testing: { pathRules: [...testPathRules], testAssetPaths: [...defaultTestAssetPaths], productPaths: products.length ? products : [...defaultProductPaths] },
+    testing: { pathRules: [...testPathRules], testAssetPaths: defaultTestAssetPaths.map(pattern => selected === undefined || selected === "." ? pattern : `${selected}/${pattern}`), productPaths: products.length ? products : [...defaultProductPaths] },
     quality: { gates: { test: { command, cwd: "worktree", timeoutSeconds: selected === undefined ? 60 : 120, required: true, evidence: "trusted", inheritEnv: [], env: {}, reporter: { type: selected === undefined ? "node-test" : "vitest", version: 1 } } } },
   };
 }

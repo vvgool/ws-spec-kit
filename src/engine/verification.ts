@@ -10,7 +10,7 @@ import { validate } from "../schemas/index.js";
 import { mutateControlPlane } from "./scheduler.js";
 import { loadApplicationState, selectedProfile, type SnapshotStep } from "../application/state.js";
 import { deriveTestAssetRoots, fixedGateCommandDigest, isTrustedTestAssetPath, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./tdd/red-gate.js";
-import { testPathRules, type FixedTestGate, type TddCycleEvidence, type TrustedEvidence } from "./tdd/types.js";
+import { defaultTestAssetPaths, testPathRules, type FixedTestGate, type TddCycleEvidence, type TrustedEvidence } from "./tdd/types.js";
 import { VerificationError } from "./tdd/types.js";
 
 export { VerificationError } from "./tdd/types.js";
@@ -52,6 +52,22 @@ export function fixedTestGateFromConfig(raw: unknown): FixedTestGate {
     || !["node-test", "vitest"].includes(String(reporter?.type)) || reporter?.version !== 1) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 缺少固定且完整的 test Gate。");
   }
+  let effectivePaths = testAssetPaths as string[];
+  if (reporter?.type === "vitest" && effectivePaths.length === defaultTestAssetPaths.length
+    && defaultTestAssetPaths.every(pattern => effectivePaths.includes(pattern))) {
+    const roots: string[] = [];
+    for (let i = 3; i < argv.length; i++) {
+      const arg = argv[i] as string;
+      if (arg === "--") break;
+      if (arg === "--root" || arg === "-r") roots.push(argv[++i] ?? "");
+      else if (arg.startsWith("--root=") || arg.startsWith("-r=")) roots.push(arg.slice(arg.indexOf("=") + 1));
+    }
+    if (roots.length > 1 || roots.some(root => root !== "." && (!isRepositoryRelativePattern(root) || /[*?]/u.test(root)))) {
+      throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "默认测试资产规则要求唯一、仓库相对的 Vitest root。");
+    }
+    const root = roots[0];
+    if (root !== undefined && root !== ".") effectivePaths = effectivePaths.map(pattern => `${root}/${pattern}`);
+  }
   return {
     commandId: "test",
     argv: argv as string[],
@@ -63,8 +79,8 @@ export function fixedTestGateFromConfig(raw: unknown): FixedTestGate {
       return [name, value];
     })),
     testPathRules: configuredPathRules as FixedTestGate["testPathRules"],
-    testAssetPaths: testAssetPaths as string[],
-    testAssetRoots: deriveTestAssetRoots(testAssetPaths as string[]),
+    testAssetPaths: effectivePaths,
+    testAssetRoots: deriveTestAssetRoots(effectivePaths),
     productPaths: productPaths as string[],
     reporter: { type: reporter!.type as "node-test" | "vitest", version: 1 },
   };

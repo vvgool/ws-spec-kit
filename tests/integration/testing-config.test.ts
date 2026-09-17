@@ -19,6 +19,7 @@ test("init identifies a single workspace Vitest script and monorepo product path
   assert.equal(config.quality.gates.test.reporter.type, "vitest");
   assert.deepEqual(config.quality.gates.test.command, ["node", "node_modules/vitest/vitest.mjs", "run", "--root", "apps/web"]);
   assert.deepEqual(config.testing.productPaths, ["apps/**", "packages/**"]);
+  assert.ok(config.testing.testAssetPaths.every((pattern: string) => pattern.startsWith("apps/web/")));
 });
 
 import { createApplication } from "../../src/application/application.js";
@@ -136,4 +137,66 @@ test("suggest falls back to the installed hoisted Vitest entry", async () => {
   await writeFile(path.join(root, "apps/web/package.json"), '{"scripts":{"test":"vitest run"},"devDependencies":{"vitest":"4.1.10"}}');
   await writeFile(path.join(root, "node_modules/vitest/vitest.mjs"), "// installed entry fixture");
   assert.equal(((await suggestTestingConfig(root)) as any).quality.gates.test.command[1], "node_modules/vitest/vitest.mjs");
+});
+
+test("Vitest workspace roots scope legacy defaults without changing explicit cross-package assets", async () => {
+  const { fixedTestGateFromConfig } = await import("../../src/engine/verification.js");
+  const { testAssetScopeManifest } = await import("../../src/engine/tdd/red-gate.js");
+  const config = defaultProjectConfig() as any;
+  config.quality.gates.test.reporter.type = "vitest";
+  config.quality.gates.test.command = ["node", "node_modules/vitest/vitest.mjs", "run", "--root", "apps/web"];
+  const gate = fixedTestGateFromConfig(config);
+  assert.ok(gate.testAssetPaths.every(p => p.startsWith("apps/web/")));
+  const root = await mkdtemp(path.join(os.tmpdir(), "wspec-workspace-budget-"));
+  await mkdir(path.join(root, "apps/web/tests"), { recursive: true });
+  await mkdir(path.join(root, "release-evidence"));
+  await writeFile(path.join(root, "apps/web/tests/page.test.ts"), "test source");
+  await writeFile(path.join(root, "release-evidence/large.json"), Buffer.alloc(2 * 1024 * 1024));
+  assert.deepEqual((await testAssetScopeManifest(root, gate)).files.map(f => f.path), ["apps/web/tests/page.test.ts"]);
+  config.testing.testAssetPaths = ["apps/web/**/*.test.*", "packages/shared/tests/**"];
+  assert.deepEqual(fixedTestGateFromConfig(config).testAssetPaths, config.testing.testAssetPaths);
+});
+
+
+test("default Vitest asset scoping validates root aliases and rejects ambiguous or escaping roots", async () => {
+  const { fixedTestGateFromConfig } = await import("../../src/engine/verification.js");
+  const config = defaultProjectConfig() as any;
+  config.quality.gates.test.reporter.type = "vitest";
+  const command = ["node", "node_modules/vitest/vitest.mjs", "run"];
+  for (const args of [["--root=apps/web"], ["-r", "apps/web"], ["-r=apps/web"]]) {
+    config.quality.gates.test.command = [...command, ...args];
+    assert.ok(fixedTestGateFromConfig(config).testAssetPaths.every(p => p.startsWith("apps/web/")));
+  }
+  for (const args of [["--root"], ["--root", "../outside"], ["--root", "/tmp"], ["--root", "apps/*"], ["--root", "apps/web", "-r", "apps/api"]]) {
+    config.quality.gates.test.command = [...command, ...args];
+    assert.throws(() => fixedTestGateFromConfig(config), { code: "WSSPEC_TDD_GATE_CONFIGURATION_INVALID" });
+  }
+  config.quality.gates.test.command = [...command, "--", "--root", "apps/web"];
+  assert.deepEqual(fixedTestGateFromConfig(config).testAssetPaths, config.testing.testAssetPaths);
+});
+
+
+test("default asset bundles retain arbitrary nested workspace boundaries", async () => {
+  const { fixedTestGateFromConfig } = await import("../../src/engine/verification.js");
+  const { testAssetScopeManifest } = await import("../../src/engine/tdd/red-gate.js");
+  for (const selected of ["services/web", "apps/web/client"]) {
+    const config = defaultProjectConfig() as any;
+    config.quality.gates.test.reporter.type = "vitest";
+    config.quality.gates.test.command = ["node", "node_modules/vitest/vitest.mjs", "run", "--root", selected];
+    const gate = fixedTestGateFromConfig(config);
+    const root = await mkdtemp(path.join(os.tmpdir(), "wspec-nested-root-"));
+    await mkdir(path.join(root, selected, "tests"), { recursive: true });
+    await mkdir(path.join(root, path.dirname(selected), "sibling/tests"), { recursive: true });
+    await writeFile(path.join(root, selected, "tests/page.test.ts"), "test source");
+    await writeFile(path.join(root, path.dirname(selected), "sibling/tests/huge.bin"), Buffer.alloc(1024 * 1024 + 1));
+    assert.deepEqual(gate.testAssetRoots, [selected]);
+    assert.deepEqual((await testAssetScopeManifest(root, gate)).files.map(f => f.path), [`${selected}/tests/page.test.ts`]);
+  }
+});
+
+
+test("wildcard-prefixed default bundles preserve explicit cross-package scanning", async () => {
+  const { defaultTestAssetPaths } = await import("../../src/engine/tdd/types.js");
+  const { deriveTestAssetRoots } = await import("../../src/engine/tdd/red-gate.js");
+  assert.deepEqual(deriveTestAssetRoots(defaultTestAssetPaths.map(p => `packages/*/${p}`)), ["packages"]);
 });

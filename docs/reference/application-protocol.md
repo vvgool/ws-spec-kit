@@ -347,6 +347,7 @@ skills:
 | `artifact` | `internal`、`dispatch` |
 | `config` | `internal`、`arguments` |
 | `config suggest` | `internal`、`arguments`、`repository`、`tdd` |
+| `retry-test-gate` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`tdd` |
 | `config migrate` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`tdd`、`source` |
 | `init` | `internal`、`arguments`、`repository`、`tdd` |
 | `start` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`workflowTrust`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`source`、`workItem`、`runtime`、`start`、`tdd` |
@@ -389,3 +390,9 @@ wspec acquire <id> --actor <actor>
 先运行 `wspec inspect <workItemId>`，从 `failedTestGate.attemptId` 获取失败 Attempt。
 
 `wspec retry-test-gate <workItemId> --expected-attempt <失败 Attempt ID> --actor <操作者> --reason <修复原因>` 只用于已完成 write-tests、verify-red 因 `WSSPEC_TDD_TEST_PATH_INVALID` 不可重试失败的 active Work Item。它要求失败 Attempt 仍匹配、没有活动 Claim、待审批、TDD Evidence、外部动作或后续执行。控制面锁内保留失败记录和恢复原因，将 verify-red 重新置为 ready；相同请求幂等，随后 acquire 分配新 Attempt，submit 重新执行完整门禁。此操作不修改配置快照、不修改测试或生产文件、不生成成功证据。仍存在的路径或大小限制会再次阻塞，不能用恢复操作豁免门禁。
+
+### 测试资产扫描范围与预算
+
+Vitest Gate 使用完整默认测试资产规则时，规则相对于命令中唯一的仓库相对 `--root`（或 `-r`）生效；省略 root 或使用 `.` 时保持仓库范围。init/config suggest 会直接输出带子工作区前缀的规则；旧配置快照保持原字节，由引擎按同一规则计算有效范围。自定义 testAssetPaths 保持仓库相对含义，不隐式截断跨包的 fixture/helper。apps/<包> 与 packages/<包> 下的普通选择器以包为 ownership 边界，仍绑定该包中的测试目录与辅助资产。范围变化会使旧 Red Evidence 校验失效，不可沿用旧证据。
+
+1 MiB 字节预算仅累计 trusted 测试资产，包括测试、测试目录中的 fixture/helper 及未声明为生产文件的辅助文件。生产文件仍计算摘要并保留在扫描清单中，但不占用测试资产字节预算；文件读取使用流式摘要。4096 个扫描文件限制与 canonical/symlink 校验继续生效，node_modules 不参与资产扫描。超限错误同时报告当前文件，便于定位配置范围或过大的测试资产。

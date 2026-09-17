@@ -1385,3 +1385,22 @@ test("explicit Red path recovery preserves failed evidence, rejects stale reques
   await submitPackage(current, next, completedResult(next, []));
   assert.equal((await readControlPlane(current.root, started.workItemId)).stages["verify-red"]?.status, "succeeded");
 });
+
+test("large product files do not consume the trusted test asset byte budget", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "wspec-asset-budget-"));
+  await mkdir(path.join(root, "apps/web/src"), { recursive: true });
+  await mkdir(path.join(root, "apps/web/tests"), { recursive: true });
+  await writeFile(path.join(root, "apps/web/src/image.bin"), Buffer.alloc(2 * 1024 * 1024));
+  await writeFile(path.join(root, "apps/web/src/page.test.ts"), "test source");
+  await writeFile(path.join(root, "apps/web/tests/helper.ts"), "helper 1");
+  const patterns = ["apps/web/**/*.test.*"];
+  const scope = { testAssetPaths: patterns, testAssetRoots: deriveTestAssetRoots(patterns), productPaths: ["apps/**"] };
+  assert.deepEqual(scope.testAssetRoots, ["apps/web"]);
+  const before = await testAssetScopeManifest(root, scope);
+  await writeFile(path.join(root, "apps/web/src/image.bin"), Buffer.alloc(3 * 1024 * 1024));
+  assert.equal((await testAssetScopeManifest(root, scope)).digest, before.digest);
+  await writeFile(path.join(root, "apps/web/tests/helper.ts"), "helper 2");
+  assert.notEqual((await testAssetScopeManifest(root, scope)).digest, before.digest);
+  await writeFile(path.join(root, "apps/web/tests/fixture.bin"), Buffer.alloc(1024 * 1024 + 1));
+  await assert.rejects(testAssetScopeManifest(root, scope), { code: "WSSPEC_TDD_TEST_PATH_INVALID" });
+});
