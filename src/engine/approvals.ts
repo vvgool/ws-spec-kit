@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import * as canonicalizeModule from "canonicalize";
 
-import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
+import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import { verifyArtifact } from "../domain/artifacts.js";
 import type { ConversationConfirmation } from "../protocol/application.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
@@ -121,6 +121,16 @@ export function approvalBindingDigest(input: {
   return sha256(binding);
 }
 
+// Protocol drafts are mutable transport inputs, not approved workspace content.
+// Historical requests keep their original digest algorithm until re-requested.
+async function approvalWorkspaceDigest(cwd: string, workItemId: string, version?: 2): Promise<string> {
+  if (version === undefined) return computeWorkspaceTreeDigest(cwd);
+  if (version !== 2) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_INVALID", "不支持此审批工作区摘要版本。");
+  const draftPrefix = `.wsspec/work-items/${workItemId}/drafts/`;
+  const entries = (await computeWorkspaceSnapshot(cwd)).filter((entry) => !entry.path.startsWith(draftPrefix));
+  return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
+}
+
 export async function prepareArtifactApproval(input: {
   cwd: string;
   workItemId: string;
@@ -170,7 +180,8 @@ export async function prepareArtifactApproval(input: {
     contentHash,
     artifacts: sortedArtifacts,
     ...(artifactDiff === "" ? {} : { artifactDiff }),
-    workspaceTreeDigest: await computeWorkspaceTreeDigest(worktree),
+    workspaceTreeDigest: await approvalWorkspaceDigest(worktree, input.workItemId, 2),
+    workspaceDigestVersion: 2,
     requestedBy: input.actor ?? "engine",
     status: "pending",
     createdAt: (input.now ?? new Date()).toISOString(),
@@ -224,6 +235,7 @@ function assertPendingApproval(
     || pending.attemptId !== request.attemptId
     || pending.contentHash !== request.contentHash
     || pending.workspaceTreeDigest !== request.workspaceTreeDigest
+    || pending.workspaceDigestVersion !== request.workspaceDigestVersion
     || pending.requestedBy !== request.requestedBy
     || JSON.stringify(pending.artifacts) !== JSON.stringify(request.artifacts)) {
     throw new ApprovalError("WSSPEC_APPROVAL_NOT_PENDING", "审批请求不存在、已经处理或绑定已变化。");
@@ -283,7 +295,7 @@ async function expireArtifactApproval(input: { cwd: string; workItemId: string; 
     operationInput: { requestId: input.request.requestId, workspaceTreeDigest: input.request.workspaceTreeDigest },
     mutate: async (current) => {
       const pending = assertPendingApproval(current, input.request);
-      if (await computeWorkspaceTreeDigest(input.worktree) === pending.workspaceTreeDigest) {
+      if (await approvalWorkspaceDigest(input.worktree, input.workItemId, pending.workspaceDigestVersion) === pending.workspaceTreeDigest) {
         throw new ApprovalError("WSSPEC_APPROVAL_NOT_EXPIRED", "审批绑定的工作区当前未变化，请重试决定。");
       }
       const expired: RuntimeApproval = { ...pending, status: "expired", decidedAt: new Date().toISOString() };
@@ -339,7 +351,7 @@ export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: 
           }
           evidence = { ...current.evidence, [key]: { ...confirmation, consumedAt: new Date().toISOString() } };
         }
-        if (await computeWorkspaceTreeDigest(worktree) !== pending.workspaceTreeDigest) {
+        if (await approvalWorkspaceDigest(worktree, input.workItemId, pending.workspaceDigestVersion) !== pending.workspaceTreeDigest) {
           throw new ApprovalError("WSSPEC_APPROVAL_EXPIRED", "审批绑定的工作区已经变化，请重新请求审批。");
         }
         await verifyApprovalArtifacts(input.cwd, input.workItemId, pending);

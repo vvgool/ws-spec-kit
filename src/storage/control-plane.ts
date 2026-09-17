@@ -72,6 +72,7 @@ export interface RuntimeApproval {
   }>;
   artifactDiff?: string;
   workspaceTreeDigest: string;
+  workspaceDigestVersion?: 2;
   requestedBy?: string;
   decidedBy?: string;
   decisionSource?: "terminal" | "terminal_token" | "agent_transcribed";

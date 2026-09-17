@@ -183,6 +183,14 @@ path、digest、device、inode、mode、uid、size 和组合 identity，并在�
 }
 ```
 
+#### 审批工作区与过期恢复
+
+新建普通步骤审批记录 `workspaceDigestVersion: 2`，仅在审批工作区摘要中排除当前 Work Item 的 `.wsspec/work-items/<workItemId>/drafts/` 子文件。协议草稿用于传递 Artifact 正文、结果和审批输入，不能因创建决定 JSON 就使该决定过期。一般工作区摘要、其他 Work Item 草稿、业务文件和配置的检查保持不变；正式 Artifact 仍按其引用、生产者身份和内容摘要独立验证。
+
+旧审批没有版本字段，继续使用旧摘要算法，不自动重算或追认。它可能在升级后因已有草稿变化失效一次，随后重新提交产物创建 v2 审批即可恢复。
+
+工作区真正变化时，`decide` 将旧审批标记为 expired 并重置该步骤，返回 `blocked`，问题码为 `WSSPEC_APPROVAL_EXPIRED` 且 `retryable: true`，明确告知“本次批准未生效”。此分支不自动领取新 Attempt。Driver 展示原因后执行 `inspect -> acquire`，按新 Work Package 重新 author / submit 并请求新确认，不重复决定旧请求或复用旧结果。`ok: true` 仅表示命令返回了有效 AgentAction，不能单独作为批准成功证据。
+
 #### 普通步骤的对话批准
 
 用户明确同意当前审批版本后，Host 可直接提交以下决定，无需另开终端。`confirmation` 仅允许出现在 `kind: approval` 的 `approved` 决定中；`external_action`、Workflow 信任和外部恢复不接受该字段。
@@ -209,7 +217,7 @@ CLI 仍使用 `wspec decide --input <decisionPath> --actor <agent>`。`requestId
 
 Driver 在用户确认前说明审批方式，对当前版本已明确批准则直接记录并继续；版本发生变化须重新展示，不能把旧确认用于新版本。仅 `execute.resumeSubmission: true` 可以原样重提，其他返回的 Work Package 必须重新执行。
 
-现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 升至 v10；已安装的 v9 不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
+现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v11；已安装的 v9/v10 不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
 
 ### `inspect`
 

@@ -188,15 +188,17 @@ async function authorArtifact(input: {
   }, { now: input.current.now });
 }
 
-async function prepareApproval(current: Fixture): Promise<{
+async function prepareApproval(current: Fixture, materialize = true): Promise<{
   started: Awaited<ReturnType<Fixture["app"]["start"]>>;
   clarify: WorkPackage;
   awaiting: Extract<AgentAction, { action: "await_approval" }>;
   worktree: string;
 }> {
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "增加登录" }, profile: "standard" });
-  const worktree = await worktreeFor(current.root, started.workItemId);
-  const application = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"), "utf8")) as { source: ArtifactReference };
+  const worktree = materialize ? await worktreeFor(current.root, started.workItemId) : current.root;
+  const projection = await readControlPlane(current.root, started.workItemId);
+  const snapshotRoot = materialize ? path.join(worktree, ".wsspec", "work-items", started.workItemId) : path.join(path.dirname(projection.controlPlane), "authority");
+  const application = JSON.parse(await readFile(path.join(snapshotRoot, "snapshot", "application.json"), "utf8")) as { source: ArtifactReference };
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
   assert.equal(intake.version, 1);
   assert.deepEqual(intake.artifacts, [application.source]);
@@ -1503,7 +1505,7 @@ test("approval binds an Artifact by declared type instead of its filename", asyn
   assert.equal(action.action, "await_approval");
 });
 
-test("rejected or expired approval returns a replacement execution action", async () => {
+test("rejected approval executes a revision while expired approval reports a recoverable block", async () => {
   const rejected = await fixture();
   const rejectedApproval = await prepareApproval(rejected);
   const rejectedNext = requireExecute(await rejected.app.decide({
@@ -1521,7 +1523,7 @@ test("rejected or expired approval returns a replacement execution action", asyn
   const expired = await fixture();
   const expiredApproval = await prepareApproval(expired);
   await writeFile(path.join(expiredApproval.worktree, "README.md"), "changed during approval\n", "utf8");
-  const expiredNext = requireExecute(await expired.app.decide({
+  const expiredDecision = await expired.app.decide({
     kind: "approval",
     root: expired.root,
     workItemId: expiredApproval.started.workItemId,
@@ -1529,7 +1531,13 @@ test("rejected or expired approval returns a replacement execution action", asyn
     decision: "approved",
     expectedDigest: expiredApproval.awaiting.approval.digest,
     actor: "reviewer",
-  }));
+  });
+  assert.equal(expiredDecision.action, "blocked");
+  if (expiredDecision.action !== "blocked") throw new Error("expected explicit approval expiry");
+  assert.equal(expiredDecision.problems[0]?.code, "WSSPEC_APPROVAL_EXPIRED");
+  assert.equal(expiredDecision.problems[0]?.retryable, true);
+  assert.match(expiredDecision.problems[0]!.message, /批准未生效/u);
+  const expiredNext = requireExecute(await expired.app.acquire({ root: expired.root, workItemId: expiredApproval.started.workItemId, actor: "reviewer" }));
   assert.equal(expiredNext.stepId, "clarify");
   assert.notEqual(expiredNext.attemptId, expiredApproval.clarify.attemptId);
 });
@@ -2150,7 +2158,7 @@ test("conversation approval advances without TTY, persists provenance and replay
 
 test("conversation approval cannot approve a different digest or changed workspace", async () => {
   const current = await fixture();
-  const { started, awaiting, worktree } = await prepareApproval(current);
+  const { started, awaiting, worktree } = await prepareApproval(current, false);
   const app = createApplication({ provider: "codex", terminal: { isTTY: false }, now: current.now });
   const input = {
     kind: "approval" as const, root: current.root, workItemId: started.workItemId,
@@ -2161,15 +2169,29 @@ test("conversation approval cannot approve a different digest or changed workspa
   await assert.rejects(app.decide({ ...input, expectedDigest: "sha256:wrong" }), { code: "WSSPEC_APPROVAL_DIGEST_MISMATCH" });
   await writeFile(path.join(worktree, "README.md"), "changed after confirmation\n");
   const next = await app.decide(input);
-  assert.equal(requireExecute(next).stepId, "clarify");
+  assert.equal(next.action, "blocked");
+  if (next.action !== "blocked") throw new Error("expected explicit approval expiry");
+  assert.equal(next.problems[0]?.code, "WSSPEC_APPROVAL_EXPIRED");
   const projection = await readControlPlane(current.root, started.workItemId);
   assert.equal(projection.approvals[input.requestId]!.status, "expired");
+  await app.inspect({ root: current.root, workItemId: started.workItemId });
+  const replacement = requireExecute(await app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
+  assert.notEqual(replacement.attemptId, projection.approvals[input.requestId]!.attemptId);
+  const body = await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "drafts", "specification.md"), "utf8");
+  const artifact = await authorArtifact({ current, worktree, workPackage: replacement, artifactType: "specification", body });
+  const revised = await submitPackage(current, replacement, completedResult(replacement, [artifact]));
+  assert.equal(revised.action, "await_approval");
+  if (revised.action !== "await_approval") throw new Error("expected a new approval request");
+  assert.notEqual(revised.approval.requestId, input.requestId);
+  const approved = await app.decide({ ...input, requestId: revised.approval.requestId, expectedDigest: revised.approval.digest, confirmation: { source: "conversation", userMessage: "确认新版本，继续。" } });
+  assert.equal(requireExecute(approved).stepId, "design");
 });
 
 
 test("CLI accepts conversation approval with piped stdin and resumes the next step", async () => {
   const current = await fixture();
-  const { started, awaiting } = await prepareApproval(current);
+  const { started, awaiting } = await prepareApproval(current, false);
+  assert.deepEqual((await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" })).action, "await_approval");
   const input = {
     kind: "approval", workItemId: started.workItemId, requestId: awaiting.approval.requestId,
     expectedDigest: awaiting.approval.digest, decision: "approved",
@@ -2188,5 +2210,23 @@ test("CLI accepts conversation approval with piped stdin and resumes the next st
   const output = JSON.parse(first.stdout) as { ok: boolean; result: AgentAction };
   assert.equal(output.ok, true);
   assert.equal(requireExecute(output.result).stepId, "design");
+  assert.deepEqual(requireExecute(output.result).workspace, { mode: "read-only", materialized: false });
   assert.deepEqual(JSON.parse((await run()).stdout), output);
+});
+
+test("unmaterialized approval still validates the formal Artifact independently of drafts", async () => {
+  const current = await fixture();
+  const { started, awaiting } = await prepareApproval(current, false);
+  const projection = await readControlPlane(current.root, started.workItemId);
+  const request = projection.approvals[awaiting.approval.requestId]!;
+  const reference = request.artifacts![0]!;
+  const relative = reference.path.replace(`.wsspec/work-items/${started.workItemId}/`, "");
+  const artifact = path.join(path.dirname(projection.controlPlane), "authority", relative);
+  await writeFile(artifact, `${await readFile(artifact, "utf8")}\nTampered after approval request.\n`);
+  await assert.rejects(current.app.decide({
+    kind: "approval", root: current.root, workItemId: started.workItemId,
+    requestId: request.requestId, expectedDigest: request.contentHash, actor: "codex", decision: "approved",
+    confirmation: { source: "conversation", userMessage: "可以" },
+  }), { code: "WSSPEC_ARTIFACT_HASH_MISMATCH" });
+  assert.equal((await readControlPlane(current.root, started.workItemId)).approvals[request.requestId]!.status, "pending");
 });

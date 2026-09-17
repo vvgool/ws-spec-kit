@@ -79,8 +79,8 @@ interface DriverOperation {
       };
       routeByValue?: {
         field: string;
-        cases: Record<string, { next: DriverState; initialize?: DriverCollectionRule }>;
-        default: { next: DriverState; initialize?: DriverCollectionRule };
+        cases: Record<string, { next: DriverState | DriverTerminal; initialize?: DriverCollectionRule }>;
+        default: { next: DriverState | DriverTerminal; initialize?: DriverCollectionRule };
       };
     }>;
   };
@@ -227,14 +227,16 @@ function driverContract(body: string): DriverContract {
 
 function valueAt(source: unknown, pointer: string): unknown {
   return pointer.split(".").reduce<unknown>((current, segment) => {
-    assert.ok(current !== null && typeof current === "object" && !Array.isArray(current), `无法从 ${pointer} 读取 ${segment}`);
+    assert.ok(current !== null && typeof current === "object"
+      && (!Array.isArray(current) || /^(0|[1-9]\d*)$/u.test(segment)), `无法从 ${pointer} 读取 ${segment}`);
     return (current as Record<string, unknown>)[segment];
   }, source);
 }
 
 function optionalValueAt(source: unknown, pointer: string): unknown {
   return pointer.split(".").reduce<unknown>((current, segment) => {
-    if (current === null || typeof current !== "object" || Array.isArray(current)) return undefined;
+    if (current === null || typeof current !== "object"
+      || (Array.isArray(current) && !/^(0|[1-9]\d*)$/u.test(segment))) return undefined;
     return (current as Record<string, unknown>)[segment];
   }, source);
 }
@@ -272,6 +274,31 @@ function initialize(rule: DriverCollectionRule | undefined, output: CliRun["valu
     && !Array.isArray(candidate)
     && (candidate as Record<string, unknown>)[rule.filter.field] === rule.filter.equals
     && requiredTypes.has(rule.filter.equals));
+}
+
+function advanceDriver(operation: DriverOperation, output: CliRun["value"], values: Record<string, unknown>): DriverState | DriverTerminal {
+  const branch = operation.branch;
+  const branchCase = branch === undefined
+    ? undefined
+    : branch.cases[requiredString(valueAt(output, branch.field), "action.kind") as keyof typeof branch.cases];
+  const presenceRoute = branchCase?.routeByPresence === undefined
+    ? undefined
+    : optionalValueAt(output, branchCase.routeByPresence.field) === undefined
+      ? branchCase.routeByPresence.absent
+      : branchCase.routeByPresence.present;
+  const routeValue = branchCase?.routeByValue === undefined
+    ? undefined
+    : optionalValueAt(output, branchCase.routeByValue.field);
+  const valueRoute = branchCase?.routeByValue === undefined
+    ? undefined
+    : branchCase.routeByValue.cases[String(routeValue)] ?? branchCase.routeByValue.default;
+  capture(branchCase?.capture, output, values);
+  initialize(branchCase?.initialize, output, values);
+  initialize(presenceRoute?.initialize, output, values);
+  initialize(valueRoute?.initialize, output, values);
+  const next = valueRoute?.next ?? presenceRoute?.next ?? branchCase?.next ?? operation.next;
+  assert.ok(next !== undefined, "Driver 必须声明下一状态");
+  return next;
 }
 
 test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、幂等和冲突均 fail closed", async (t) => {
@@ -315,6 +342,7 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.match(body, /revisionRequest\.feedback/u, `${client}: 修订 Work Package 携带反馈`);
       assert.match(body, /本地真实 TTY.*confirm_rejection/u, `${client}: 修改意见必须先经本地 TTY 确认`);
       assert.match(body, /confirmation.*conversation.*userMessage/u, `${client}: 普通批准支持转录对话确认`);
+      assert.match(body, /WSSPEC_APPROVAL_EXPIRED.*批准未生效.*inspect -> acquire/u, `${client}: 明确报告过期并恢复`);
       assert.match(body, /agent_transcribed/u, `${client}: 转录不冒充独立身份验证`);
       assert.match(body, /external_action.*workflow_trust.*TTY/u, `${client}: 严格审批保留 TTY`);
       assert.match(body, /rejectionToken/u, `${client}: 拒绝决定携带一次性确认凭据`);
@@ -408,6 +436,14 @@ test("Driver 对受治理外部动作在人工决定后以返回 Work Package �
       }, `${client}: first governed submit must stop for a human decision`);
 
       const decide = contract.operations.decide;
+      assert.deepEqual(decide.branch?.cases.blocked, {
+        next: "blocked",
+        routeByValue: {
+          field: "result.problems.0.code",
+          cases: { WSSPEC_APPROVAL_EXPIRED: { next: "inspect" } },
+          default: { next: "blocked" },
+        },
+      }, `${client}: an expired approval resumes inspection without claiming it was approved`);
       assert.deepEqual(decide.argv, ["wspec", "decide", "--input", "${decisionPath}", "--actor", "${actor}"], `${client}: decide must use the public human-gated decision entrypoint`);
       assert.deepEqual(decide.branch?.cases.execute, {
         capture: {
@@ -721,25 +757,7 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
             pids.push(run.pid);
             protocolJson += run.stdout;
             capture(operation.capture, run.value, values);
-            const branch = operation.branch;
-            const branchCase = branch === undefined
-              ? undefined
-              : branch.cases[requiredString(valueAt(run.value, branch.field), `${client}/${kind}: action.kind`) as keyof typeof branch.cases];
-            const presenceRoute = branchCase?.routeByPresence === undefined
-              ? undefined
-              : optionalValueAt(run.value, branchCase.routeByPresence.field) === undefined
-                ? branchCase.routeByPresence.absent
-                : branchCase.routeByPresence.present;
-            const routeValue = branchCase?.routeByValue === undefined
-              ? undefined
-              : optionalValueAt(run.value, branchCase.routeByValue.field);
-            const valueRoute = branchCase?.routeByValue === undefined
-              ? undefined
-              : branchCase.routeByValue.cases[String(routeValue)] ?? branchCase.routeByValue.default;
-            capture(branchCase?.capture, run.value, values);
-            initialize(branchCase?.initialize, run.value, values);
-            initialize(presenceRoute?.initialize, run.value, values);
-            initialize(valueRoute?.initialize, run.value, values);
+            const next = advanceDriver(operation, run.value, values);
 
             if (state === "start") {
               assert.equal(values.workflowRef, task.workflowRef, `${client}/${kind}: explicit workflowRef`);
@@ -799,8 +817,6 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
               }
             }
 
-            const next = valueRoute?.next ?? presenceRoute?.next ?? branchCase?.next ?? operation.next;
-            assert.ok(next !== undefined, `${client}/${kind}: ${state} 必须声明下一状态`);
             if (next in contract.terminals) {
               assert.equal(contract.terminals[next as DriverTerminal].stop, true);
               terminal = next as DriverTerminal;
@@ -836,4 +852,86 @@ test("四类 Adapter 对功能与纯文档任务执行统一 CLI 循环，并可
     await new Promise<void>((resolve, reject) => modelServer.close((error) => error === undefined ? resolve() : reject(error)));
   }
   assert.equal(modelRequests, 0, "Driver/CLI 不得调用模型 API");
+});
+
+
+test("审批过期合同通过真实 CLI 恢复并重新确认后推进", async () => {
+  const home = await temporaryHome("generic");
+  const target = expectedTarget("generic", home);
+  await mkdir(target, { recursive: true });
+  assertPassed(await runCli(repositoryRoot, home, ["agent", "install", "--client", "generic", "--target", target]), "install");
+  const contract = driverContract(splitSkill(await readFile(path.join(target, "SKILL.md"), "utf8")).body);
+  const root = await createRepository(home);
+  const values: Record<string, unknown> = {
+    actor: "driver-recovery", profile: "standard", prompt: "验证审批过期恢复",
+    workflowRef: contract.workflowSelection.feature,
+  };
+  let state: DriverState | DriverTerminal = contract.entrypoints.new;
+  const visited: string[] = [];
+  let originalRequest = "";
+  let originalAttempt = "";
+  let decisions = 0;
+  for (let iteration = 0; iteration < 24; iteration += 1) {
+    assert.ok(!(state in contract.terminals), `不应提前停止于 ${state}`);
+    const operation: DriverOperation = contract.operations[state as DriverState];
+    visited.push(state);
+    if (state === "artifact") {
+      await executeArtifactOperation(root, home, {}, operation, values);
+      state = operation.next!;
+      continue;
+    }
+    if (state === "submit") {
+      const pkg = requiredWorkPackage(values.workPackage, "submit");
+      assert.equal(pkg.workspace.materialized, false);
+      values.resultPath = `.wsspec/work-items/${pkg.workItemId}/drafts/result.json`;
+      const refs = values[operation.resultBindings!.artifacts] as ArtifactReference[];
+      await mkdir(path.dirname(path.join(root, values.resultPath as string)), { recursive: true });
+      await writeFile(path.join(root, values.resultPath as string), JSON.stringify(submissionFor(pkg, refs)));
+    }
+    if (state === "decide") {
+      const approval = values.approval as { requestId: string; digest: string };
+      const pkg = requiredWorkPackage(values.workPackage, "approval");
+      if (decisions === 0) {
+        originalRequest = approval.requestId;
+        originalAttempt = pkg.attemptId;
+        await writeFile(path.join(root, "README.md"), "Business change after approval request.\n");
+      } else {
+        assert.equal(decisions, 1);
+        assert.notEqual(approval.requestId, originalRequest);
+        assert.notEqual(pkg.attemptId, originalAttempt);
+        const current = await readControlPlane(root, pkg.workItemId);
+        assert.equal(current.approvals[originalRequest]!.status, "expired");
+        assert.equal(current.approvals[approval.requestId]!.status, "pending");
+      }
+      values.decisionPath = `.wsspec/work-items/${pkg.workItemId}/drafts/decision.json`;
+      await writeFile(path.join(root, values.decisionPath as string), JSON.stringify({
+        kind: "approval", workItemId: pkg.workItemId, requestId: approval.requestId,
+        expectedDigest: approval.digest, decision: "approved",
+        confirmation: { source: "conversation", userMessage: decisions === 0 ? "同意当前版本" : "同意重新生成的新版本" },
+      }));
+      decisions += 1;
+    }
+    const run = await runCli(root, home, renderArgv(operation, values).slice(1));
+    assertPassed(run, state);
+    capture(operation.capture, run.value, values);
+    const next = advanceDriver(operation, run.value, values);
+    if (state === "decide" && decisions === 1) {
+      assert.equal(valueAt(run.value, "result.action"), "blocked");
+      assert.equal(valueAt(run.value, "result.problems.0.code"), "WSSPEC_APPROVAL_EXPIRED");
+      assert.equal(next, "inspect", "真实过期结果必须路由到恢复入口");
+    }
+    if (state === "decide" && decisions === 2) {
+      assert.equal(next, "artifact");
+      assert.equal(requiredWorkPackage(values.workPackage, "approved").stepId, "design");
+      assert.deepEqual(visited.slice(visited.indexOf("decide")), ["decide", "inspect", "acquire", "artifact", "submit", "decide"]);
+      const projection = await readControlPlane(root, values.workItemId as string);
+      const approval = values.approval as { requestId: string };
+      assert.equal(projection.approvals[approval.requestId]!.status, "approved");
+      // Other blockers must still stop rather than entering an automatic recovery loop.
+      assert.equal(advanceDriver(operation, { ok: true, result: { action: "blocked", problems: [{ code: "WSSPEC_STAGE_ALREADY_CLAIMED" }] } }, {}), "blocked");
+      return;
+    }
+    state = next;
+  }
+  assert.fail("合同未完成过期恢复与重新确认");
 });

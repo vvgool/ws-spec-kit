@@ -197,6 +197,13 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
   } catch (error) {
     if (!(error instanceof ApprovalError) || error.code !== "WSSPEC_APPROVAL_EXPIRED") throw error;
     await resetExpiredApproval(input);
-    return acquireApplication({ root: input.root, workItemId: input.workItemId, actor: input.actor }, dependencies);
+    return {
+      action: "blocked",
+      problems: [{
+        code: "WSSPEC_APPROVAL_EXPIRED",
+        message: "工作区已变化，本次批准未生效，原审批已过期。请执行 inspect -> acquire 获取新的 Work Package，重新生成产物并请求审批；不能复用旧结果或旧确认。",
+        retryable: true,
+      }],
+    };
   }
 }

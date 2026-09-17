@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createApplication } from "../../src/application/application.js";
+import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 import { approvalBindingDigest, ApprovalError, confirmArtifactRejection, decideArtifactApproval, requestArtifactApproval } from "../../src/engine/approvals.js";
 import { transitionRuntime } from "../../src/engine/scheduler.js";
@@ -339,4 +340,44 @@ test("conversation confirmation requires bounded text, actor and exact digest at
   const decided = await decideArtifactApproval({ ...input, confirmation: { ...input.confirmation, userMessage: "  可以\r\n继续  " } });
   assert.deepEqual(decided.confirmation, { source: "conversation", userMessage: "可以\n继续" });
   assert.equal(decided.decisionSource, "agent_transcribed");
+});
+
+test("approval ignores only its own protocol drafts while keeping the general workspace digest unchanged", async () => {
+  const fixture = await prepare();
+  const draft = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, "drafts", "approval.json");
+  await mkdir(path.dirname(draft), { recursive: true });
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+  const before = await computeWorkspaceTreeDigest(fixture.worktree);
+  await writeFile(draft, JSON.stringify({ requestId: request.requestId, decision: "approved" }));
+  assert.notEqual(await computeWorkspaceTreeDigest(fixture.worktree), before, "ordinary workspace evidence must still include drafts");
+  const decided = await decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, expectedDigest: request.contentHash, decision: "approve", terminal: { isTTY: true } });
+  assert.equal(decided.status, "approved");
+  assert.equal(decided.workspaceDigestVersion, 2);
+});
+
+test("approval still detects configuration, business files and other Work Item draft changes", async (t) => {
+  for (const relative of ["README.md", ".wsspec/config.yaml", ".wsspec/work-items/WSS-OTHER/drafts/approval.json"]) {
+    await t.test(relative, async () => {
+      const fixture = await prepare();
+      const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+      const filename = path.join(fixture.worktree, relative);
+      await mkdir(path.dirname(filename), { recursive: true });
+      const content = relative === ".wsspec/config.yaml" ? `${await readFile(filename, "utf8")}\n# changed after approval request\n` : "changed after approval request\n";
+      await writeFile(filename, content);
+      await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, expectedDigest: request.contentHash, decision: "approve", terminal: { isTTY: true } }), { code: "WSSPEC_APPROVAL_EXPIRED" });
+    });
+  }
+});
+
+test("historical approval retains its legacy workspace digest rather than silently adopting draft exclusion", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+  const projection = await readControlPlane(fixture.root, fixture.workItemId);
+  delete projection.approvals[request.requestId]!.workspaceDigestVersion;
+  projection.approvals[request.requestId]!.workspaceTreeDigest = await computeWorkspaceTreeDigest(fixture.worktree);
+  await writeProjection(projection);
+  const draft = path.join(fixture.worktree, ".wsspec", "work-items", fixture.workItemId, "drafts", "approval.json");
+  await mkdir(path.dirname(draft), { recursive: true });
+  await writeFile(draft, "{}\n");
+  await assert.rejects(decideArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId, expectedDigest: request.contentHash, decision: "approve", terminal: { isTTY: true } }), { code: "WSSPEC_APPROVAL_EXPIRED" });
 });
