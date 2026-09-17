@@ -383,3 +383,9 @@ wspec acquire <id> --actor <actor>
 ```
 
 迁移保留原始配置快照，在控制面事件中记录仅影响测试命令、报告器与路径的覆盖配置，`testingConfigDigest` 单独绑定该版本；基础配置摘要仍指向原始快照。只允许测试提交前（包括尚未提交的 write-tests Claim）迁移；拒绝任何待确认审批、后续已执行步骤、TDD Evidence 或外部动作。迁移回收旧 Claim/上下文，新 acquire 创建新 Attempt；禁止复用原 Lease。已经开始验证或产生副作用的任务必须重新建项，当前不提供隐式迁移或证据继承。旧 CLI 不支持覆盖配置，不可用于已迁移任务。
+
+### 恢复已修复的 Red 路径故障
+
+先运行 `wspec inspect <workItemId>`，从 `failedTestGate.attemptId` 获取失败 Attempt。
+
+`wspec retry-test-gate <workItemId> --expected-attempt <失败 Attempt ID> --actor <操作者> --reason <修复原因>` 只用于已完成 write-tests、verify-red 因 `WSSPEC_TDD_TEST_PATH_INVALID` 不可重试失败的 active Work Item。它要求失败 Attempt 仍匹配、没有活动 Claim、待审批、TDD Evidence、外部动作或后续执行。控制面锁内保留失败记录和恢复原因，将 verify-red 重新置为 ready；相同请求幂等，随后 acquire 分配新 Attempt，submit 重新执行完整门禁。此操作不修改配置快照、不修改测试或生产文件、不生成成功证据。仍存在的路径或大小限制会再次阻塞，不能用恢复操作豁免门禁。

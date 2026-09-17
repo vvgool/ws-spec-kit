@@ -23,7 +23,9 @@ export async function inspectApplication(input: InspectInput): Promise<WorkItemV
         : { externalEffectId: external.receipt.externalEffectId }),
       status: external.status,
     }));
+  const failedRed = state.projection.contexts["verify-red"] as { workPackage?: { attemptId?: string }; result?: { summary?: string } } | undefined;
   return {
+    ...(state.projection.stages["verify-red"]?.status !== "failed" || !failedRed?.workPackage?.attemptId ? {} : { failedTestGate: { stepId: "verify-red" as const, attemptId: failedRed.workPackage.attemptId, summary: failedRed.result?.summary ?? "" } }),
     testingConfigDigest: readTestingConfigMigration(state.projection.evidence[testingConfigEvidenceKey], state.item.execution.configDigest)?.configDigest ?? state.item.execution.configDigest,
     workItemId: state.item.workItemId,
     status: state.projection.workItem.status,

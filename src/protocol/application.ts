@@ -189,6 +189,7 @@ export interface CompletionSummary {
 }
 
 export interface WorkItemView {
+  failedTestGate?: { stepId: "verify-red"; attemptId: string; summary: string };
   testingConfigDigest?: string;
   workItemId: WorkItemId;
   status: string;

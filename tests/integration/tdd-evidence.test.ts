@@ -1337,3 +1337,51 @@ test("explicit dependency test asset roots are rejected", async () => {
     testAssetPaths: patterns, testAssetRoots: deriveTestAssetRoots(patterns), productPaths: ["src/**"],
   }), (error: unknown) => error instanceof VerificationError && error.code === "WSSPEC_TDD_GATE_CONFIGURATION_INVALID");
 });
+
+test("explicit Red path recovery preserves failed evidence, rejects stale requests and executes a new Attempt", async () => {
+  const { runCommand } = await import("../../src/cli/commands/core.js");
+  const { loadApplicationState } = await import("../../src/application/state.js");
+  const current = await controlRuntimeFixture();
+  await mkdir(path.join(current.root, "tests"), { recursive: true });
+  await mkdir(path.join(current.root, "src"), { recursive: true });
+  await writeFile(path.join(current.root, "tests/feature.test.mjs"), featureTestSource());
+  await writeFile(path.join(current.root, "src/feature.mjs"), "export const value = 0;\n");
+  await configureGate(current.root, featureGate());
+  await git(current.root, "add", ".");
+  await git(current.root, "commit", "-m", "seed recovery");
+  const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "retry repaired Red path" }, profile: "standard" });
+  await rewriteSelectedSnapshot(current, started.workItemId, profile => {
+    const implement = profile.steps.find(step => step.id === "implement")!;
+    implement.inputs = (implement.inputs as Array<{ outputId: string }>).filter(({ outputId }) => outputId !== "tasks");
+  });
+  const state = await loadApplicationState(current.root, started.workItemId);
+  const order = state.snapshot.profiles[state.projection.profile.selected].order;
+  const index = order.indexOf("verify-red");
+  await mutateControlPlane({ cwd: current.root, workItemId: started.workItemId, eventType: "projection.invalidated", idempotencyKey: "test:recovery-setup", operationInput: {}, mutate: projection => ({
+    projection: { ...projection, claims: {}, approvals: {}, stages: Object.fromEntries(order.map((id, i) => [id, { status: i < index ? "succeeded" : i === index ? "ready" : "pending" }])), contexts: { "write-tests": { result: { modifiedFiles: ["tests/feature.test.mjs"] } } } }, value: null,
+  }) });
+  const tree = await worktreeFor(current.root, started.workItemId);
+  await symlink("/missing/fixture", path.join(tree, "tests/link"));
+  const pkg = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "agent" }));
+  assert.equal((await submitPackage(current, pkg, completedResult(pkg, []))).action, "blocked");
+  const failed = await readControlPlane(current.root, started.workItemId);
+  assert.equal(failed.stages["verify-red"]?.status, "failed");
+  assert.equal((await current.app.inspect({ root: current.root, workItemId: started.workItemId })).failedTestGate?.attemptId, pkg.attemptId);
+  const args = ["retry-test-gate", started.workItemId, "--expected-attempt", pkg.attemptId, "--actor", "operator", "--reason", "runner path repair"];
+  await assert.rejects(runCommand(current.root, args.map(v => v === pkg.attemptId ? "stale" : v)), { code: "WSSPEC_TDD_EVIDENCE_INVALIDATED" });
+  await rm(path.join(tree, "tests/link"));
+  const before = await computeWorkspaceTreeDigest(tree);
+  const result = await runCommand(current.root, args);
+  assert.deepEqual(await runCommand(current.root, args), result);
+  assert.equal(await computeWorkspaceTreeDigest(tree), before);
+  const recovered = await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+  assert.equal(recovered.stages["write-tests"]?.status, "succeeded");
+  assert.equal(recovered.stages["verify-red"]?.status, "ready");
+  assert.ok(recovered.evidence[`testing.recovery:${pkg.attemptId}`]);
+  const next = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "agent" }));
+  assert.equal(next.stepId, "verify-red");
+  assert.notEqual(next.attemptId, pkg.attemptId);
+  await assert.rejects(runCommand(current.root, args.map(v => v === pkg.attemptId ? next.attemptId : v)), { code: "WSSPEC_TDD_EVIDENCE_INVALIDATED" });
+  await submitPackage(current, next, completedResult(next, []));
+  assert.equal((await readControlPlane(current.root, started.workItemId)).stages["verify-red"]?.status, "succeeded");
+});

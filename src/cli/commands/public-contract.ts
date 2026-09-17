@@ -11,6 +11,7 @@ export interface PublicCliRouteDescriptor {
 }
 
 export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Object.freeze([
+  { command: "retry-test-gate", usage: "wspec retry-test-gate <workItemId> --expected-attempt <attemptId> --actor <actor> --reason <原因>" },
   { command: "init", usage: "wspec init [--test-root <path>]" },
   { command: "config", usage: "wspec config suggest | migrate <workItemId> --file <configPath> --expected-digest <digest> --actor <actor>" },
   { command: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
@@ -27,6 +28,7 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
 export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Object.freeze([
   { route: "config suggest", usage: "wspec config suggest [--test-root <path>]" },
   { route: "config migrate", usage: "wspec config migrate <workItemId> --file <configPath> --expected-digest <digest> --actor <actor>" },
+  { route: "retry-test-gate", usage: "wspec retry-test-gate <workItemId> --expected-attempt <attemptId> --actor <actor> --reason <原因>" },
   { route: "init", usage: "wspec init [--test-root <path>]" },
   { route: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { route: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
@@ -43,7 +45,7 @@ export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Ob
   { route: "doctor connectors", usage: "wspec doctor connectors" },
 ]);
 
-const coreRoutes: ReadonlySet<string> = new Set(["init", "start", "acquire", "submit", "decide", "inspect"]);
+const coreRoutes: ReadonlySet<string> = new Set(["retry-test-gate", "init", "start", "acquire", "submit", "decide", "inspect"]);
 const workflowRoutes: ReadonlySet<string> = new Set(["list", "show", "eject", "validate", "use"]);
 
 export function publicCliErrorRoute(argv: readonly string[]): PublicCliErrorRoute {

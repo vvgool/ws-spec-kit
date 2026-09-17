@@ -181,7 +181,7 @@ export const applicationFixedPublicErrors = {
 } as const satisfies Record<ApplicationRollbackErrorCode, { code: ApplicationRollbackErrorCode; message: string }>;
 
 export const publicCliRoutes = [
-  "config suggest", "config migrate", "init", "start", "acquire", "artifact create", "submit", "decide", "inspect",
+  "retry-test-gate", "config suggest", "config migrate", "init", "start", "acquire", "artifact create", "submit", "decide", "inspect",
   "workflow list", "workflow show", "workflow eject", "workflow validate", "workflow use", "agent install",
   "doctor connectors",
 ] as const;
@@ -203,6 +203,7 @@ export const applicationPublicErrorGroupNamesByRoute = {
   agent: ["internal", "dispatch"],
   artifact: ["internal", "dispatch"],
   config: ["internal", "arguments"],
+  "retry-test-gate": ["internal", "arguments", ...applicationGroups, "tdd"],
   "config suggest": ["internal", "arguments", "repository", "tdd"],
   "config migrate": ["internal", "arguments", ...applicationGroups, "tdd", "source"],
   init: ["internal", "arguments", "repository", "tdd"],
