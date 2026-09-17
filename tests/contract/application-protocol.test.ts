@@ -277,3 +277,20 @@ test("DecisionInput 只接受执行审批、Workflow Package 信任决定或受�
 test("createApplication 仅暴露 start、acquire、submit、decide、inspect", () => {
   assert.deepEqual(Object.keys(createApplication()).sort(), ["acquire", "decide", "inspect", "start", "submit"]);
 });
+
+test("conversation confirmation is accepted only for ordinary approval", () => {
+  const approval = {
+    kind: "approval", root: "/workspace", workItemId: "WSS-20260817-001",
+    requestId: "approval-01", decision: "approved", expectedDigest: "sha256:current", actor: "codex",
+    confirmation: { source: "conversation", userMessage: "可以，按这个方案做。" },
+  };
+  assert.deepEqual(validate("builtin.application-decision-input.v2", approval), approval);
+  for (const invalid of [
+    { ...approval, confirmation: { source: "terminal", userMessage: "可以" } },
+    { ...approval, confirmation: { source: "conversation", userMessage: "" } },
+    { ...approval, decision: "rejected" },
+    { ...approval, kind: "external_action" },
+    { ...approval, kind: "workflow_trust" },
+    { ...approval, kind: "external_reconciliation" },
+  ]) assert.throws(() => validate("builtin.application-decision-input.v2", invalid));
+});

@@ -4,6 +4,7 @@ import * as canonicalizeModule from "canonicalize";
 
 import { computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
 import { verifyArtifact } from "../domain/artifacts.js";
+import type { ConversationConfirmation } from "../protocol/application.js";
 import type { ArtifactReference } from "../protocol/work-package.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
 import { readControlPlane, resolveWorkItemContext, type RuntimeApproval } from "../storage/control-plane.js";
@@ -291,7 +292,19 @@ async function expireArtifactApproval(input: { cwd: string; workItemId: string; 
   });
 }
 
-export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: string; workItemId: string; requestId: string; decision: "approve" | "reject"; terminal: { isTTY?: boolean }; feedback?: string; rejectionToken?: string; reason?: string; actor?: string; expectedDigest?: string; finalize?: (projection: Awaited<ReturnType<typeof readControlPlane>>, approval: RuntimeApproval) => Promise<{ projection: Awaited<ReturnType<typeof readControlPlane>>; value: T }> }): Promise<T> {
+export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: string; workItemId: string; requestId: string; decision: "approve" | "reject"; terminal: { isTTY?: boolean }; confirmation?: ConversationConfirmation; feedback?: string; rejectionToken?: string; reason?: string; actor?: string; expectedDigest?: string; finalize?: (projection: Awaited<ReturnType<typeof readControlPlane>>, approval: RuntimeApproval) => Promise<{ projection: Awaited<ReturnType<typeof readControlPlane>>; value: T }> }): Promise<T> {
+  let confirmation: ConversationConfirmation | undefined;
+  if (input.confirmation !== undefined) {
+    if (input.decision !== "approve" || input.confirmation?.source !== "conversation"
+      || typeof input.confirmation.userMessage !== "string" || !input.actor?.trim() || !input.expectedDigest) {
+      throw new ApprovalError("WSSPEC_APPROVAL_CONFIRMATION_INVALID", "对话确认只适用于步骤批准，且必须绑定用户原话、actor 和当前审批摘要。");
+    }
+    try {
+      confirmation = { source: "conversation", userMessage: normalizeApprovalFeedback(input.confirmation.userMessage) };
+    } catch {
+      throw new ApprovalError("WSSPEC_APPROVAL_CONFIRMATION_INVALID", "用户确认内容为空、过长、编码异常或包含凭据样式内容。");
+    }
+  }
   const rawFeedback = input.feedback ?? (input.terminal.isTTY === true ? input.reason : undefined);
   const feedback = rawFeedback === undefined ? undefined : normalizeApprovalFeedback(rawFeedback);
   if (input.decision === "approve" && (feedback !== undefined || input.rejectionToken !== undefined)) {
@@ -300,8 +313,8 @@ export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: 
   if (input.terminal.isTTY === true && input.rejectionToken !== undefined) {
     throw new ApprovalError("WSSPEC_APPROVAL_FEEDBACK_NOT_ALLOWED", "TTY 拒绝决定不能携带拒绝确认凭据。");
   }
-  if (input.terminal.isTTY !== true && !(input.decision === "reject" && feedback !== undefined && input.rejectionToken !== undefined)) {
-    throw new ApprovalError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "批准或无反馈拒绝必须来自真实交互式 TTY。");
+  if (input.terminal.isTTY !== true && confirmation === undefined && !(input.decision === "reject" && feedback !== undefined && input.rejectionToken !== undefined)) {
+    throw new ApprovalError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "普通步骤批准可携带 confirmation 记录用户对当前版本的明确同意；未提供确认的批准或无反馈拒绝需要交互式 TTY。");
   }
   const tokenHash = input.rejectionToken === undefined ? undefined : sha256(input.rejectionToken);
   const projection = await readControlPlane(input.cwd, input.workItemId);
@@ -311,11 +324,11 @@ export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: 
     return await mutateControlPlane({
       cwd: input.cwd, workItemId: input.workItemId, eventType: "approval.decided", idempotencyKey: `approval-decision:${input.requestId}`,
       ...(request === undefined ? {} : { stageId: request.stageId, attemptId: request.attemptId }),
-      actor: input.actor ?? "interactive-user", operationInput: { requestId: input.requestId, decision: input.decision, feedback: feedback ?? null, tokenHash: tokenHash ?? null, expectedDigest: input.expectedDigest ?? null },
+      actor: input.actor ?? "interactive-user", operationInput: { requestId: input.requestId, decision: input.decision, feedback: feedback ?? null, tokenHash: tokenHash ?? null, expectedDigest: input.expectedDigest ?? null, ...(confirmation === undefined ? {} : { confirmation, actor: input.actor }) },
       mutate: async (current) => {
         const pending = assertPendingApproval(current, request, input.expectedDigest);
         let evidence = current.evidence;
-        if (input.terminal.isTTY !== true) {
+        if (input.terminal.isTTY !== true && confirmation === undefined) {
           const key = rejectionConfirmationEvidenceKey(tokenHash!);
           const confirmation = current.evidence[key] as RejectionConfirmation | undefined;
           if (confirmation === undefined) throw new ApprovalError("WSSPEC_REJECTION_CONFIRMATION_INVALID", "拒绝确认凭据不存在或无效。");
@@ -335,6 +348,8 @@ export async function decideArtifactApproval<T = RuntimeApproval>(input: { cwd: 
           ...pending,
           status,
           decidedBy: input.actor ?? "interactive-user",
+          decisionSource: confirmation !== undefined ? "agent_transcribed" : input.terminal.isTTY === true ? "terminal" : "terminal_token",
+          ...(confirmation === undefined ? {} : { confirmation }),
           decidedAt: new Date().toISOString(),
           ...(feedback === undefined ? {} : { feedback }),
         };

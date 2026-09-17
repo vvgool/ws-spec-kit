@@ -318,3 +318,25 @@ test("recovery preserves a durable pending approval and its audit record", async
   assert.equal(recovered.workItem.status, "awaiting_approval");
   assert.equal(recovered.stages.intake?.status, "awaiting_approval");
 });
+
+test("conversation confirmation requires bounded text, actor and exact digest at the engine boundary", async () => {
+  const fixture = await prepare();
+  const request = await requestArtifactApproval({ cwd: fixture.root, workItemId: fixture.workItemId, stageId: "intake", attemptId: "attempt-approval", artifactPath: fixture.artifactPath, artifactType: "specification" });
+  const input = {
+    cwd: fixture.root, workItemId: fixture.workItemId, requestId: request.requestId,
+    decision: "approve" as const, terminal: { isTTY: false }, actor: "codex", expectedDigest: request.contentHash,
+    confirmation: { source: "conversation" as const, userMessage: "可以" },
+  };
+  for (const userMessage of ["  ", "好".repeat(3000), "\ud800", "password=example-secret"]) {
+    await assert.rejects(decideArtifactApproval({ ...input, confirmation: { ...input.confirmation, userMessage } }), { code: "WSSPEC_APPROVAL_CONFIRMATION_INVALID" });
+  }
+  await assert.rejects(decideArtifactApproval({ ...input, actor: " " }), { code: "WSSPEC_APPROVAL_CONFIRMATION_INVALID" });
+  const { expectedDigest: omitted, ...unbound } = input;
+  void omitted;
+  await assert.rejects(decideArtifactApproval(unbound), { code: "WSSPEC_APPROVAL_CONFIRMATION_INVALID" });
+  await assert.rejects(decideArtifactApproval({ ...input, decision: "reject" }), { code: "WSSPEC_APPROVAL_CONFIRMATION_INVALID" });
+  assert.equal((await readControlPlane(fixture.root, fixture.workItemId)).approvals[request.requestId]!.status, "pending");
+  const decided = await decideArtifactApproval({ ...input, confirmation: { ...input.confirmation, userMessage: "  可以\r\n继续  " } });
+  assert.deepEqual(decided.confirmation, { source: "conversation", userMessage: "可以\n继续" });
+  assert.equal(decided.decisionSource, "agent_transcribed");
+});

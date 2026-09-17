@@ -20,6 +20,7 @@ import { writeFileAtomic } from "./files.js";
 import { assertExternalActionProjection, type ExternalActionState } from "../engine/external-effects/authorization.js";
 import { workPackageIdentityDigest } from "../domain/work-package-identity.js";
 import type { WorkPackage } from "../protocol/work-package.js";
+import type { ConversationConfirmation } from "../protocol/application.js";
 
 export interface ResolvedWorkItemContext {
   directory: string;
@@ -73,6 +74,8 @@ export interface RuntimeApproval {
   workspaceTreeDigest: string;
   requestedBy?: string;
   decidedBy?: string;
+  decisionSource?: "terminal" | "terminal_token" | "agent_transcribed";
+  confirmation?: ConversationConfirmation;
   feedback?: string;
   status: "pending" | "approved" | "rejected" | "expired";
   createdAt: string;

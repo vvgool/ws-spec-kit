@@ -25,19 +25,19 @@ wspec agent install --client generic --target <安装目录>
 Codex、Claude、Cursor 分别安装到宿主约定的 `~/.agents/skills/wsspeckit-driver/SKILL.md`、
 `~/.claude/skills/wsspeckit-driver/SKILL.md` 和 `~/.cursor/skills/wsspeckit-driver/SKILL.md`。
 Generic 没有可推断的宿主目录，必须显式提供 `--target`。四类目标目录都必须预先存在，安装器不会创建
-任何祖先或目标目录。安装器支持 `--dry-run`；同 v9 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
+任何祖先或目标目录。安装器支持 `--dry-run`；同 v10 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
 同名内容均拒绝原地覆盖，必须由用户人工迁移。四类安装只生成中文说明的 `SKILL.md`，不生成 `.mdc`
 或后台 Runner。
 
 安全 helper 固定使用 canonical、root-owned 且不可 group/world write 的 `/usr/bin/python3 -I -S`；请求只从
 stdin 接收结构化 JSON，stdout 仅允许有界固定 JSON，不继承 HOME、PYTHONPATH 或用户凭据，并受超时和
 输出上限约束。helper 从根目录开始以 `dir_fd`、`O_DIRECTORY`、`O_NOFOLLOW` 逐段打开预创建目标并核对
-最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v9 只读复验，不执行 pathname `mkdir` 或替换。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
+最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v10 只读复验，不执行 pathname `mkdir` 或替换。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
 closed，且对抗测试验证外部目录无新增或修改。
 
 ## 模拟协议循环
 
-Driver v9 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
+Driver v10 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
 功能/文档 Workflow 选择、`new`/`recovery` 入口、四条命令的 argv 模板、输出 capture、action 分支与终点。
 验收解释器只从安装后的 JSON 合同派生命令，不在测试代码中维护第二套协议。
 
@@ -87,3 +87,6 @@ inode、mode、uid、size 与组合 identity，verifier 在结束后逐项复验
 - fresh-session 证据：checkpoint 分开记录 acquired/reacquired，并绑定活动 Stage、Attempt、Lease digest；
   explicit/recovery 必须各自对 before-checkpoint 的同一 Attempt 产生一次 `attempt.reacquired` 和 Lease 轮换。
 - 未运行证据：真实 Codex、Claude、Cursor Skill 发现、自动触发、模型执行和真实客户端跨会话恢复。
+
+
+普通步骤对话批准验收：非 TTY Host 携带当前 Request、摘要、actor 与 `confirmation: { source: "conversation", userMessage: "可以" }`，直接取得下一执行包。审计来源为 `agent_transcribed`，并保存用户确认原话；重复和并发决定返回同一 Lease，改动摘要被拒绝，工作区变化使原审批过期。真实 CLI 使用管道 stdin 验证该链路；这不等同于真实 Agent Host 已部署验收。外部动作和 Workflow 信任继续通过原有 TTY 边界验收。

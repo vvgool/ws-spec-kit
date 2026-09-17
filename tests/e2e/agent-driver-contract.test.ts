@@ -314,6 +314,9 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.match(body, /明确提出修改要求.*feedback.*rejected/su, `${client}: 修改意见自动退回`);
       assert.match(body, /revisionRequest\.feedback/u, `${client}: 修订 Work Package 携带反馈`);
       assert.match(body, /本地真实 TTY.*confirm_rejection/u, `${client}: 修改意见必须先经本地 TTY 确认`);
+      assert.match(body, /confirmation.*conversation.*userMessage/u, `${client}: 普通批准支持转录对话确认`);
+      assert.match(body, /agent_transcribed/u, `${client}: 转录不冒充独立身份验证`);
+      assert.match(body, /external_action.*workflow_trust.*TTY/u, `${client}: 严格审批保留 TTY`);
       assert.match(body, /rejectionToken/u, `${client}: 拒绝决定携带一次性确认凭据`);
       assert.match(body, /不冒充.*真实 Agent Host/u, `${client}: Host 边界`);
       assert.equal(contract.operations.acquire.branch?.field, "result.action", `${client}: acquire action 分支`);

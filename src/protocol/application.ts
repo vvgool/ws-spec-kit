@@ -78,8 +78,14 @@ export interface RejectionConfirmationInput extends BaseApprovalDecision {
   feedback: string;
 }
 
+/** Host transcription of an explicit user decision; not independently verified identity. */
+export interface ConversationConfirmation {
+  source: "conversation";
+  userMessage: string;
+}
+
 export type ApprovalDecision = BaseApprovalDecision & (
-  | { decision: "approved" }
+  | { decision: "approved"; confirmation?: ConversationConfirmation }
   | { decision: "rejected"; feedback?: string; rejectionToken?: string }
 );
 

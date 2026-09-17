@@ -166,8 +166,9 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
     return { action: "rejection_confirmed", rejectionConfirmation };
   }
   if (dependencies.terminal.isTTY !== true
+    && !(input.decision === "approved" && input.confirmation !== undefined)
     && !(input.decision === "rejected" && input.feedback !== undefined && input.rejectionToken !== undefined)) {
-    throw new ApplicationDecisionError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "批准或无反馈拒绝必须来自真实交互式 TTY。 ");
+    throw new ApplicationDecisionError("WSSPEC_INTERACTIVE_TTY_REQUIRED", "普通步骤批准可携带 confirmation 记录用户对当前版本的明确同意；未提供确认的批准或无反馈拒绝需要交互式 TTY。 ");
   }
   const state = await loadApplicationState(input.root, input.workItemId);
   try {
@@ -179,6 +180,7 @@ export async function decideApplication(input: DecisionInput, dependencies: Deci
       terminal: dependencies.terminal,
       actor: input.actor,
       expectedDigest: input.expectedDigest,
+      ...(input.decision !== "approved" || input.confirmation === undefined ? {} : { confirmation: input.confirmation }),
       ...(input.decision !== "rejected" || input.feedback === undefined ? {} : { feedback: input.feedback }),
       ...(input.decision !== "rejected" || input.rejectionToken === undefined ? {} : { rejectionToken: input.rejectionToken }),
       finalize: async (projection) => {

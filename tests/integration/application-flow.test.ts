@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { access, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -2120,4 +2122,71 @@ test("WorkPackage omits the source reference when the Step does not declare requ
   assert.deepEqual(workPackage.artifacts, []);
   assert.deepEqual(workPackage.requiredOutputs, [{ artifactType: "requirement-source", schemaVersion: 1 }]);
   assert.equal(JSON.stringify(workPackage).includes("Private source"), false);
+});
+
+test("conversation approval advances without TTY, persists provenance and replays the same lease", async () => {
+  const current = await fixture();
+  const { started, awaiting } = await prepareApproval(current);
+  const app = createApplication({ provider: "codex", terminal: { isTTY: false }, now: current.now });
+  const input = {
+    kind: "approval" as const, root: current.root, workItemId: started.workItemId,
+    requestId: awaiting.approval.requestId, expectedDigest: awaiting.approval.digest,
+    decision: "approved" as const, actor: "codex",
+    confirmation: { source: "conversation" as const, userMessage: "可以，按这个方案做。" },
+  };
+  const actions = await Promise.all([app.decide(input), app.decide(input)]);
+  assert.equal(requireExecute(actions[0]!).stepId, "design");
+  assert.deepEqual(actions[1], actions[0]);
+  await recoverControlPlane({ cwd: current.root, workItemId: started.workItemId });
+  const projection = await readControlPlane(current.root, started.workItemId);
+  const approval = projection.approvals[input.requestId]!;
+  assert.equal(approval.decidedBy, "codex");
+  assert.equal(approval.decisionSource, "agent_transcribed");
+  assert.deepEqual(approval.confirmation, input.confirmation);
+  assert.equal(approval.contentHash, input.expectedDigest);
+  await assert.rejects(app.decide({ ...input, actor: "another-agent" }), { code: "WSSPEC_IDEMPOTENCY_CONFLICT" });
+  await assert.rejects(app.decide({ ...input, confirmation: { ...input.confirmation, userMessage: "另一次确认" } }), { code: "WSSPEC_IDEMPOTENCY_CONFLICT" });
+});
+
+test("conversation approval cannot approve a different digest or changed workspace", async () => {
+  const current = await fixture();
+  const { started, awaiting, worktree } = await prepareApproval(current);
+  const app = createApplication({ provider: "codex", terminal: { isTTY: false }, now: current.now });
+  const input = {
+    kind: "approval" as const, root: current.root, workItemId: started.workItemId,
+    requestId: awaiting.approval.requestId, expectedDigest: awaiting.approval.digest,
+    decision: "approved" as const, actor: "codex",
+    confirmation: { source: "conversation" as const, userMessage: "可以" },
+  };
+  await assert.rejects(app.decide({ ...input, expectedDigest: "sha256:wrong" }), { code: "WSSPEC_APPROVAL_DIGEST_MISMATCH" });
+  await writeFile(path.join(worktree, "README.md"), "changed after confirmation\n");
+  const next = await app.decide(input);
+  assert.equal(requireExecute(next).stepId, "clarify");
+  const projection = await readControlPlane(current.root, started.workItemId);
+  assert.equal(projection.approvals[input.requestId]!.status, "expired");
+});
+
+
+test("CLI accepts conversation approval with piped stdin and resumes the next step", async () => {
+  const current = await fixture();
+  const { started, awaiting } = await prepareApproval(current);
+  const input = {
+    kind: "approval", workItemId: started.workItemId, requestId: awaiting.approval.requestId,
+    expectedDigest: awaiting.approval.digest, decision: "approved",
+    confirmation: { source: "conversation", userMessage: "可以，按这个方案做。" },
+  };
+  const decisionFile = path.join(current.root, ".wsspec", "work-items", started.workItemId, "drafts", "conversation-approval.json");
+  await mkdir(path.dirname(decisionFile), { recursive: true });
+  await writeFile(decisionFile, JSON.stringify(input));
+  const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+  const run = () => promisify(execFile)(process.execPath, [
+    "--import", path.join(repositoryRoot, "node_modules/tsx/dist/loader.mjs"),
+    path.join(repositoryRoot, "src/cli/main.ts"), "decide", "--input", decisionFile, "--actor", "codex",
+  ], { cwd: current.root });
+  const first = await run();
+  assert.equal(first.stderr, "");
+  const output = JSON.parse(first.stdout) as { ok: boolean; result: AgentAction };
+  assert.equal(output.ok, true);
+  assert.equal(requireExecute(output.result).stepId, "design");
+  assert.deepEqual(JSON.parse((await run()).stdout), output);
 });

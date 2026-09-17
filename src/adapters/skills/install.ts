@@ -29,9 +29,9 @@ export interface SecureInstallRequest {
   expectedSize?: number;
 }
 
-type DriverVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+type DriverVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
-const currentDriverVersion = 9 as const;
+const currentDriverVersion = 10 as const;
 const maximumDriverBytes = 1_048_576n;
 const driverDescription = "使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。";
 const driverFrontMatterKeys = ["description", "name", "wsspeckit-driver-content-digest", "wsspeckit-driver-version"] as const;
@@ -51,6 +51,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     7: ["sha256:cccac8ae5fa0fe9df0b6619afc8566be7964b3ae2a5d65f93002a3def5360039"],
     8: ["sha256:1dcde3f1ac6354c638e72d06f38c52c08eef3d23997d424ec4fb4965658828d4"],
     9: ["sha256:c6f840578f56f519abf2b1d46dcad1b9677ab967f3f10b8db52cc75059c05c51"],
+    10: ["sha256:23ab06508a0fe66dd04288d9e61491beb5e27ce9ba74261bab1108b50d83cefb"],
   },
   claude: {
     1: [
@@ -65,6 +66,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     7: ["sha256:c24cc8db341e713dc68558ebfa89ea7e697375ed607158daf8376b859e2cc2ff"],
     8: ["sha256:473652ca39298ac466cac9afe46200d75fccfe0824e196a7c9c48094f1b9a4b2"],
     9: ["sha256:7db41e216376d8ff9e453a4cfde3a7d0ac938a7e9910240cfe7873df9e32ac25"],
+    10: ["sha256:282b20e91c2118c552323bf18fd2e6fa5a8212c0ff3539f5a074eb3d3bdfe5c7"],
   },
   cursor: {
     1: [
@@ -79,6 +81,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     7: ["sha256:b9bf5f6060ac8d8c7c24aedea265724623e54d76af91c014fc2d8e450ecedb0d"],
     8: ["sha256:c433dcaa8a1daddd77029c798581d67199efbfb1bb0ef9f29cfbae9d60387997"],
     9: ["sha256:57c9f82585fff57fa754f3d91c08136296e935d2046cde68160e6b4a7f54c22d"],
+    10: ["sha256:21ead795458a814064e4bf567d01e50d03676c0ef40b32abca2cc63439751187"],
   },
   generic: {
     1: [
@@ -93,6 +96,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     7: ["sha256:b10bf3dee31acfa1364ebd8668659095e433ac572450670e1a22130f00c68d3b"],
     8: ["sha256:08eae7547d185a362fb81ef267c91b9aedcabae870b907154c154a3212f2576c"],
     9: ["sha256:b12c0a55f82ea7028735ce96e11073f4a5faff2b304aa956fb9d8da7e77f60e0"],
+    10: ["sha256:de7012748b5a190448f4a8377db4916a3c356deaeb6e38867141795aaf8e099b"],
   },
 };
 
@@ -244,7 +248,7 @@ function body(agent: DriverAgent): string {
     "每次 acquire 都读取 `result.action` 并按下列分支处理：",
     "",
     "- `execute`：读取 `result.workPackage.stepId`、`result.workPackage.attemptId`、`result.workPackage.lease.token` 和完整 `requiredOutputs`。先把 Work Package 中系统提供的 `requirement-source` 引用放入 `artifactRefs`；再按 `requiredOutputs` 顺序逐项处理其余输出。每项正文写入 Work Item 自有的 `.wsspec/work-items/<workItemId>/drafts/<outputId>.md`，执行 `wspec artifact create --work-item \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease-token \"<leaseToken>\" --artifact-type \"<artifactType>\" --output \"<outputId>\" --content-file \".wsspec/work-items/<workItemId>/drafts/<outputId>.md\"`，并把每次 JSON stdout 的 `result` 追加到 `artifactRefs`。所有必需输出完成后才生成 SubmitResult；submit JSON 的 `artifacts` 只携带累积的 ArtifactRef，正文、`contentFile`、绝对路径和 Lease token 都不得写入 `<resultPath>`。随后执行 `wspec submit \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease \"<leaseToken>\" --result \"<resultPath>\" --actor \"<actor>\"`。submit 也返回 `result.action`：若为 `execute`，它已经携带并 claim 新 Work Package，必须从 artifact 循环处理，不得再次 acquire；其余分支按下文停止。不得复用旧 attemptId 或 leaseToken。",
-    "- `await_approval`：读取并向用户展示 `result.approval`，停止自动执行且不得代替用户批准。用户明确批准时，必须通过真实交互式 TTY 提交 `approved` 决定。用户明确提出修改要求时，将原话作为 `feedback`，先由 WSSpecKit 本地真实 TTY 提交 `confirm_rejection` 决定；收到 `rejection_confirmed` 后，把返回的一次性 `rejectionToken` 与同一份 `feedback` 写入 `rejected` 决定并执行 `wspec decide --input \"<decisionPath>\" --actor \"<actor>\"`。不得在拒绝决定成功前修改审批绑定的 Artifact。若决定后返回 `execute` 且 `resumeSubmission` 不为 `true`，按新 Work Package 重新执行 Artifact authoring；修订时读取 `workPackage.revisionRequest.feedback`。仅当 `resumeSubmission: true` 时，才使用原样未改的 `<resultPath>` 直接重新 submit。若 Host 会话已中断，再从 inspect / acquire 恢复。",
+    "- `await_approval`：读取并向用户展示 `result.approval`，尚未获得明确决定时等待用户。普通步骤（`approval.kind: step`）的用户明确批准可直接转录为 `kind: approval`、`decision: approved`，加入 `confirmation: { source: conversation, userMessage: 用户确认原话 }`，绑定当前 `workItemId`、`requestId`、`expectedDigest: result.approval.digest`，以当前 Agent 的 `actor` 执行 `wspec decide`，无需用户再操作终端。已有对当前版本的明确确认时直接执行，不重复询问。确认记录标记为 `agent_transcribed`，表示 Agent 转录，不是独立验证的用户身份；仅保存这次确认原话，不复制整段会话。只在用户确认明确对应当前审批版本时转录；模糊回应或方案变更后重新展示待审批内容并澄清。`external_action`、`workflow_trust` 及需要人工决定的外部恢复仍要求 TTY：展示审批时就说明执行方式；遇到 `WSSPEC_INTERACTIVE_TTY_REQUIRED` 后不要原样反复重试，也不要自行创建 TTY 代替用户确认。用户明确提出修改要求时，将原话作为 `feedback`，先由 WSSpecKit 本地真实 TTY 提交 `confirm_rejection` 决定；收到 `rejection_confirmed` 后，把返回的一次性 `rejectionToken` 与同一份 `feedback` 写入 `rejected` 决定并执行 `wspec decide --input \"<decisionPath>\" --actor \"<actor>\"`。不得在拒绝决定成功前修改审批绑定的 Artifact。若决定后返回 `execute` 且 `resumeSubmission` 不为 `true`，按新 Work Package 重新执行 Artifact authoring；修订时读取 `workPackage.revisionRequest.feedback`。仅当 `resumeSubmission: true` 时，才使用原样未改的 `<resultPath>` 直接重新 submit。若 Host 会话已中断，再从 inspect / acquire 恢复。",
     "- `blocked`：读取并展示 `result.problems`，停止循环；只有问题被外部解决后才从 inspect / acquire 恢复。",
     "- `completed`：读取 `result.summary`，报告完成并停止，不再 acquire 或 submit。",
     "",
@@ -360,7 +364,7 @@ function ownedSkillVersion(content: string, agent: DriverAgent): DriverVersion |
     && source.description === driverDescription
     && keys.length === driverFrontMatterKeys.length
     && keys.every((key, index) => key === driverFrontMatterKeys[index])
-    && (version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9)
+    && (version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10)
     && typeof digest === "string"
     && digest === sha256(match[2]!)
     && canonicalDriverDigests[agent][version].includes(digest);

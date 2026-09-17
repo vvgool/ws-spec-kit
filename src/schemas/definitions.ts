@@ -775,6 +775,13 @@ export const schemas = {
           workItemId: { type: "string", pattern: workItemIdPattern }, requestId: { type: "string", minLength: 1 },
           decision: { const: "approved" }, expectedDigest: { type: "string", pattern: digestPattern },
           actor: { type: "string", minLength: 1 },
+          confirmation: {
+            type: "object", additionalProperties: false, required: ["source", "userMessage"],
+            properties: {
+              source: { const: "conversation" },
+              userMessage: { type: "string", minLength: 1, maxLength: 8192 },
+            },
+          },
         },
       },
       {

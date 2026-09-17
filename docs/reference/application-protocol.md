@@ -169,7 +169,7 @@ path、digest、device、inode、mode、uid、size 和组合 identity，并在�
 
 ### `decide`
 
-输入：`DecisionInput`，对应 `builtin.application-decision-input.v2`。步骤审批和 `external_action` 决定需要 `workItemId`、`expectedDigest` 与 `actor`；步骤审批的 `rejected` 决定还可携带有界 `feedback`。Workflow 信任需要 Package/能力摘要与 `actor`；`external_reconciliation` 需要 `workItemId`、`requestId`、`expectedDigest` 与 `actor`。输出：`AgentAction`。步骤批准、无反馈拒绝、Workflow 信任与外部动作决定只接受真实交互式 TTY。非 TTY Host 提交带 `feedback` 的步骤拒绝前，必须先由 WSSpecKit 本地真实 TTY 以 `confirm_rejection` 签发一次性 `rejectionToken`；TTY 直接拒绝不得携带该 token。该凭据绑定 `requestId`、`expectedDigest`、`actor` 和规范化 feedback digest，控制面只保存 token digest。跨请求、跨 actor、跨 feedback 或重复消费均 fail closed；同一完整决定的幂等重试返回首次决定产生的同一 AgentAction。`feedback` 先规范化换行并去除首尾空白，再按 8192 UTF-8 字节上限检查，同时拒绝 unpaired surrogate、私钥、AWS access key、JWT、密码连接串和通用凭据样式文本；普通自然语言中的 `%` 不按 URI 编码解析。拒绝后返回的 `builtin.work-package.v2` 通过必填的 `revisionRequest` 携带审批请求身份和修改意见，但不能扩大 `allowedPaths`、解除 `forbiddenActions` 或改变审批权限。审批决定与下一 Work Package 在同一控制面事务内提交，重复或并发决定不会旋转首次返回的 Lease。外部动作批准恢复原 Attempt 时，v1 `execute` 明确携带 `resumeSubmission: true`；该标记禁止与修订 v2 Work Package 组合，其他步骤批准、拒绝修订和审批过期替换均重新 author Artifact。外部批准形成与当前 Request、Attempt、actor、Profile、workspace 和 config 摘要绑定的 `builtin.external-action-grant.v1`；拒绝决定持久化与 Request 摘要绑定的证据，后续 `acquire` 继续 fail closed。`external_reconciliation` 精确支持三种决定：`reconcile` 仅调用对应 Provider 的只读回查，不要求交互式 TTY；`mark_failed` 由真实交互式 TTY 提交审计证据，将未知结果标记为失败；`adopt_verified` 由真实交互式 TTY 提交外部稳定 ID、内容摘要和审计证据，并且仍须通过 Provider 的权威只读回查后才能采纳 verified Receipt。自动回查先在短事务中认领带期限的持久化 owner，释放控制面锁后调用 Provider，再在短事务中按 owner、Request、Attempt 和完成时 Lease 做 CAS 提交；并发调用共享同一回查，过期 owner 可由后续调用接管。三者都不批准或重发写入；Runtime 会先恢复并绑定原 Attempt，verified 后返回 `resumeSubmission: true`，由 Host 原样重提 SubmitResult 以消费持久化 Receipt。
+输入：`DecisionInput`，对应 `builtin.application-decision-input.v2`。步骤审批和 `external_action` 决定需要 `workItemId`、`expectedDigest` 与 `actor`；步骤审批的 `rejected` 决定还可携带有界 `feedback`。Workflow 信任需要 Package/能力摘要与 `actor`；`external_reconciliation` 需要 `workItemId`、`requestId`、`expectedDigest` 与 `actor`。输出：`AgentAction`。普通步骤批准支持 TTY 或下述对话确认；未携带对话确认的步骤批准、无反馈拒绝、Workflow 信任与外部动作决定仍要求真实交互式 TTY。非 TTY Host 提交带 `feedback` 的步骤拒绝前，必须先由 WSSpecKit 本地真实 TTY 以 `confirm_rejection` 签发一次性 `rejectionToken`；TTY 直接拒绝不得携带该 token。该凭据绑定 `requestId`、`expectedDigest`、`actor` 和规范化 feedback digest，控制面只保存 token digest。跨请求、跨 actor、跨 feedback 或重复消费均 fail closed；同一完整决定的幂等重试返回首次决定产生的同一 AgentAction。`feedback` 先规范化换行并去除首尾空白，再按 8192 UTF-8 字节上限检查，同时拒绝 unpaired surrogate、私钥、AWS access key、JWT、密码连接串和通用凭据样式文本；普通自然语言中的 `%` 不按 URI 编码解析。拒绝后返回的 `builtin.work-package.v2` 通过必填的 `revisionRequest` 携带审批请求身份和修改意见，但不能扩大 `allowedPaths`、解除 `forbiddenActions` 或改变审批权限。审批决定与下一 Work Package 在同一控制面事务内提交，重复或并发决定不会旋转首次返回的 Lease。外部动作批准恢复原 Attempt 时，v1 `execute` 明确携带 `resumeSubmission: true`；该标记禁止与修订 v2 Work Package 组合，其他步骤批准、拒绝修订和审批过期替换均重新 author Artifact。外部批准形成与当前 Request、Attempt、actor、Profile、workspace 和 config 摘要绑定的 `builtin.external-action-grant.v1`；拒绝决定持久化与 Request 摘要绑定的证据，后续 `acquire` 继续 fail closed。`external_reconciliation` 精确支持三种决定：`reconcile` 仅调用对应 Provider 的只读回查，不要求交互式 TTY；`mark_failed` 由真实交互式 TTY 提交审计证据，将未知结果标记为失败；`adopt_verified` 由真实交互式 TTY 提交外部稳定 ID、内容摘要和审计证据，并且仍须通过 Provider 的权威只读回查后才能采纳 verified Receipt。自动回查先在短事务中认领带期限的持久化 owner，释放控制面锁后调用 Provider，再在短事务中按 owner、Request、Attempt 和完成时 Lease 做 CAS 提交；并发调用共享同一回查，过期 owner 可由后续调用接管。三者都不批准或重发写入；Runtime 会先恢复并绑定原 Attempt，verified 后返回 `resumeSubmission: true`，由 Host 原样重提 SubmitResult 以消费持久化 Receipt。
 
 ```json contract=schema:builtin.application-decision-input.v2
 {
@@ -182,6 +182,34 @@ path、digest、device、inode、mode、uid、size 和组合 identity，并在�
   "actor": "maintainer"
 }
 ```
+
+#### 普通步骤的对话批准
+
+用户明确同意当前审批版本后，Host 可直接提交以下决定，无需另开终端。`confirmation` 仅允许出现在 `kind: approval` 的 `approved` 决定中；`external_action`、Workflow 信任和外部恢复不接受该字段。
+
+```json contract=schema:builtin.application-decision-input.v2
+{
+  "kind": "approval",
+  "root": "/workspace/demo",
+  "workItemId": "WSS-20260817-001",
+  "requestId": "approval-01",
+  "decision": "approved",
+  "expectedDigest": "sha256:current-approval",
+  "actor": "codex",
+  "confirmation": {
+    "source": "conversation",
+    "userMessage": "可以，按这个方案做。"
+  }
+}
+```
+
+CLI 仍使用 `wspec decide --input <decisionPath> --actor <agent>`。`requestId` 和 `expectedDigest` 必须取自当前 `await_approval`；示例中的身份和摘要不能直接复用。引擎继续检查 Artifact、工作区及审批版本，并将决定与下一 Work Package 原子提交。相同确认的重试返回同一结果；不同确认或 actor 不能覆盖已有决定。
+
+审计记录保留 `decisionSource: agent_transcribed`、`confirmation`、代执行 Agent 的 `decidedBy`、时间和原审批绑定。`userMessage` 只保存当前确认原话，规范化换行与首尾空白，上限 8192 UTF-8 字节，沿用 feedback 的编码及凭据文本校验；不合法时返回 `WSSPEC_APPROVAL_CONFIRMATION_INVALID`。它是 Host 转录声明，不是签名凭证或独立身份验证。TTY 决定标为 `terminal`，经 TTY token 的拒绝标为 `terminal_token`；旧记录允许没有来源字段。
+
+Driver 在用户确认前说明审批方式，对当前版本已明确批准则直接记录并继续；版本发生变化须重新展示，不能把旧确认用于新版本。仅 `execute.resumeSubmission: true` 可以原样重提，其他返回的 Work Package 必须重新执行。
+
+现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 升至 v10；已安装的 v9 不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
 
 ### `inspect`
 
@@ -296,7 +324,7 @@ skills:
 | `acquire` | `WSSPEC_ACTIVE_CLAIM_INVALID`、`WSSPEC_ATTEMPT_NOT_ACTIVE`、`WSSPEC_LOOP_CONFIGURATION_INVALID`、`WSSPEC_LOOP_MAX_ITERATIONS_REACHED`、`WSSPEC_REQUIRED_INPUT_ARTIFACT_MISSING`、`WSSPEC_STAGE_ALREADY_CLAIMED`、`WSSPEC_STEP_RETRY_EXHAUSTED`、`WSSPEC_WORKFLOW_BLOCKED` |
 | `artifact` | `WSSPEC_ARTIFACT_AUTHORING_UNAVAILABLE`、`WSSPEC_ARTIFACT_CONFLICT`、`WSSPEC_ARTIFACT_DRAFT_CHANGED`、`WSSPEC_ARTIFACT_DRAFT_NOT_IGNORED`、`WSSPEC_ARTIFACT_DRAFT_PATH_INVALID`、`WSSPEC_ARTIFACT_DRAFT_TOO_LARGE`、`WSSPEC_ARTIFACT_ENCODING_INVALID`、`WSSPEC_ARTIFACT_HASH_MISMATCH`、`WSSPEC_ARTIFACT_INCOMPLETE`、`WSSPEC_ARTIFACT_OUTPUT_AMBIGUOUS`、`WSSPEC_ARTIFACT_OUTPUT_NOT_REQUIRED`、`WSSPEC_ARTIFACT_OUTPUT_SCHEMA_UNSUPPORTED`、`WSSPEC_ARTIFACT_SCHEMA_MISMATCH`、`WSSPEC_ARTIFACT_SCHEMA_NOT_FOUND`、`WSSPEC_LOOP_ARTIFACT_INVALID` |
 | `submit` | `WSSPEC_ARTIFACT_REFERENCE_INVALID`、`WSSPEC_DOCUMENTATION_SCOPE_VIOLATION`、`WSSPEC_LOOP_STEP_APPROVAL_UNSUPPORTED`、`WSSPEC_MODIFIED_FILES_MISMATCH`、`WSSPEC_REQUIRED_ARTIFACT_MISSING`、`WSSPEC_STEP_CONFIGURATION_INVALID`、`WSSPEC_STEP_FAILED`、`WSSPEC_STEP_FAILURE_CLASSIFICATION_INVALID`、`WSSPEC_STEP_INPUT_INVALID`、`WSSPEC_UNDECLARED_ARTIFACT`、`WSSPEC_WORKSPACE_MODE_VIOLATION` |
-| `approval` | `WSSPEC_APPROVAL_DIGEST_INVALID`、`WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_FEEDBACK_INVALID`、`WSSPEC_APPROVAL_FEEDBACK_NOT_ALLOWED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED`、`WSSPEC_REJECTION_CONFIRMATION_INVALID`、`WSSPEC_REJECTION_CONFIRMATION_MISMATCH`、`WSSPEC_REJECTION_CONFIRMATION_USED` |
+| `approval` | `WSSPEC_APPROVAL_CONFIRMATION_INVALID`、`WSSPEC_APPROVAL_DIGEST_INVALID`、`WSSPEC_APPROVAL_DIGEST_MISMATCH`、`WSSPEC_APPROVAL_EXPIRED`、`WSSPEC_APPROVAL_FEEDBACK_INVALID`、`WSSPEC_APPROVAL_FEEDBACK_NOT_ALLOWED`、`WSSPEC_APPROVAL_NOT_EXPIRED`、`WSSPEC_APPROVAL_NOT_PENDING`、`WSSPEC_APPROVAL_NOT_READY`、`WSSPEC_INTERACTIVE_TTY_REQUIRED`、`WSSPEC_REJECTION_CONFIRMATION_INVALID`、`WSSPEC_REJECTION_CONFIRMATION_MISMATCH`、`WSSPEC_REJECTION_CONFIRMATION_USED` |
 | `externalAction` | `WSSPEC_EXTERNAL_ACTION_REJECTED`、`WSSPEC_EXTERNAL_ADOPTION_NOT_VERIFIED`、`WSSPEC_EXTERNAL_ADOPTION_UNSUPPORTED`、`WSSPEC_EXTERNAL_ATTEMPT_MISMATCH`、`WSSPEC_EXTERNAL_BINDING_INVALID`、`WSSPEC_EXTERNAL_DISPATCH_EVIDENCE_MISSING`、`WSSPEC_EXTERNAL_GRANT_EXPIRED`、`WSSPEC_EXTERNAL_GRANT_INVALID`、`WSSPEC_EXTERNAL_GRANT_MISMATCH`、`WSSPEC_EXTERNAL_IDEMPOTENCY_CONFLICT`、`WSSPEC_EXTERNAL_IDEMPOTENCY_INVALID`、`WSSPEC_EXTERNAL_INTENT_INVALID`、`WSSPEC_EXTERNAL_EXECUTION_IN_PROGRESS`、`WSSPEC_EXTERNAL_ISSUE_CLOSE_NOT_VERIFIED`、`WSSPEC_EXTERNAL_ISSUE_UPDATE_NOT_VERIFIED`、`WSSPEC_EXTERNAL_ORDER_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_ARTIFACT_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_INVALID`、`WSSPEC_EXTERNAL_PAYLOAD_MISMATCH`、`WSSPEC_EXTERNAL_PROJECTION_INVALID`、`WSSPEC_EXTERNAL_PROVIDER_EXECUTION_FAILED`、`WSSPEC_EXTERNAL_PROVIDER_RECONCILIATION_FAILED`、`WSSPEC_EXTERNAL_READBACK_MISMATCH`、`WSSPEC_EXTERNAL_RECONCILIATION_EVIDENCE_INVALID`、`WSSPEC_EXTERNAL_RECONCILIATION_FAILED`、`WSSPEC_EXTERNAL_RECONCILIATION_NOT_REQUIRED`、`WSSPEC_EXTERNAL_RECONCILIATION_REQUIRED`、`WSSPEC_EXTERNAL_REJECTION_INVALID`、`WSSPEC_EXTERNAL_REQUEST_DIGEST_MISMATCH`、`WSSPEC_EXTERNAL_REQUEST_EXPIRED`、`WSSPEC_EXTERNAL_REQUEST_INVALID`、`WSSPEC_EXTERNAL_REQUEST_NOT_FOUND`、`WSSPEC_EXTERNAL_STATE_TRANSITION_INVALID`、`WSSPEC_EXTERNAL_TARGET_INVALID`、`WSSPEC_OPTIONAL_KNOWLEDGE_FAILED`、`WSSPEC_OPTIONAL_KNOWLEDGE_NOT_SETTLED`、`WSSPEC_REQUIRED_KNOWLEDGE_NOT_VERIFIED` |
 | `workflowEject` | `WSSPEC_WORKFLOW_EJECT_SOURCE_INVALID`、`WSSPEC_WORKFLOW_EJECT_TARGET_EXISTS` |
 | `agentInstall` | `WSSPEC_SKILL_INSTALL_CONFLICT` |
