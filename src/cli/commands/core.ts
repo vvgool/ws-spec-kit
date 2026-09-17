@@ -1,3 +1,6 @@
+import { parse } from "yaml";
+import { suggestTestingConfig } from "../../storage/testing-config.js";
+import { migrateTestingConfig } from "../../application/testing-config.js";
 import { constants } from "node:fs";
 import { access, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
@@ -198,7 +201,15 @@ export async function runCommand(cwd: string, argv: string[]): Promise<unknown> 
 }
 
 const routes: Readonly<Record<string, (cwd: string, args: string[], home: string) => Promise<unknown>>> = Object.freeze({
-  init: async (cwd, args) => { parseArguments(args, 0, []); return initRepository(cwd); },
+  init: async (cwd, args) => { const parsed = parseArguments(args, 0, ["--test-root"]); return initRepository(cwd, parsed.values["--test-root"]); },
+  config: async (root, argv) => {
+    if (argv[0] === "suggest") { const args = parseArguments(argv.slice(1), 0, ["--test-root"]); return suggestTestingConfig(root, args.values["--test-root"]); }
+    if (argv[0] !== "migrate") throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "config 支持 suggest 或 migrate。");
+    const args = parseArguments(argv.slice(1), 1, ["--file", "--expected-digest", "--actor"]);
+    return migrateTestingConfig({ root, workItemId: args.positional[0]!,
+      config: parse(await readFile(path.resolve(root, required(args.values["--file"], "--file")), "utf8")),
+      expectedDigest: required(args.values["--expected-digest"], "--expected-digest"), actor: required(args.values["--actor"], "--actor") });
+  },
   start,
   acquire,
   artifact,

@@ -102,7 +102,7 @@ const gateSchema: JsonSchema = {
       type: "object",
       additionalProperties: false,
       required: ["type", "version"],
-      properties: { type: { const: "node-test" }, version: { const: 1 } },
+      properties: { type: { enum: ["node-test", "vitest"] }, version: { const: 1 } },
     },
   },
 };

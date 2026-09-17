@@ -1,3 +1,4 @@
+import { readTestingConfigMigration, testingConfigEvidenceKey } from "../storage/testing-config-migration.js";
 import * as canonicalizeModule from "canonicalize";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -48,7 +49,7 @@ export function fixedTestGateFromConfig(raw: unknown): FixedTestGate {
     || !configuredPathRules.every((value) => typeof value === "string" && (testPathRules as readonly string[]).includes(value))
     || !Array.isArray(testAssetPaths) || testAssetPaths.length === 0 || !testAssetPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
     || !Array.isArray(productPaths) || productPaths.length === 0 || !productPaths.every((value) => typeof value === "string" && isRepositoryRelativePattern(value))
-    || reporter?.type !== "node-test" || reporter.version !== 1) {
+    || !["node-test", "vitest"].includes(String(reporter?.type)) || reporter?.version !== 1) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", "Project Config 缺少固定且完整的 test Gate。");
   }
   return {
@@ -65,12 +66,13 @@ export function fixedTestGateFromConfig(raw: unknown): FixedTestGate {
     testAssetPaths: testAssetPaths as string[],
     testAssetRoots: deriveTestAssetRoots(testAssetPaths as string[]),
     productPaths: productPaths as string[],
-    reporter: { type: "node-test", version: 1 },
+    reporter: { type: reporter!.type as "node-test" | "vitest", version: 1 },
   };
 }
 
-export async function fixedTestGateForState(state: Pick<import("../application/state.js").ApplicationState, "itemRoot">): Promise<FixedTestGate> {
-  return fixedTestGateFromConfig(parse(await readFile(path.join(state.itemRoot, "snapshot", "config.yaml"), "utf8")));
+export async function fixedTestGateForState(state: Pick<import("../application/state.js").ApplicationState, "itemRoot" | "item" | "projection">): Promise<FixedTestGate> {
+  const migration = readTestingConfigMigration(state.projection.evidence[testingConfigEvidenceKey], state.item.execution.configDigest);
+  return fixedTestGateFromConfig(migration?.config ?? parse(await readFile(path.join(state.itemRoot, "snapshot", "config.yaml"), "utf8")));
 }
 
 const canonicalize = canonicalizeModule.default as unknown as (input: unknown) => string | undefined;

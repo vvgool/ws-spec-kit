@@ -1,3 +1,5 @@
+import { runnerInstallationDigest } from "./runner-digest.js";
+import { vitestReporterSource } from "./vitest-reporter.js";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, lstat, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
@@ -94,6 +96,7 @@ interface NodeTestReport {
 interface ResolvedGate {
   executable: string;
   executableDigest: string;
+  runner?: { path: string; digest: string };
   environment: Record<string, string>;
   commandDigest: string;
 }
@@ -296,19 +299,40 @@ function gateConfiguration(gate: FixedTestGate): Record<string, unknown> {
 }
 
 async function resolveGate(gate: FixedTestGate, worktree: string): Promise<ResolvedGate> {
-  if (gate.argv.length === 0 || gate.argv.some((part) => typeof part !== "string") || gate.timeoutMs < 1 || gate.reporter.type !== "node-test" || gate.reporter.version !== 1) {
+  if (gate.argv.length === 0 || gate.argv.some((part) => typeof part !== "string") || gate.timeoutMs < 1 || !["node-test", "vitest"].includes(gate.reporter.type) || gate.reporter.version !== 1) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", `Test Gate ${gate.commandId} 配置无效。`);
   }
   assertRules(gate.testPathRules);
   const environment = effectiveEnvironment(gate);
   const executable = await resolveExecutable(gate.argv[0]!, environment, worktree);
   const executableDigest = sha256(await readFile(executable));
-  if (executableDigest !== sha256(await readFile(process.execPath)) || !gate.argv.slice(1).includes("--test") || gate.argv.some((part) => part.startsWith("--test-reporter"))) {
-    throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "首版 trusted TDD 仅支持由引擎注入 reporter 的当前 node:test runner。 ");
+  if (executableDigest !== sha256(await readFile(process.execPath))) {
+    throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "trusted TDD 必须使用当前 Node。");
+  }
+  let runner: ResolvedGate["runner"];
+  if (gate.reporter.type === "vitest") {
+    if (gate.argv[2] !== "run" || gate.argv.some(part => /^--(?:reporter|outputFile|watch|mergeReports|passWithNoTests|update)/u.test(part))) {
+      throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "Vitest 必须以 node <vitest.mjs> run 执行，报告由引擎注入。");
+    }
+    try {
+      const runnerPath = await realpath(path.resolve(worktree, gate.argv[1]!));
+      const metadata = JSON.parse(await readFile(path.join(path.dirname(runnerPath), "package.json"), "utf8")) as { name?: string; version?: string };
+      const version = /^(3|4)\.(\d+)\.(\d+)(?:\+[^ ]+)?$/u.exec(metadata.version ?? "");
+      const supported = version !== null && (version[1] === "4" || Number(version[2]) > 2 || (Number(version[2]) === 2 && Number(version[3]) >= 4));
+      if (path.basename(runnerPath) !== "vitest.mjs" || metadata.name !== "vitest" || !supported) {
+        throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "仅支持项目安装的 Vitest 3.2.4+（3.x）或 4.x 入口。");
+      }
+      runner = { path: runnerPath, digest: await runnerInstallationDigest(runnerPath) };
+    } catch (error) {
+      if (error instanceof VerificationError) throw error;
+      throw new VerificationError("WSSPEC_TDD_GATE_EXECUTION_FAILED", "无法读取项目 Vitest 安装，请安装依赖并核对 Test Gate 的 runner 路径。");
+    }
+  } else if (!gate.argv.slice(1).includes("--test") || gate.argv.some(part => part.startsWith("--test-reporter"))) {
+    throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "node:test 必须由引擎注入 reporter。");
   }
   const environmentDigest = sha256(`${JSON.stringify(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)))}\n`);
-  const commandDigest = sha256(`${JSON.stringify({ version: 4, gate: gateConfiguration(gate), executablePathDigest: sha256(executable), executableDigest, environmentDigest, reporterDigest: sha256(nodeTestReporterSource) })}\n`);
-  return { executable, executableDigest, environment, commandDigest };
+  const commandDigest = sha256(`${JSON.stringify({ version: 4, gate: gateConfiguration(gate), executablePathDigest: sha256(executable), executableDigest, environmentDigest, reporterDigest: sha256(gate.reporter.type === "vitest" ? vitestReporterSource : nodeTestReporterSource), ...(runner === undefined ? {} : { runner }) })}\n`);
+  return { executable, executableDigest, environment, commandDigest, ...(runner === undefined ? {} : { runner }) };
 }
 
 function boundedAppend(current: string, chunk: Buffer | string): string {
@@ -322,15 +346,17 @@ async function runFixedGate(gate: FixedTestGate, resolved: ResolvedGate, worktre
   const reportRoot = await mkdtemp(path.join(os.tmpdir(), "wsspec-tdd-report-"));
   const reporterPath = path.join(reportRoot, "reporter.mjs");
   const resultPath = path.join(reportRoot, "result.json");
-  await writeFile(reporterPath, nodeTestReporterSource, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await writeFile(reporterPath, gate.reporter.type === "vitest" ? vitestReporterSource : nodeTestReporterSource, { encoding: "utf8", mode: 0o600, flag: "wx" });
   await writeFile(resultPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
   const initialResultStat = await lstat(resultPath);
-  const argv = [`--test-reporter=${pathToFileURL(reporterPath).href}`, `--test-reporter-destination=${resultPath}`, ...gate.argv.slice(1)];
+  const argv = gate.reporter.type === "vitest"
+    ? [resolved.runner!.path, ...gate.argv.slice(2), "--reporter", reporterPath]
+    : [`--test-reporter=${pathToFileURL(reporterPath).href}`, `--test-reporter-destination=${resultPath}`, ...gate.argv.slice(1)];
   let output = "";
   try {
     const child = spawn(resolved.executable, argv, {
       cwd: worktree,
-      env: resolved.environment,
+      env: { ...resolved.environment, ...(gate.reporter.type === "vitest" ? { WSPECKIT_VITEST_REPORT: resultPath } : {}) },
       shell: false,
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
@@ -368,6 +394,7 @@ async function runFixedGate(gate: FixedTestGate, resolved: ResolvedGate, worktre
       report = await readFile(resultPath, "utf8");
     }
     if (sha256(await readFile(resolved.executable)) !== resolved.executableDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 可执行文件在运行期间发生变化。 ");
+    if (resolved.runner !== undefined && await runnerInstallationDigest(resolved.runner.path) !== resolved.runner.digest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Vitest runner 在执行中变化。");
     return { ...result, output, ...(report === undefined ? {} : { report }) };
   } finally {
     await rm(reportRoot, { recursive: true, force: true });
@@ -396,9 +423,13 @@ function sanitizedOutput(output: string, secrets: readonly string[]): string {
   return sanitized.replace(/((?:authorization|token|password|secret|api[_-]?key)\s*[:=]\s*)([^\s]+)/giu, "$1[REDACTED]").replace(/Bearer\s+[^\s]+/giu, "Bearer [REDACTED]");
 }
 
-function parseNodeTestReport(value: string | undefined): NodeTestReport {
+function parseNodeTestReport(value: string | undefined, adapter: "node-test" | "vitest"): NodeTestReport {
   if (value === undefined || Buffer.byteLength(value) > reportLimit) throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test reporter 未产生受限结构化结果。 ");
-  try { return validate<NodeTestReport>("builtin.tdd-node-test-report.v1", JSON.parse(value)); }
+  try {
+    const report = JSON.parse(value) as NodeTestReport;
+    if (report.adapter !== adapter) throw new Error("reporter mismatch");
+    return validate<NodeTestReport>("builtin.tdd-node-test-report.v1", { ...report, adapter: "node-test" });
+  }
   catch { throw new VerificationError("WSSPEC_TDD_REPORT_INVALID", "node:test reporter 结果不符合严格 Schema。 "); }
 }
 
@@ -454,7 +485,7 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
   });
   if (result.timedOut) throw new VerificationError("WSSPEC_TDD_RED_TIMEOUT", "Test Gate 超时，不能形成可信 Evidence。 ");
   if (result.signal !== null || result.exitCode === null) throw new VerificationError("WSSPEC_TDD_RED_INFRASTRUCTURE_FAILURE", "Test Gate 被 signal 终止，不能形成可信 Evidence。 ");
-  const report = parseNodeTestReport(result.report);
+  const report = parseNodeTestReport(result.report, input.gate.reporter.type);
   const [outputWorkspaceDigest, outputManifest, assetManifest] = await Promise.all([
     computeWorkspaceTreeDigest(input.worktree),
     testFileManifest(input.worktree, input.testPaths, input.gate.testPathRules),
@@ -480,7 +511,7 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
     throw new VerificationError("WSSPEC_TDD_GREEN_NOT_OBSERVED", "同一 Test Gate 未形成结构化零失败 Green 结果。 ");
   }
   const failures = input.phase === "red" ? assertionFailures.map(({ name }) => sanitizedOutput(name, secrets)).slice(0, 100) : [];
-  const summary = sanitizedOutput(input.phase === "red" ? failures.join("\n") : `node:test passed ${report.summary.passed}/${report.summary.tests}`, secrets).slice(0, summaryLimit);
+  const summary = sanitizedOutput(input.phase === "red" ? failures.join("\n") : `${input.gate.reporter.type} passed ${report.summary.passed}/${report.summary.tests}`, secrets).slice(0, summaryLimit);
   const unsigned: Omit<TrustedEvidence, "evidenceId"> = {
     level: "trusted",
     phase: input.phase,

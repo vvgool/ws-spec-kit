@@ -26,7 +26,7 @@ export interface FixedTestGate {
   testAssetPaths: readonly string[];
   testAssetRoots: readonly string[];
   productPaths: readonly string[];
-  reporter: { type: "node-test"; version: 1 };
+  reporter: { type: "node-test" | "vitest"; version: 1 };
 }
 
 export interface TestFileDigest {

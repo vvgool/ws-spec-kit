@@ -1,3 +1,4 @@
+import { readTestingConfigMigration, testingConfigEvidenceKey } from "../storage/testing-config-migration.js";
 import type { InspectInput, WorkItemView } from "../protocol/application.js";
 import { validate } from "../schemas/index.js";
 import { recoverControlPlane } from "../storage/control-plane.js";
@@ -23,6 +24,7 @@ export async function inspectApplication(input: InspectInput): Promise<WorkItemV
       status: external.status,
     }));
   return {
+    testingConfigDigest: readTestingConfigMigration(state.projection.evidence[testingConfigEvidenceKey], state.item.execution.configDigest)?.configDigest ?? state.item.execution.configDigest,
     workItemId: state.item.workItemId,
     status: state.projection.workItem.status,
     workflowRef: state.snapshot.workflowRef,

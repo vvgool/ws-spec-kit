@@ -189,6 +189,7 @@ export interface CompletionSummary {
 }
 
 export interface WorkItemView {
+  testingConfigDigest?: string;
   workItemId: WorkItemId;
   status: string;
   workflowRef: string;

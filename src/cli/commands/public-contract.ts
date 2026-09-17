@@ -11,7 +11,8 @@ export interface PublicCliRouteDescriptor {
 }
 
 export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Object.freeze([
-  { command: "init", usage: "wspec init" },
+  { command: "init", usage: "wspec init [--test-root <path>]" },
+  { command: "config", usage: "wspec config suggest | migrate <workItemId> --file <configPath> --expected-digest <digest> --actor <actor>" },
   { command: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { command: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
   { command: "artifact", usage: "wspec artifact create --work-item <Work Item> --step <步骤> --attempt <尝试> --lease-token <令牌> --artifact-type <类型> [--output <输出 ID>] --content-file <.acceptance 内正文文件>" },
@@ -24,7 +25,9 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
 ]);
 
 export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Object.freeze([
-  { route: "init", usage: "wspec init" },
+  { route: "config suggest", usage: "wspec config suggest [--test-root <path>]" },
+  { route: "config migrate", usage: "wspec config migrate <workItemId> --file <configPath> --expected-digest <digest> --actor <actor>" },
+  { route: "init", usage: "wspec init [--test-root <path>]" },
   { route: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
   { route: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
   { route: "artifact create", usage: "wspec artifact create --work-item <Work Item> --step <步骤> --attempt <尝试> --lease-token <令牌> --artifact-type <类型> [--output <输出 ID>] --content-file <.acceptance 内正文文件>" },
@@ -46,6 +49,7 @@ const workflowRoutes: ReadonlySet<string> = new Set(["list", "show", "eject", "v
 export function publicCliErrorRoute(argv: readonly string[]): PublicCliErrorRoute {
   const command = argv[0];
   if (command !== undefined && coreRoutes.has(command)) return command as PublicCliRoute;
+  if (command === "config") return argv[1] === "suggest" ? "config suggest" : argv[1] === "migrate" ? "config migrate" : "config";
   if (command === "workflow") {
     const subcommand = argv[1];
     return subcommand !== undefined && workflowRoutes.has(subcommand) ? `workflow ${subcommand}` as PublicCliRoute : "workflow";

@@ -1,3 +1,4 @@
+import { suggestTestingConfig } from "./testing-config.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ulid } from "ulid";
@@ -141,7 +142,7 @@ export function defaultProjectConfig(): Record<string, unknown> {
   };
 }
 
-export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
+export async function initRepository(cwd: string, testRoot?: string): Promise<RepositoryIdentity> {
   let root: string;
   let commonDir: string;
   try {
@@ -158,9 +159,16 @@ export async function initRepository(cwd: string): Promise<RepositoryIdentity> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  // Detect before writing identity so an ambiguous project can retry init safely.
+  let config: string;
+  try { config = await readFile(path.join(root, ".wsspec", "config.yaml"), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    config = stringify(await suggestTestingConfig(root, testRoot), { lineWidth: 0 });
+  }
   const repositoryId = `repo-${ulid()}` as RepositoryId;
   await writeFileAtomic(filename, stringify({ version: 1, repositoryId }, { lineWidth: 0 }));
-  await writeDefaultIfMissing(path.join(root, ".wsspec", "config.yaml"), stringify(defaultProjectConfig(), { lineWidth: 0 }));
+  await writeDefaultIfMissing(path.join(root, ".wsspec", "config.yaml"), config);
   await writeDefaultIfMissing(path.join(root, ".wsspec", "workflow.yaml"), stringify({
     version: 1,
     activeWorkflow: { ref: "builtin://workflows/feature-delivery", version: 1 },

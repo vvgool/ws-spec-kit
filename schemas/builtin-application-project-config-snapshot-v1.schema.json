@@ -151,7 +151,10 @@
                 ],
                 "properties": {
                   "type": {
-                    "const": "node-test"
+                    "enum": [
+                      "node-test",
+                      "vitest"
+                    ]
                   },
                   "version": {
                     "const": 1

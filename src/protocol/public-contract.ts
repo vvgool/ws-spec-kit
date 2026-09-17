@@ -181,13 +181,13 @@ export const applicationFixedPublicErrors = {
 } as const satisfies Record<ApplicationRollbackErrorCode, { code: ApplicationRollbackErrorCode; message: string }>;
 
 export const publicCliRoutes = [
-  "init", "start", "acquire", "artifact create", "submit", "decide", "inspect",
+  "config suggest", "config migrate", "init", "start", "acquire", "artifact create", "submit", "decide", "inspect",
   "workflow list", "workflow show", "workflow eject", "workflow validate", "workflow use", "agent install",
   "doctor connectors",
 ] as const;
 export type PublicCliRoute = typeof publicCliRoutes[number];
 
-export const publicCliErrorRoutes = ["dispatch", "workflow", "agent", "artifact", ...publicCliRoutes] as const;
+export const publicCliErrorRoutes = ["dispatch", "workflow", "agent", "artifact", "config", ...publicCliRoutes] as const;
 export type PublicCliErrorRoute = typeof publicCliErrorRoutes[number];
 
 const applicationGroups = [
@@ -202,7 +202,10 @@ export const applicationPublicErrorGroupNamesByRoute = {
   workflow: ["internal", "dispatch"],
   agent: ["internal", "dispatch"],
   artifact: ["internal", "dispatch"],
-  init: ["internal", "arguments", "repository"],
+  config: ["internal", "arguments"],
+  "config suggest": ["internal", "arguments", "repository", "tdd"],
+  "config migrate": ["internal", "arguments", ...applicationGroups, "tdd", "source"],
+  init: ["internal", "arguments", "repository", "tdd"],
   start: [
     "internal", "arguments", "repository", "schema", "builtin", "workflowPackage", "workflowTrust", "skill", "projectConfig",
     "compiler", "executor", "connectorRegistry", "connectorProvider", "source", "workItem", "runtime", "start", "tdd",
@@ -214,7 +217,7 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit",
     "approval", "workflowPackage", "workflowTrust", "externalAction",
   ],
-  inspect: ["internal", "arguments", "repository", "schema", "snapshot", "workItem", "externalAction"],
+  inspect: ["internal", "arguments", "repository", "schema", "snapshot", "workItem", "externalAction", "tdd"],
   "workflow list": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
   "workflow show": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage"],
   "workflow eject": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage", "workflowEject"],
