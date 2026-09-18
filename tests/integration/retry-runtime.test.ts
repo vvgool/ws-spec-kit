@@ -134,3 +134,25 @@ test("retry.maxAttempts 持久计数，恢复不重置预算且穷尽错误稳�
   assert.equal(stillExhausted.problems[0]?.code, "WSSPEC_STEP_RETRY_EXHAUSTED");
   assert.equal(stillExhausted.problems[0]?.retryable, false);
 });
+
+test("repeated lease expiry preserves execution budget through event replay", async () => {
+  let now = new Date("2026-10-01T00:00:00Z");
+  const fixture = await controlRuntimeFixture({ now: () => now });
+  const started = await fixture.app.start({ root: fixture.root, source: { type: "prompt", text: "resume interrupted work" }, profile: "quick" });
+  await rewriteSelectedSnapshot(fixture, started.workItemId, profile => { profile.steps.find(s => s.id === "intake")!.retry = { maxAttempts: 2 }; });
+  let pkg = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "agent" }));
+  for (let i = 1; i <= 4; i++) {
+    now = new Date(new Date(pkg.lease.expiresAt).getTime() + 1);
+    const previous = pkg.attemptId;
+    pkg = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "agent" }));
+    assert.notEqual(pkg.attemptId, previous);
+    const runtime = await readControlPlane(fixture.root, started.workItemId);
+    assert.equal(runtime.retries.intake!.attemptsUsed, 1);
+    assert.equal(runtime.retries.intake!.interruptions, i);
+  }
+  const runtime = await readControlPlane(fixture.root, started.workItemId);
+  await writeFile(path.join(runtime.controlPlane, "runtime.json"), "not-json\n");
+  const replay = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
+  assert.equal(replay.retries.intake!.interruptions, 4);
+  assert.equal(replay.retries.intake!.attemptsUsed, 1);
+});

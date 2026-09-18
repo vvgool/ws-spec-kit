@@ -34,6 +34,15 @@ export interface TestFileDigest {
   digest: string;
 }
 
+export interface CommandFingerprint {
+  config: string;
+  executablePath: string;
+  executable: string;
+  environment: string;
+  reporter: string;
+  runner: string;
+}
+
 export interface TrustedEvidence {
   evidenceId: string;
   level: "trusted";
@@ -42,6 +51,7 @@ export interface TrustedEvidence {
   stepId: string;
   commandId: string;
   commandDigest: string;
+  commandFingerprint?: CommandFingerprint;
   exitCode: number;
   failedTests: string[];
   testPaths: string[];

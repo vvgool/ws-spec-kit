@@ -35,6 +35,6 @@ test("Quick executes compact TDD delivery and resumes an acquired attempt from t
   assert.equal(result.artifacts.tasks.contentLevel, "compact");
   assert.equal(result.projection.loops["review-fix"]?.iteration, 1);
   assert.equal(result.recovered.retries.intake, undefined);
-  assert.equal(result.recoveryEvidence.intakeAttemptsUsed, 2);
+  assert.equal(result.recoveryEvidence.intakeAttemptsUsed, 1, "租约中断不消耗执行失败预算");
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);
 });

@@ -29,9 +29,9 @@ export interface SecureInstallRequest {
   expectedSize?: number;
 }
 
-type DriverVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11;
+type DriverVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
 
-const currentDriverVersion = 11 as const;
+const currentDriverVersion = 12 as const;
 const maximumDriverBytes = 1_048_576n;
 const driverDescription = "使用 WSSpecKit 驱动软件交付 Workflow；新任务、已有任务或用户明确要求时调用。";
 const driverFrontMatterKeys = ["description", "name", "wsspeckit-driver-content-digest", "wsspeckit-driver-version"] as const;
@@ -52,6 +52,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     8: ["sha256:1dcde3f1ac6354c638e72d06f38c52c08eef3d23997d424ec4fb4965658828d4"],
     9: ["sha256:c6f840578f56f519abf2b1d46dcad1b9677ab967f3f10b8db52cc75059c05c51"],
     10: ["sha256:23ab06508a0fe66dd04288d9e61491beb5e27ce9ba74261bab1108b50d83cefb"],
+    12: ["sha256:cab7f4bb237450218ea5607b54635ce2a8cd6078ac1f9a904f74026fc679a692"],
     11: ["sha256:3d2335676195672913c280663db65fc91bf8e141f3d69549a033678e55ee9383"],
   },
   claude: {
@@ -68,6 +69,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     8: ["sha256:473652ca39298ac466cac9afe46200d75fccfe0824e196a7c9c48094f1b9a4b2"],
     9: ["sha256:7db41e216376d8ff9e453a4cfde3a7d0ac938a7e9910240cfe7873df9e32ac25"],
     10: ["sha256:282b20e91c2118c552323bf18fd2e6fa5a8212c0ff3539f5a074eb3d3bdfe5c7"],
+    12: ["sha256:4b132f4b736ca14510c115bd8ee70bf3e621ab503217272615af246a29229782"],
     11: ["sha256:c030ff3dc4958af5886149b48a3fbb7f030f7f9015845602be897fd906df6f88"],
   },
   cursor: {
@@ -84,6 +86,7 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     8: ["sha256:c433dcaa8a1daddd77029c798581d67199efbfb1bb0ef9f29cfbae9d60387997"],
     9: ["sha256:57c9f82585fff57fa754f3d91c08136296e935d2046cde68160e6b4a7f54c22d"],
     10: ["sha256:21ead795458a814064e4bf567d01e50d03676c0ef40b32abca2cc63439751187"],
+    12: ["sha256:90a15b8b11a03758ba0c355521c588eb0912bfab7837bb4c3a1f2dcfa430f67b"],
     11: ["sha256:6646b72622b63e91b2bf7ca575412ae9eeb969c492645cd7ba327b9e00c7049f"],
   },
   generic: {
@@ -100,11 +103,21 @@ const canonicalDriverDigests: Record<DriverAgent, Record<DriverVersion, readonly
     8: ["sha256:08eae7547d185a362fb81ef267c91b9aedcabae870b907154c154a3212f2576c"],
     9: ["sha256:b12c0a55f82ea7028735ce96e11073f4a5faff2b304aa956fb9d8da7e77f60e0"],
     10: ["sha256:de7012748b5a190448f4a8377db4916a3c356deaeb6e38867141795aaf8e099b"],
+    12: ["sha256:d5b430136b9e585242c242b739a2a88aeedbb066870e09f1bb8b0f0c47645d3d"],
     11: ["sha256:83c3ffeca711f3d914870a36954885da21dfbdcf19b5f96794a128bd57d587a9"],
   },
 };
 
 function contract(agent: DriverAgent): Record<string, unknown> {
+  const recoveryCases = {
+    acquire: { next: "acquire" },
+    "revalidate-red": { next: "recover" },
+    "retry-test-gate": { next: "recover" },
+    await_approval: { next: "acquire" },
+    reconcile: { next: "blocked" },
+    blocked: { next: "blocked" },
+    completed: { next: "completed" },
+  };
   const actionCases = {
     execute: {
       next: "artifact",
@@ -181,8 +194,14 @@ function contract(agent: DriverAgent): Record<string, unknown> {
       },
       inspect: {
         argv: ["wspec", "inspect", "${workItemId}"],
-        capture: { workflowRef: "result.workflowRef" },
-        next: "acquire",
+        capture: { workflowRef: "result.workflowRef", recoveryReason: "result.nextAction.reason" },
+        branch: { field: "result.nextAction.kind", cases: recoveryCases },
+      },
+      recover: {
+        argv: ["wspec", "recover", "${workItemId}", "--actor", "${actor}", "--reason", "${recoveryReason}"],
+        branch: { field: "result.nextAction.kind", cases: { ...recoveryCases,
+          "revalidate-red": { next: "blocked" }, "retry-test-gate": { next: "blocked" },
+        } },
       },
       acquire: {
         argv: ["wspec", "acquire", "${workItemId}", "--actor", "${actor}"],
@@ -253,7 +272,9 @@ function body(agent: DriverAgent): string {
     "",
     `新任务执行 \`wspec start --prompt "<用户需求>" --workflow "<workflowRef>" --profile "<profile>" --provider "${agent}"\`。从 JSON 输出读取 \`result.workItemId\` 和 \`result.workflowRef\`；后续所有命令都使用这个 \`workItemId\`，并确认 \`workflowRef\` 未变化。`,
     "",
-    "已有任务或 Host 重启后的恢复固定执行 inspect -> acquire：先运行 `wspec inspect \"<workItemId>\"`，从 `result.workflowRef` 确认原 Workflow，再运行 `wspec acquire \"<workItemId>\" --actor \"<actor>\"`。不要重新 start，也不要按项目当前默认值替换原 `workflowRef`。",
+    "已有任务或 Host 重启后的恢复先执行 inspect，再按 nextAction 路由：先运行 `wspec inspect \"<workItemId>\"`，从 `result.workflowRef` 确认原 Workflow，仅当 nextAction.kind 为 acquire 或 await_approval 时再运行 `wspec acquire \"<workItemId>\" --actor \"<actor>\"`。不要重新 start，也不要按项目当前默认值替换原 `workflowRef`。",
+    "",
+    "inspect 的 result.nextAction.kind 为 revalidate-red 或 retry-test-gate 时，以 result.nextAction.reason 作为原因执行 `wspec recover <workItemId> --actor <actor> --reason <reason>`，恢复不会批准审批或重发外部请求。recover 返回 acquire 后继续领取；返回 blocked、reconcile 或再次要求恢复时停止并展示原因，禁止无变化循环重试。completed 则停止。",
     "",
     "## acquire / submit 循环",
     "",
@@ -261,7 +282,7 @@ function body(agent: DriverAgent): string {
     "",
     "- `execute`：读取 `result.workPackage.stepId`、`result.workPackage.attemptId`、`result.workPackage.lease.token` 和完整 `requiredOutputs`。先把 Work Package 中系统提供的 `requirement-source` 引用放入 `artifactRefs`；再按 `requiredOutputs` 顺序逐项处理其余输出。每项正文写入 Work Item 自有的 `.wsspec/work-items/<workItemId>/drafts/<outputId>.md`，执行 `wspec artifact create --work-item \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease-token \"<leaseToken>\" --artifact-type \"<artifactType>\" --output \"<outputId>\" --content-file \".wsspec/work-items/<workItemId>/drafts/<outputId>.md\"`，并把每次 JSON stdout 的 `result` 追加到 `artifactRefs`。所有必需输出完成后才生成 SubmitResult；submit JSON 的 `artifacts` 只携带累积的 ArtifactRef，正文、`contentFile`、绝对路径和 Lease token 都不得写入 `<resultPath>`。随后执行 `wspec submit \"<workItemId>\" --step \"<stepId>\" --attempt \"<attemptId>\" --lease \"<leaseToken>\" --result \"<resultPath>\" --actor \"<actor>\"`。submit 也返回 `result.action`：若为 `execute`，它已经携带并 claim 新 Work Package，必须从 artifact 循环处理，不得再次 acquire；其余分支按下文停止。不得复用旧 attemptId 或 leaseToken。",
     "- `await_approval`：读取并向用户展示 `result.approval`，尚未获得明确决定时等待用户。普通步骤（`approval.kind: step`）的用户明确批准可直接转录为 `kind: approval`、`decision: approved`，加入 `confirmation: { source: conversation, userMessage: 用户确认原话 }`，绑定当前 `workItemId`、`requestId`、`expectedDigest: result.approval.digest`，以当前 Agent 的 `actor` 执行 `wspec decide`，无需用户再操作终端。已有对当前版本的明确确认时直接执行，不重复询问。确认记录标记为 `agent_transcribed`，表示 Agent 转录，不是独立验证的用户身份；仅保存这次确认原话，不复制整段会话。只在用户确认明确对应当前审批版本时转录；模糊回应或方案变更后重新展示待审批内容并澄清。`external_action`、`workflow_trust` 及需要人工决定的外部恢复仍要求 TTY：展示审批时就说明执行方式；遇到 `WSSPEC_INTERACTIVE_TTY_REQUIRED` 后不要原样反复重试，也不要自行创建 TTY 代替用户确认。用户明确提出修改要求时，将原话作为 `feedback`，先由 WSSpecKit 本地真实 TTY 提交 `confirm_rejection` 决定；收到 `rejection_confirmed` 后，把返回的一次性 `rejectionToken` 与同一份 `feedback` 写入 `rejected` 决定并执行 `wspec decide --input \"<decisionPath>\" --actor \"<actor>\"`。不得在拒绝决定成功前修改审批绑定的 Artifact。若决定后返回 `execute` 且 `resumeSubmission` 不为 `true`，按新 Work Package 重新执行 Artifact authoring；修订时读取 `workPackage.revisionRequest.feedback`。仅当 `resumeSubmission: true` 时，才使用原样未改的 `<resultPath>` 直接重新 submit。若 Host 会话已中断，再从 inspect / acquire 恢复。",
-    "- `blocked`：读取并展示 `result.problems`。若 code 为 `WSSPEC_APPROVAL_EXPIRED`，明确说明本次批准未生效，按 inspect -> acquire 恢复，并使用新 Work Package 重新执行 Artifact authoring 和 submit；重新展示产物请求确认，不能复用旧审批或旧结果。这条路径不需要用户手动解除阻塞，不要重复提交旧 decide。其他 blocked 停止循环；只有问题被外部解决后才从 inspect / acquire 恢复。",
+    "- `blocked`：读取并展示 `result.problems`。若 code 为 `WSSPEC_APPROVAL_EXPIRED`，明确说明本次批准未生效，按 inspect -> acquire 恢复，并使用新 Work Package 重新执行 Artifact authoring 和 submit；重新展示产物请求确认，不能复用旧审批或旧结果。这条路径不需要用户手动解除阻塞，不要重复提交旧 decide。其他 blocked 停止当前循环并展示原因，问题解决后从 inspect 按 nextAction 恢复；不要把 acquire 建议当作问题已修复，也不要原样反复重试。租约或证据错误从 inspect 恢复，并遵守 recover 的一次尝试边界。",
     "- `completed`：读取 `result.summary`，报告完成并停止，不再 acquire 或 submit。",
     "",
     "以下 fenced JSON 是 Host 和自动验收共同消费的命令/状态机合同；`${...}` 变量必须来自用户选择、Host 身份或前一条命令声明的 capture，不能自行猜测：",
@@ -376,7 +397,7 @@ function ownedSkillVersion(content: string, agent: DriverAgent): DriverVersion |
     && source.description === driverDescription
     && keys.length === driverFrontMatterKeys.length
     && keys.every((key, index) => key === driverFrontMatterKeys[index])
-    && (version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10 || version === 11)
+    && (version === 1 || version === 2 || version === 3 || version === 4 || version === 5 || version === 6 || version === 7 || version === 8 || version === 9 || version === 10 || version === 11 || version === 12)
     && typeof digest === "string"
     && digest === sha256(match[2]!)
     && canonicalDriverDigests[agent][version].includes(digest);

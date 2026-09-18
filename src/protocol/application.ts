@@ -188,7 +188,16 @@ export interface CompletionSummary {
   message: string;
 }
 
-export interface WorkItemView {
+export interface RecoveryGuidance {
+  currentStep?: string;
+  currentStepInstanceId?: string;
+  retry?: { attemptsUsed: number; attemptsRemaining: number; interruptions: number; interruptionsRemaining: number };
+  nextAction: { kind: "acquire" | "await_approval" | "reconcile" | "retry-test-gate" | "revalidate-red" | "blocked" | "completed";
+    reason: string; expectedEvidence?: string; expectedAttempt?: string };
+}
+
+export interface WorkItemView extends RecoveryGuidance {
+  redEvidenceId?: string;
   failedTestGate?: { stepId: "verify-red"; attemptId: string; summary: string };
   testingConfigDigest?: string;
   workItemId: WorkItemId;

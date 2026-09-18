@@ -1,3 +1,5 @@
+import { recoverApplication } from "../../application/recover.js";
+import { revalidateRed } from "../../application/revalidate-red.js";
 import { retryTestGate } from "../../application/retry-test-gate.js";
 import { parse } from "yaml";
 import { suggestTestingConfig } from "../../storage/testing-config.js";
@@ -210,6 +212,14 @@ const routes: Readonly<Record<string, (cwd: string, args: string[], home: string
     return migrateTestingConfig({ root, workItemId: args.positional[0]!,
       config: parse(await readFile(path.resolve(root, required(args.values["--file"], "--file")), "utf8")),
       expectedDigest: required(args.values["--expected-digest"], "--expected-digest"), actor: required(args.values["--actor"], "--actor") });
+  },
+  recover: async (root, argv) => {
+    const args = parseArguments(argv, 1, ["--actor", "--reason"]);
+    return recoverApplication({ root, workItemId: args.positional[0]! as `WSS-${string}`, actor: required(args.values["--actor"], "--actor"), reason: required(args.values["--reason"], "--reason") });
+  },
+  "revalidate-red": async (root, argv) => {
+    const args = parseArguments(argv, 1, ["--expected-evidence", "--actor", "--reason"]);
+    return revalidateRed({ root, workItemId: args.positional[0]!, expectedEvidence: required(args.values["--expected-evidence"], "--expected-evidence"), actor: required(args.values["--actor"], "--actor"), reason: required(args.values["--reason"], "--reason") });
   },
   "retry-test-gate": async (root, argv) => {
     const args = parseArguments(argv, 1, ["--expected-attempt", "--actor", "--reason"]);

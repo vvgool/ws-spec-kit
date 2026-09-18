@@ -1,3 +1,4 @@
+import { implementationBaseline, workspaceSnapshotDigest } from "./implementation-baseline.js";
 import { isDeepStrictEqual } from "node:util";
 
 import { computeArtifactTreeDigest, computeWorkspaceSnapshot, computeWorkspaceTreeDigest, sha256 } from "../domain/digests.js";
@@ -115,15 +116,6 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function workspaceSnapshotDigest(snapshot: RuntimeClaim["workspaceSnapshot"]): string {
-  const entries = snapshot.map((entry) => {
-    if (entry.type === "file") return { path: entry.path, type: entry.type, mode: entry.mode, digest: entry.digest };
-    if (entry.type === "symlink") return { path: entry.path, type: entry.type, mode: entry.mode, target: entry.target };
-    return { path: entry.path, type: entry.type, mode: entry.mode };
-  });
-  return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
 }
 
 function claimedSnapshotStep(input: {
@@ -645,25 +637,6 @@ function permanentFailureProblem(projection: RuntimeProjection, stageId: string)
     : undefined;
 }
 
-// Recover only an engine-recorded implementation baseline bound to this Red.
-// Historical events also cover installations that already discarded expired Claims.
-async function implementationBaseline(projection: RuntimeProjection): Promise<RuntimeClaim | undefined> {
-  const key = tddRedEvidenceKey(projection.workItemId);
-  const red = projection.evidence[key] as TrustedEvidence | undefined;
-  if (red === undefined) return undefined;
-  const events = await readEvents(projection.controlPlane);
-  for (let index = events.length - 1; index >= 0; index--) {
-    const snapshot = objectRecord(objectRecord(events[index]?.result)?.projection);
-    if (snapshot === undefined) continue;
-    const historicalRed = objectRecord(objectRecord(snapshot.evidence)?.[key]);
-    if (historicalRed?.evidenceId !== red.evidenceId) break;
-    const claim = objectRecord(objectRecord(snapshot.claims)?.implement) as unknown as RuntimeClaim | undefined;
-    if (claim?.stageId === "implement" && claim.inputWorkspaceTreeDigest === red.workspaceDigest
-      && Array.isArray(claim.workspaceSnapshot) && workspaceSnapshotDigest(claim.workspaceSnapshot) === red.workspaceDigest) return claim;
-  }
-  return undefined;
-}
-
 async function acquireExecutableStep(input: {
   state: ApplicationState;
   projection: RuntimeProjection;
@@ -795,7 +768,7 @@ async function acquireLoopStep(input: {
       if (attempt?.result?.status === "failed") {
         const retry = ownProjection(projection.retries, stepInstanceId);
         if (retry?.status === "exhausted") {
-          return { projection, action: { action: "blocked", problems: [retryExhaustedProblem(stepInstanceId)] }, skippedStepIds };
+          return { projection, action: { action: "blocked", problems: [retryExhaustedProblem(stepInstanceId, ownProjection(projection.retries, stepInstanceId))] }, skippedStepIds };
         }
         selected = { step: child, stepInstanceId };
         break;
@@ -959,7 +932,7 @@ export async function acquireNextLocked(input: {
       const loop = ownProjection(projection.loops, candidate.id);
       if (loop?.status === "blocked") return { step: candidate, problem: loopLimitProblem(loop) };
       const stepInstanceId = exhaustedRetryInstanceId(projection, candidate.id);
-      if (stepInstanceId !== undefined) return { step: candidate, problem: retryExhaustedProblem(stepInstanceId) };
+      if (stepInstanceId !== undefined) return { step: candidate, problem: retryExhaustedProblem(stepInstanceId, ownProjection(projection.retries, stepInstanceId)) };
       const problem = permanentFailureProblem(projection, candidate.id);
       return problem === undefined ? false : { step: candidate, problem };
     }).find((candidate) => candidate !== false);

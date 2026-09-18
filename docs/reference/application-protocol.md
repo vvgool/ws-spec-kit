@@ -217,7 +217,7 @@ CLI 仍使用 `wspec decide --input <decisionPath> --actor <agent>`。`requestId
 
 Driver 在用户确认前说明审批方式，对当前版本已明确批准则直接记录并继续；版本发生变化须重新展示，不能把旧确认用于新版本。仅 `execute.resumeSubmission: true` 可以原样重提，其他返回的 Work Package 必须重新执行。
 
-现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v11；已安装的 v9/v10 不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
+现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v12；已安装的 v11 及更早版本不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
 
 ### `inspect`
 
@@ -347,6 +347,8 @@ skills:
 | `artifact` | `internal`、`dispatch` |
 | `config` | `internal`、`arguments` |
 | `config suggest` | `internal`、`arguments`、`repository`、`tdd` |
+| `recover` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`tdd` |
+| `revalidate-red` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`tdd` |
 | `retry-test-gate` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`tdd` |
 | `config migrate` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`tdd`、`source` |
 | `init` | `internal`、`arguments`、`repository`、`tdd` |
@@ -400,3 +402,31 @@ Vitest Gate 使用完整默认测试资产规则时，规则相对于命令中�
 ### 实现租约过期后的续作
 
 首次领取 implement 仍要求工作区与可信 Red 基线一致。已领取过 implement 的任务可从事件日志恢复与同一 Red Evidence 绑定的原始 Claim 基线，租约过期后重新分配 Attempt 时保留该 workspaceSnapshot 与 inputWorkspaceTreeDigest，已有生产改动仍必须完整列入后续 modifiedFiles；不会以当前文件重新设立基线。测试内容、测试资产范围和测试工具摘要仍须一致，重试次数限制不变。无匹配历史基线时不能放宽首次领取校验。错误信息区分命令环境变化、资产范围变化、测试资产变化及首次领取工作区变化；资产变化列出具体路径。
+
+
+### 执行环境变化后的 Red 重验
+
+新 Red Evidence 保存配置、Node 路径及内容、执行环境、reporter、runner 的分项摘要。实现前校验失败时指出变化分项，不输出环境明文。旧证据只有组合摘要，不能反推出历史变化原因。
+
+`inspect` 的 `redEvidenceId` 用于绑定本次恢复目标：
+
+```sh
+wspec revalidate-red <workItemId> --expected-evidence <redEvidenceId> --actor <操作者> --reason <恢复原因>
+wspec inspect <workItemId>
+wspec acquire <workItemId> --actor <操作者>
+```
+
+只允许 active Work Item 的 implement ready/claimed 阶段，无活动租约、待审批、外部动作或后续执行/证据。测试、辅助资产及其路径配置必须保持不变。引擎从原实现 Claim 恢复 Red 基线，在临时目录复制依赖并执行当前固定 Test Gate；pnpm 和工作区内部链接重定位到临时目录，外部链接拒绝。原始文件必须能由当前相同摘要字节或 Git 基线精确重建，否则拒绝恢复。临时目录是文件隔离，不是操作系统安全沙箱，仍只应运行可信项目测试。
+
+仅当原失败测试集合再次产生断言 Red 时记录新证据，同时保留旧证据、操作者、原因和原始提交基线。全绿、基础设施失败、测试变化或重验期间工作区/命令环境变化均不替换证据。此操作不修改实现文件、配置快照或重试预算；重试相同请求返回原结果，后续必须重新 inspect/acquire，不能复用旧 Lease。新证据应使用支持重验的 CLI 消费。
+
+
+### 统一恢复入口与下一步提示
+
+`wspec inspect <id>` 增加 `currentStep`、`currentStepInstanceId`、`retry` 和 `nextAction`。循环步骤保留顶层 currentStep，并通过 currentStepInstanceId 标识当前迭代子步骤，预算按该实例读取。预算视图包含已用/剩余执行次数和已用/剩余中断次数；运行中的 Attempt 暂占一次执行预算。`nextAction.kind` 为 acquire、await_approval、reconcile、retry-test-gate、revalidate-red、blocked 或 completed，并附原因及适用的证据/Attempt ID。这是建议，实际动作仍重新校验完整状态。
+
+`wspec recover <id> --actor <actor> --reason <原因>` 自动 inspect 并选择现有 Red 路径恢复或环境重验操作，不再要求手工复制摘要/Attempt ID。操作内仍以读取到的身份做并发检查，变化则拒绝；不会重试已发送的外部动作或代替用户批准。返回更新后的 inspect 视图；nextAction 为 acquire 时由 Driver 继续领取。重复调用在已恢复状态下只返回建议，不额外消耗预算或新建 Claim。尚未修复的路径会在完整门禁中再次失败；配置修改仍需明确提供审核后的 config migrate 文件，recover 不猜测配置。
+
+租约中断单独计数，只有 running Attempt 在中断时退回本次预占的执行次数；真实失败继续消耗执行预算。每个步骤最多累计 20 次中断，达到上限停止自动续作并报告原因。旧投影没有 interruptions 字段时按 0 读取，既有已结算失败和耗尽状态不追溯重置。事件保留每次领取与中断，预算退款不删除审计历史。当前实现步骤续作保留原 Claim 基线和全部测试校验。
+
+Driver v12 的 inspect 合同按 nextAction 分支：acquire/await_approval 转 acquire 获取完整 Work Package 或审批，revalidate-red/retry-test-gate 转 recover 并以建议原因作为 reason；blocked/reconcile 停止，completed 结束。recover 后若仍要求恢复则停止，不无限重试。普通 blocked 停止当前循环并展示原因，问题解决后从 inspect 按建议恢复；租约/证据错误从 inspect 恢复，recover 仍仅尝试一次；此流程不批准审批、不重发外部动作。

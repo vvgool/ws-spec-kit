@@ -8,6 +8,8 @@ export class RetryControlError extends Error {
   }
 }
 
+export const maxStepInterruptions = 20;
+
 export function retryLimit(stepMaxAttempts: number | undefined, fallbackRetries: number): number {
   return stepMaxAttempts ?? fallbackRetries + 1;
 }
@@ -22,7 +24,7 @@ export function acquireRetry(
     throw new RetryControlError("WSSPEC_RETRY_PROJECTION_INVALID", `步骤 ${stepInstanceId} 的重试投影与 Application 快照不一致。`);
   }
   if (retry.status !== "ready" || retry.attemptsUsed >= retry.maxAttempts) {
-    throw new RetryControlError("WSSPEC_STEP_RETRY_EXHAUSTED", `步骤 ${stepInstanceId} 已耗尽重试次数。`);
+    throw new RetryControlError("WSSPEC_STEP_RETRY_EXHAUSTED", (retry.interruptions ?? 0) >= maxStepInterruptions ? `步骤 ${stepInstanceId} 已达到 ${maxStepInterruptions} 次中断上限，请检查会话或租约稳定性。` : `步骤 ${stepInstanceId} 已耗尽重试次数。`);
   }
   return { ...retry, attemptsUsed: retry.attemptsUsed + 1, status: "running" };
 }
@@ -35,7 +37,10 @@ export function failRetry(current: RetryProjection): RetryProjection {
 }
 
 export function interruptedRetry(current: RetryProjection): RetryProjection {
-  return current.status === "running" ? failRetry(current) : current;
+  if (current.status !== "running") return current;
+  const interruptions = (current.interruptions ?? 0) + 1;
+  return { ...current, attemptsUsed: Math.max(0, current.attemptsUsed - 1), interruptions,
+    status: interruptions >= maxStepInterruptions ? "exhausted" : "ready" };
 }
 
 export function isStepFailureCode(value: unknown): value is StepFailureCode {
@@ -54,14 +59,16 @@ export function stepFailureProblem(code: StepFailureCode, summary: string): Prob
 
 export function retryFailureProblem(retry: RetryProjection, summary: string): Problem {
   return retry.status === "exhausted"
-    ? retryExhaustedProblem(retry.stepInstanceId)
+    ? retryExhaustedProblem(retry.stepInstanceId, retry)
     : stepFailureProblem("WSSPEC_STEP_FAILED", summary);
 }
 
-export function retryExhaustedProblem(stepInstanceId: string): Problem {
+export function retryExhaustedProblem(stepInstanceId: string, retry?: RetryProjection): Problem {
   return {
     code: "WSSPEC_STEP_RETRY_EXHAUSTED",
-    message: `步骤 ${stepInstanceId} 已耗尽重试次数。`,
+    message: (retry?.interruptions ?? 0) >= maxStepInterruptions
+      ? `步骤 ${stepInstanceId} 已达到 ${maxStepInterruptions} 次中断上限，请检查会话或租约稳定性。`
+      : `步骤 ${stepInstanceId} 已耗尽重试次数。`,
     retryable: false,
   };
 }

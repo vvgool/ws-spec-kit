@@ -9,7 +9,7 @@ import { isRepositoryRelativePattern } from "../domain/repository-path.js";
 import { validate } from "../schemas/index.js";
 import { mutateControlPlane } from "./scheduler.js";
 import { loadApplicationState, selectedProfile, type SnapshotStep } from "../application/state.js";
-import { deriveTestAssetRoots, fixedGateCommandDigest, isTrustedTestAssetPath, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./tdd/red-gate.js";
+import { deriveTestAssetRoots, fixedGateCommandIdentity, commandMismatchMessage, isTrustedTestAssetPath, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "./tdd/red-gate.js";
 import { defaultTestAssetPaths, testPathRules, type FixedTestGate, type TddCycleEvidence, type TrustedEvidence } from "./tdd/types.js";
 import { VerificationError } from "./tdd/types.js";
 
@@ -133,10 +133,10 @@ export function assertImplementHasTrustedRed(input: {
     testFileManifest(input.worktree, evidence.testPaths, evidence.testPathRules),
     testAssetScopeManifest(input.worktree, { testAssetPaths: evidence.testAssetPaths, testAssetRoots: evidence.testAssetRoots, productPaths: evidence.productPaths }),
     computeWorkspaceTreeDigest(input.worktree),
-    input.gate === undefined ? Promise.resolve(evidence.commandDigest) : fixedGateCommandDigest(input.gate, input.worktree),
-  ]).then(([manifest, assets, workspaceDigest, commandDigest]) => {
-    if (evidence.commandId !== input.commandId || evidence.commandDigest !== commandDigest) {
-      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 的命令、环境或可执行文件已变化。 ");
+    input.gate === undefined ? Promise.resolve({ commandDigest: evidence.commandDigest, commandFingerprint: evidence.commandFingerprint }) : fixedGateCommandIdentity(input.gate, input.worktree),
+  ]).then(([manifest, assets, workspaceDigest, identity]) => {
+    if (evidence.commandId !== input.commandId || evidence.commandDigest !== identity.commandDigest) {
+      throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", identity.commandFingerprint === undefined ? "Red Evidence 的测试命令 ID 已变化。" : commandMismatchMessage(evidence, identity.commandFingerprint));
     }
     if (input.gate !== undefined && (JSON.stringify(input.gate.testAssetPaths) !== JSON.stringify(evidence.testAssetPaths)
       || JSON.stringify(input.gate.testAssetRoots) !== JSON.stringify(evidence.testAssetRoots)

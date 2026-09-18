@@ -44,7 +44,7 @@ test("Documentation stays inside its immutable path, records trusted integrity, 
   assert.equal(result.recovered.profile.selected, "quick");
   assert.equal(result.recovered.loops["review-fix"]?.iteration, 1);
   assert.equal(result.recoveryEvidence.loopStep, "commit");
-  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 2);
+  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 1, "租约中断不消耗执行失败预算");
   for (const forbidden of ["write-tests", "verify-red", "implement", "verify-green"]) {
     assert.equal(Object.hasOwn(result.recovered.stages, forbidden), false);
   }

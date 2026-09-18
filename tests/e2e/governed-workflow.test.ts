@@ -67,7 +67,7 @@ test("Governed requires an independent reviewer, complete audit, and read-back l
   assert.deepEqual(result.recoveryEvidence, {
     governedStep: "commit",
     governedAttemptChanged: true,
-    governedAttemptsUsed: 2,
+    governedAttemptsUsed: 1,
     governedLoopMaxIterations: 5,
     governedProfile: "governed",
     governedApprovalCount: 3,
@@ -135,7 +135,7 @@ test("Governed local automated recovery preserves frozen contracts through Revie
     readFile(path.join(itemRoot, "snapshot", "skill.lock.json")),
   ]), frozenContracts);
   assert.equal(result.recoveryEvidence.loopStep, "review-fix:1:fix");
-  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 2);
+  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 1, "租约中断不消耗执行失败预算");
   assert.equal(result.recovered.loops["review-fix"]?.iteration, 2);
   assert.equal(Object.values(result.recovered.approvals).filter(({ status }) => status === "approved").length, 3);
   assert.ok(result.recovered.evidence[`tdd:${started.workItemId}:cycle`]);

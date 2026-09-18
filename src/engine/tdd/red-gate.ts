@@ -15,6 +15,7 @@ import { validate } from "../../schemas/index.js";
 import {
   defaultTestAssetPaths,
   testPathRules as supportedTestPathRules,
+  type CommandFingerprint,
   type FixedTestGate,
   type RedEvidenceInput,
   type TddCycleEvidence,
@@ -101,6 +102,7 @@ interface ResolvedGate {
   runner?: { path: string; digest: string };
   environment: Record<string, string>;
   commandDigest: string;
+  commandFingerprint: CommandFingerprint;
 }
 
 interface CommandResult {
@@ -321,7 +323,7 @@ function gateConfiguration(gate: FixedTestGate): Record<string, unknown> {
   return { commandId: gate.commandId, argv: [...gate.argv], cwd: gate.cwd, timeoutMs: gate.timeoutMs, inheritEnv: [...gate.inheritEnv], env: gate.env, testPathRules: [...gate.testPathRules], testAssetPaths: [...gate.testAssetPaths], testAssetRoots: [...gate.testAssetRoots], productPaths: [...gate.productPaths], reporter: gate.reporter };
 }
 
-async function resolveGate(gate: FixedTestGate, worktree: string): Promise<ResolvedGate> {
+async function resolveGate(gate: FixedTestGate, worktree: string, bindingRoot?: string): Promise<ResolvedGate> {
   if (gate.argv.length === 0 || gate.argv.some((part) => typeof part !== "string") || gate.timeoutMs < 1 || !["node-test", "vitest"].includes(gate.reporter.type) || gate.reporter.version !== 1) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", `Test Gate ${gate.commandId} 配置无效。`);
   }
@@ -354,8 +356,19 @@ async function resolveGate(gate: FixedTestGate, worktree: string): Promise<Resol
     throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "node:test 必须由引擎注入 reporter。");
   }
   const environmentDigest = sha256(`${JSON.stringify(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)))}\n`);
-  const commandDigest = sha256(`${JSON.stringify({ version: 4, gate: gateConfiguration(gate), executablePathDigest: sha256(executable), executableDigest, environmentDigest, reporterDigest: sha256(gate.reporter.type === "vitest" ? vitestReporterSource : nodeTestReporterSource), ...(runner === undefined ? {} : { runner }) })}\n`);
-  return { executable, executableDigest, environment, commandDigest, ...(runner === undefined ? {} : { runner }) };
+  const relocation = bindingRoot === undefined ? undefined : { from: await realpath(worktree), to: await realpath(bindingRoot) };
+  const boundRunner = runner === undefined || relocation === undefined ? runner : {
+    path: runner.path.startsWith(`${relocation.from}${path.sep}`) ? relocation.to + runner.path.slice(relocation.from.length) : runner.path,
+    digest: await runnerInstallationDigest(runner.path, relocation),
+  };
+  const reporterDigest = sha256(gate.reporter.type === "vitest" ? vitestReporterSource : nodeTestReporterSource);
+  const commandFingerprint: CommandFingerprint = {
+    config: sha256(JSON.stringify(gateConfiguration(gate))), executablePath: sha256(executable),
+    executable: executableDigest, environment: environmentDigest, reporter: reporterDigest,
+    runner: sha256(JSON.stringify(boundRunner ?? null)),
+  };
+  const commandDigest = sha256(`${JSON.stringify({ version: 4, gate: gateConfiguration(gate), executablePathDigest: sha256(executable), executableDigest, environmentDigest, reporterDigest, ...(boundRunner === undefined ? {} : { runner: boundRunner }) })}\n`);
+  return { executable, executableDigest, environment, commandDigest, commandFingerprint, ...(runner === undefined ? {} : { runner }) };
 }
 
 function boundedAppend(current: string, chunk: Buffer | string): string {
@@ -468,7 +481,7 @@ async function reportFailures(report: NodeTestReport, worktree: string, testPath
   return matched.filter((failure): failure is NodeTestReport["failures"][number] => failure !== undefined);
 }
 
-function evidenceId(unsigned: Omit<TrustedEvidence, "evidenceId">): string {
+export function evidenceId(unsigned: Omit<TrustedEvidence, "evidenceId">): string {
   const encoded = canonicalize(unsigned);
   if (encoded === undefined) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "TDD Evidence 无法规范化。");
   return `evidence-${sha256(encoded).slice("sha256:".length)}`;
@@ -495,10 +508,10 @@ export function parseTddCycleEvidence(value: unknown): TddCycleEvidence | undefi
   catch { return undefined; }
 }
 
-export async function executeTrustedTestGate(input: { taskId: string; phase: "red" | "green"; stepId: string; gate: FixedTestGate; worktree: string; workspaceDigest: string; testPaths: readonly string[]; expectedCommandDigest?: string; secrets?: readonly string[] }): Promise<TrustedEvidence> {
+export async function executeTrustedTestGate(input: { taskId: string; phase: "red" | "green"; stepId: string; gate: FixedTestGate; worktree: string; workspaceDigest: string; testPaths: readonly string[]; expectedCommandDigest?: string; secrets?: readonly string[]; bindingRoot?: string }): Promise<TrustedEvidence> {
   const currentWorkspaceDigest = await computeWorkspaceTreeDigest(input.worktree);
   if (currentWorkspaceDigest !== input.workspaceDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 输入的 workspace digest 已失效。 ");
-  const resolved = await resolveGate(input.gate, input.worktree);
+  const resolved = await resolveGate(input.gate, input.worktree, input.bindingRoot);
   if (input.expectedCommandDigest !== undefined && input.expectedCommandDigest !== resolved.commandDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 与当前命令环境或可执行文件不再一致。 ");
   const manifest = await testFileManifest(input.worktree, input.testPaths, input.gate.testPathRules);
   const initialAssetManifest = await testAssetScopeManifest(input.worktree, input.gate);
@@ -542,6 +555,7 @@ export async function executeTrustedTestGate(input: { taskId: string; phase: "re
     stepId: input.stepId,
     commandId: input.gate.commandId,
     commandDigest: resolved.commandDigest,
+    commandFingerprint: resolved.commandFingerprint,
     exitCode: result.exitCode,
     failedTests: failures,
     testPaths: manifest.files.map(({ path: filename }) => filename),
@@ -569,4 +583,17 @@ export async function recordRedEvidence(input: RedEvidenceInput): Promise<Truste
 
 export async function fixedGateCommandDigest(gate: FixedTestGate, worktree: string): Promise<string> {
   return (await resolveGate(gate, worktree)).commandDigest;
+}
+
+
+export async function fixedGateCommandIdentity(gate: FixedTestGate, worktree: string): Promise<{ commandDigest: string; commandFingerprint: CommandFingerprint }> {
+  const { commandDigest, commandFingerprint } = await resolveGate(gate, worktree);
+  return { commandDigest, commandFingerprint };
+}
+
+export function commandMismatchMessage(previous: TrustedEvidence, current: CommandFingerprint): string {
+  if (previous.commandFingerprint === undefined) return "Red Evidence 执行摘要不一致；旧证据未记录分项摘要，无法判定具体变化。可用 revalidate-red 在隔离基线重新验证。";
+  const labels: Record<keyof CommandFingerprint, string> = { config: "测试配置", executablePath: "Node 路径", executable: "Node 内容", environment: "执行环境（含 PATH）", reporter: "reporter", runner: "测试工具及依赖" };
+  const changed = (Object.keys(labels) as Array<keyof CommandFingerprint>).filter(key => previous.commandFingerprint![key] !== current[key]);
+  return `Red Evidence 执行摘要变化：${changed.map(key => labels[key]).join("、") || "组合摘要"}。可用 revalidate-red 在隔离基线重新验证。`;
 }

@@ -24,7 +24,7 @@ async function resolvePackage(from: string, name: string): Promise<string | unde
   return undefined;
 }
 
-export async function runnerInstallationDigest(entry: string): Promise<string> {
+export async function runnerInstallationDigest(entry: string, relocation?: { from: string; to: string }): Promise<string> {
   const packages = new Map<string, { files: Array<[string, string]>; dependencies: Array<[string, string | null]> }>();
   async function visit(root: string): Promise<void> {
     if (packages.has(root)) return;
@@ -55,5 +55,11 @@ export async function runnerInstallationDigest(entry: string): Promise<string> {
     }
   }
   await visit(path.dirname(await realpath(entry)));
+  if (relocation !== undefined) {
+    const relocate = (value: string): string => value === relocation.from ? relocation.to
+      : value.startsWith(`${relocation.from}${path.sep}`) ? relocation.to + value.slice(relocation.from.length) : value;
+    const relocated = [...packages].map(([root, record]) => [relocate(root), { ...record, dependencies: record.dependencies.map(([name, target]) => [name, target === null ? null : relocate(target)]) }] as const);
+    return sha256(JSON.stringify(relocated.sort(([left], [right]) => left.localeCompare(right))));
+  }
   return sha256(JSON.stringify([...packages].sort(([left], [right]) => left.localeCompare(right))));
 }

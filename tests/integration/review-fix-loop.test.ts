@@ -12,6 +12,7 @@ import { readControlPlane, recoverControlPlane } from "../../src/storage/control
 import { readEvents } from "../../src/storage/events.js";
 import {
   completedResult,
+  failedResult,
   controlRuntimeFixture,
   requireExecute,
   retainOnlyReadyStage,
@@ -233,7 +234,7 @@ test("until 始终为 false 时达到 maxIterations 后稳定阻塞并保持恢�
   assert.equal(recovered.stages["review-fix"]?.status, "failed");
 });
 
-test("循环内部 Step 的最后一次 Attempt 中断后恢复为稳定的重试耗尽阻塞", async () => {
+test("循环内部 Step 中断退回预算，恢复后真实失败才耗尽", async () => {
   const { fixture, started } = await prepareLoop("standard");
   await rewriteSelectedSnapshot(fixture, started.workItemId, (profile) => {
     const loop = profile.steps.find(({ id }) => id === "review-fix");
@@ -269,9 +270,13 @@ test("循环内部 Step 的最后一次 Attempt 中断后恢复为稳定的重�
   const durable = await readControlPlane(fixture.root, started.workItemId);
   await writeFile(path.join(durable.controlPlane, "runtime.json"), "not-json\n", "utf8");
   const recovered = await recoverControlPlane({ cwd: fixture.root, workItemId: started.workItemId });
-  assert.equal(recovered.retries[review.stepId]?.status, "exhausted");
-
-  const exhausted = await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer-2" });
+  assert.equal(recovered.retries[review.stepId]?.status, "ready");
+  assert.equal(recovered.retries[review.stepId]?.attemptsUsed, 0);
+  assert.equal(recovered.retries[review.stepId]?.interruptions, 1);
+  const resumed = requireExecute(await fixture.app.acquire({ root: fixture.root, workItemId: started.workItemId, actor: "reviewer-2" }));
+  assert.equal(resumed.stepId, review.stepId);
+  assert.notEqual(resumed.attemptId, review.attemptId);
+  const exhausted = await submitPackage(fixture, resumed, failedResult(resumed));
   assert.equal(exhausted.action, "blocked");
   if (exhausted.action !== "blocked") throw new Error("expected blocked action");
   assert.deepEqual(exhausted.problems[0], {

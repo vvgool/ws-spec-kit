@@ -1007,6 +1007,11 @@ export const schemas = {
       stepId: { type: "string", pattern: stepInstanceIdPattern },
       commandId: { type: "string", pattern: idPattern },
       commandDigest: { type: "string", pattern: digestPattern },
+      commandFingerprint: {
+        type: "object", additionalProperties: false,
+        required: ["config", "executablePath", "executable", "environment", "reporter", "runner"],
+        properties: Object.fromEntries(["config", "executablePath", "executable", "environment", "reporter", "runner"].map(key => [key, { type: "string", pattern: digestPattern }])),
+      },
       exitCode: { type: "integer" },
       failedTests: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 512 } },
       testPaths: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", minLength: 1 } },

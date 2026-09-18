@@ -29,7 +29,7 @@ test("Standard executes approved complete artifacts and resumes the two-round Re
   assert.equal(result.artifacts.tasks.contentLevel, "complete");
   assert.equal(result.projection.loops["review-fix"]?.iteration, 2);
   assert.equal(result.recoveryEvidence.loopStep, "review-fix:1:fix");
-  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 2);
+  assert.equal(result.recoveryEvidence.loopAttemptsUsed, 1, "租约中断不消耗执行失败预算");
   assert.equal(Object.values(result.recovered.approvals).filter(({ status }) => status === "approved").length, 2);
   assert.ok(result.recovered.evidence["verify-green:gate:test"]);
   await assertClosedFeatureWorkflow(fixture, started.workItemId, result);

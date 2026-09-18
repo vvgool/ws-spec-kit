@@ -18,6 +18,7 @@ export interface LoopProjection {
 export interface RetryProjection {
   stepInstanceId: string;
   attemptsUsed: number;
+  interruptions?: number;
   maxAttempts: number;
   status: "ready" | "running" | "exhausted";
 }

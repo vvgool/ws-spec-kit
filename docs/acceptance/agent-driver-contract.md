@@ -25,27 +25,27 @@ wspec agent install --client generic --target <安装目录>
 Codex、Claude、Cursor 分别安装到宿主约定的 `~/.agents/skills/wsspeckit-driver/SKILL.md`、
 `~/.claude/skills/wsspeckit-driver/SKILL.md` 和 `~/.cursor/skills/wsspeckit-driver/SKILL.md`。
 Generic 没有可推断的宿主目录，必须显式提供 `--target`。四类目标目录都必须预先存在，安装器不会创建
-任何祖先或目标目录。安装器支持 `--dry-run`；同 v11 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
+任何祖先或目标目录。安装器支持 `--dry-run`；同 v12 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
 同名内容均拒绝原地覆盖，必须由用户人工迁移。四类安装只生成中文说明的 `SKILL.md`，不生成 `.mdc`
 或后台 Runner。
 
 安全 helper 固定使用 canonical、root-owned 且不可 group/world write 的 `/usr/bin/python3 -I -S`；请求只从
 stdin 接收结构化 JSON，stdout 仅允许有界固定 JSON，不继承 HOME、PYTHONPATH 或用户凭据，并受超时和
 输出上限约束。helper 从根目录开始以 `dir_fd`、`O_DIRECTORY`、`O_NOFOLLOW` 逐段打开预创建目标并核对
-最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v11 只读复验，不执行 pathname `mkdir` 或替换。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
+最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v12 只读复验，不执行 pathname `mkdir` 或替换。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
 closed，且对抗测试验证外部目录无新增或修改。
 
 ## 模拟协议循环
 
-Driver v11 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
-功能/文档 Workflow 选择、`new`/`recovery` 入口、四条命令的 argv 模板、输出 capture、action 分支与终点。
+Driver v12 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
+功能/文档 Workflow 选择、`new`/`recovery` 入口、各命令的 argv 模板、输出 capture、action 分支与终点。
 验收解释器只从安装后的 JSON 合同派生命令，不在测试代码中维护第二套协议。
 
 每类 Adapter 都对功能任务和纯文档任务执行相同的真实 CLI 子进程序列：
 
 ```text
 新任务：显式 workflowRef 的 start
-恢复：新进程 inspect -> 新进程 acquire
+恢复：新进程 inspect -> nextAction 分支 -> 必要时一次 recover -> 新进程 acquire
 执行：读取 Work Package 引用 -> 当前 Agent 执行 -> 新进程 submit
 继续：直接处理 submit 返回的 action，直到审批、阻塞或完成
 ```
@@ -95,3 +95,5 @@ inode、mode、uid、size 与组合 identity，verifier 在结束后逐项复验
 未物化 Worktree 的审批回归使用项目根目录执行探索、澄清与真实非 TTY CLI 决定，不预先调用物化辅助函数。当前 Work Item 自有 `drafts/` 中创建审批输入不会使新版审批过期；业务文件、配置和其他 Work Item 草稿仍参与审批摘要，正式 Artifact 继续独立验证。真正过期时 `decide` 返回 `blocked` / `WSSPEC_APPROVAL_EXPIRED`，说明本次批准未生效；Driver 通过 `inspect -> acquire` 恢复后重新 author / submit，再请求用户确认。
 
 过期路由验收从实际安装的 Driver JSON 合同读取 `result.problems.0.code`，解释器支持数组下标。真实 CLI 在未物化工作区触发审批过期后，必须按合同执行 `decide -> inspect -> acquire -> artifact -> submit -> decide`，验证新 Attempt、新审批与重新确认后进入 design；其他 blocked 仍停止。此项是本地合同执行证据，不替代真实 Host 验收。
+
+Driver v12 的恢复路由合同覆盖 revalidate-red/retry-test-gate 到 recover，以及 recover 后 acquire；recover 后仍要求恢复、reconcile 或 blocked 时停止，防止自动重试循环。审批建议通过 acquire 获取完整审批对象，不自动批准。

@@ -77,7 +77,7 @@ test("Codex Driver 安装只写入临时 HOME 的官方目录，并包含中文�
   assert.equal(result.target, path.join(home, ".agents", "skills", "wsspeckit-driver"));
   const skill = await readFile(path.join(result.target, "SKILL.md"), "utf8");
   assert.match(skill, /## Workflow 决策/);
-  assert.match(skill, /已有任务或 Host 重启后的恢复固定执行 inspect -> acquire/);
+  assert.match(skill, /已有任务或 Host 重启后的恢复先执行 inspect/);
   assert.match(skill, /面向用户的说明、文档和交互文案默认使用中文/);
   assert.match(skill, /协议字段、类型名、URI、命令名和错误码保持英文/);
   await assert.rejects(access(path.join(home, ".cursor", "rules", "wsspeckit-driver.mdc")), /ENOENT/);
@@ -110,7 +110,7 @@ test("安装器只幂等复验当前 canonical Driver", async () => {
   const first = await readFile(ownedTarget, "utf8");
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
   assert.equal(await readFile(ownedTarget, "utf8"), first);
-  assert.match(first, /wsspeckit-driver-version: 11/);
+  assert.match(first, /wsspeckit-driver-version: 12/);
 });
 
 test("安装器拒绝原地升级历史 canonical Driver", async (t) => {

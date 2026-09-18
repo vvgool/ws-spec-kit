@@ -45,7 +45,8 @@ node dist/cli/main.js init
 | `artifact create` | 在活动 Attempt 范围内创建不可变 Artifact 引用。 |
 | `submit` | 提交一次 Attempt 的结果、Artifact 与 Evidence 引用。 |
 | `decide` | 提交步骤审批、工作流信任或外部动作相关决定。 |
-| `inspect` | 读取 Work Item 的快照状态。 |
+| `inspect` | 查看当前步骤、执行/中断预算和下一步建议。 |
+| `recover` | 自动选择可用的 Red 路径恢复或环境重验，保留原实现与审计记录。 |
 | `workflow` | 列出、查看、导出、校验或选择工作流。 |
 | `agent install` | 安装 Agent Driver Skill。 |
 | `doctor connectors` | 对已声明的连接器执行无外部写入的诊断。 |

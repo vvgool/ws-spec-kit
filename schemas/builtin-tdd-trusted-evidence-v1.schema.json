@@ -55,6 +55,44 @@
       "type": "string",
       "pattern": "^sha256:.+$"
     },
+    "commandFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config",
+        "executablePath",
+        "executable",
+        "environment",
+        "reporter",
+        "runner"
+      ],
+      "properties": {
+        "config": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "executablePath": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "executable": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "environment": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "reporter": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        },
+        "runner": {
+          "type": "string",
+          "pattern": "^sha256:.+$"
+        }
+      }
+    },
     "exitCode": {
       "type": "integer"
     },

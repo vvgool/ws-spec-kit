@@ -35,7 +35,7 @@ interface CliRun {
   value: { ok: boolean; result?: Record<string, unknown>; error?: { code?: string; message?: string } };
 }
 
-type DriverState = "start" | "inspect" | "acquire" | "artifact" | "submit" | "decide";
+type DriverState = "start" | "inspect" | "recover" | "acquire" | "artifact" | "submit" | "decide";
 type DriverOperationName = DriverState;
 type DriverTerminal = "await_approval" | "blocked" | "completed";
 type DriverAction = "execute" | "rejection_confirmed" | DriverTerminal;
@@ -67,7 +67,7 @@ interface DriverOperation {
   next?: DriverState;
   branch?: {
     field: string;
-    cases: Record<DriverAction, {
+    cases: Record<string, {
       next: DriverState | DriverTerminal;
       capture?: Record<string, string>;
       initialize?: DriverCollectionRule;
@@ -220,7 +220,7 @@ function driverContract(body: string): DriverContract {
   assert.ok(contract, "Driver 正文必须包含 fenced JSON 状态机合同");
   assert.equal(contract.version, 1);
   assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" });
-  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "artifact", "decide", "inspect", "start", "submit"]);
+  assert.deepEqual(Object.keys(contract.operations).sort(), ["acquire", "artifact", "decide", "inspect", "recover", "start", "submit"]);
   assert.deepEqual(Object.keys(contract.terminals).sort(), ["await_approval", "blocked", "completed"]);
   return contract;
 }
@@ -458,7 +458,7 @@ test("Driver 对受治理外部动作在人工决定后以返回 Work Package �
           cases: { true: { next: "submit" } },
           default: {
             next: "artifact",
-            initialize: contract.operations.acquire.branch?.cases.execute.initialize,
+            initialize: contract.operations.acquire.branch?.cases.execute!.initialize,
           },
         },
       }, `${client}: human-approved action must retain the returned package identity and re-submit the existing result`);
@@ -469,7 +469,13 @@ test("Driver 对受治理外部动作在人工决定后以返回 Work Package �
         capture: { rejectionToken: "result.rejectionConfirmation.token" },
       }, `${client}: confirmation token must feed the rejection decision`);
       assert.deepEqual(contract.entrypoints, { new: "start", recovery: "inspect" }, `${client}: recovery remains inspect then acquire`);
-      assert.equal(contract.operations.inspect.next, "acquire", `${client}: inspect is only the recovery bridge to acquire`);
+      assert.equal(contract.operations.inspect.branch?.field, "result.nextAction.kind");
+      assert.equal(advanceDriver(contract.operations.inspect, { ok: true, result: { nextAction: { kind: "revalidate-red" } } }, {}), "recover");
+      assert.equal(advanceDriver(contract.operations.inspect, { ok: true, result: { nextAction: { kind: "retry-test-gate" } } }, {}), "recover");
+      assert.equal(advanceDriver(contract.operations.recover, { ok: true, result: { nextAction: { kind: "acquire" } } }, {}), "acquire");
+      assert.equal(advanceDriver(contract.operations.recover, { ok: true, result: { nextAction: { kind: "revalidate-red" } } }, {}), "blocked");
+      assert.equal(advanceDriver(contract.operations.inspect, { ok: true, result: { nextAction: { kind: "reconcile" } } }, {}), "blocked");
+      assert.deepEqual(renderArgv(contract.operations.recover, { workItemId: "WSS-test", actor: "agent", recoveryReason: "runner repaired" }), ["wspec", "recover", "WSS-test", "--actor", "agent", "--reason", "runner repaired"]);
     });
   }
 });

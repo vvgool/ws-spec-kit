@@ -34,7 +34,7 @@ test("Quick upgrades in flight to Governed, adds design, invalidates compact wor
   assert.equal(result.artifacts.tasks.contentLevel, "complete");
   assert.equal(result.recovered.loops["review-fix"]?.maxIterations, 5);
   assert.equal(result.recoveryEvidence.upgradeStep, "clarify");
-  assert.equal(result.recoveryEvidence.upgradeAttemptsUsed, 2);
+  assert.equal(result.recoveryEvidence.upgradeAttemptsUsed, 1, "租约中断不消耗执行失败预算");
   assert.ok(result.events.some(({ eventType }) => eventType === "profile.upgraded"));
   assert.ok(result.events.some(({ eventType, result: eventResult }) =>
     eventType === "profile.upgraded" && JSON.stringify(eventResult).includes("design")));
