@@ -73,6 +73,8 @@ export function createDefaultExecutorRegistry(): ExecutorRegistry {
     .register(executor("connector.execute/knowledge.publish", "external-write"))
     .register(executor("connector.execute/issue.close", "external-write"))
     .register(executor("command.execute/quality.test", "local-write"))
+    .register(executor("command.execute/quality.verify", "local-write"))
+    .register(executor("command.execute/quality.docs.integrity", "local-read"))
     .register(executor("control.loop", "control"))
     .register(executor("control.close", "control"));
 }

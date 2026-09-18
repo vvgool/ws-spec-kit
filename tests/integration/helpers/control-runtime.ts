@@ -10,7 +10,7 @@ import { sha256 } from "../../../src/domain/digests.js";
 import { mutateControlPlane } from "../../../src/engine/scheduler.js";
 import type { AgentAction, SubmitResult } from "../../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
-import { createDefaultExecutorRegistry } from "../../../src/registry/executors/registry.js";
+import { createDefaultExecutorRegistry, ExecutorRegistry } from "../../../src/registry/executors/registry.js";
 import { readControlPlane } from "../../../src/storage/control-plane.js";
 import { materializeWorkItem } from "../../../src/storage/work-items.js";
 import { defaultProjectConfig, initRepository } from "../../../src/storage/repository.js";
@@ -43,7 +43,16 @@ function executorContext(runtime: Awaited<ReturnType<typeof readControlPlane>>, 
 }
 
 function runtimeExecutors(options: ControlRuntimeFixtureOptions) {
-  return createDefaultExecutorRegistry().register({
+  const defaults = createDefaultExecutorRegistry();
+  if (options.validatedFailureCode === undefined) return defaults;
+  // Only failure-classification tests replace this one executor.
+  const registry = new ExecutorRegistry();
+  for (const id of ["agent.execute", "connector.execute/requirement.capture", "connector.execute/git.commit",
+    "connector.execute/issue.update", "connector.execute/knowledge.publish", "connector.execute/issue.close",
+    "command.execute/quality.test", "command.execute/quality.docs.integrity", "control.loop", "control.close"]) {
+    registry.register(defaults.require(id));
+  }
+  return registry.register({
     id: "command.execute/quality.verify",
     securityClass: "local-write",
     async acquire(step, runtime) {

@@ -109,7 +109,7 @@ function allSteps(steps: readonly WorkflowStep[]): WorkflowStep[] {
 }
 
 function documentedErrorCodes(reference: Record<keyof typeof referenceDocuments, string>): string[] {
-  return [...new Set(Object.values(reference).flatMap((document) => [...document.matchAll(/WSSPEC_[A-Z_]+/gu)].map((match) => match[0])))].sort();
+  return [...new Set(Object.values(reference).flatMap((document) => [...document.matchAll(/WSSPEC_[A-Z][A-Z0-9_]*/gu)].map((match) => match[0])))].sort();
 }
 
 function assertErrorCatalogMatchesDocumentation(reference: Record<keyof typeof referenceDocuments, string>): void {

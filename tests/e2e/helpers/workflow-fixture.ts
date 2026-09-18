@@ -6,17 +6,14 @@ import path from "node:path";
 
 import { createApplication, type ApplicationDependencies } from "../../../src/application/application.js";
 import { createApplicationArtifact } from "../../../src/application/artifact.js";
-import { loadApplicationState } from "../../../src/application/state.js";
 import { runWorkflowCommand } from "../../../src/adapters/cli/workflow.js";
 import { readArtifact } from "../../../src/domain/artifacts.js";
 import { computeWorkspaceTreeDigest, sha256 } from "../../../src/domain/digests.js";
 import { createExternalBinding } from "../../../src/domain/external-receipt.js";
-import { checkDocumentationIntegrity } from "../../../src/engine/docs-integrity.js";
 import { parseTrustedEvidence } from "../../../src/engine/tdd/red-gate.js";
-import { evidenceProjectionKey, evidenceRecordHash } from "../../../src/engine/verification.js";
 import type { AgentAction, StartResult, SubmitResult } from "../../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../../src/protocol/work-package.js";
-import { ExecutorRegistry, type StepExecutor } from "../../../src/registry/executors/registry.js";
+import { createDefaultExecutorRegistry, ExecutorRegistry, type StepExecutor } from "../../../src/registry/executors/registry.js";
 import type { ExternalActionExecutor } from "../../../src/application/external-action.js";
 import { createBuiltinExternalExecutor } from "../../../src/registry/connectors/external-executor.js";
 import { canonicalRequirementText } from "../../../src/registry/connectors/local-requirement.js";
@@ -158,8 +155,8 @@ function fixtureExecutors(input: { root: string; externalTargets: boolean; docum
     ["control.loop", "control"],
     ["control.close", "control"],
   ] as const) {
-    if (id === "command.execute/quality.docs.integrity" && input.documentation) {
-      registry.register(documentationExecutor(input.root));
+    if (id.startsWith("command.execute/")) {
+      registry.register(createDefaultExecutorRegistry().require(id));
       continue;
     }
     registry.register(executor(id, securityClass, async (_result, runtime) => {
@@ -252,40 +249,6 @@ function projectConfig(documentation: boolean, externalTargets: boolean): Record
   };
 }
 
-function documentationExecutor(root: string): StepExecutor {
-  return {
-    id: "command.execute/quality.docs.integrity",
-    securityClass: "local-read",
-    async acquire(step, runtime) {
-      return { action: "execute", workPackage: attemptPackage(runtime, step.id) };
-    },
-    async validate(step, result, runtime) {
-      if (result.status === "failed") return { status: "failed", artifacts: result.artifacts, failureCode: "WSSPEC_STEP_FAILED" };
-      const state = await loadApplicationState(root, runtime.workItemId);
-      const edited = runtime.contexts["edit-document"] as { result?: { modifiedFiles?: string[] } } | undefined;
-      const files = edited?.result?.modifiedFiles ?? [];
-      const checked = await checkDocumentationIntegrity({ root: state.worktree, files, allowedPaths: state.snapshot.changePolicy.allowedPaths });
-      if (!checked.ok) throw new Error(`documentation integrity failed: ${JSON.stringify(checked.problems)}`);
-      const pkg = attemptPackage(runtime, step.id);
-      const unsigned = {
-        evidenceId: `evidence-docs-${pkg.attemptId}`,
-        level: "trusted" as const,
-        gateId: "docs.integrity",
-        codeRevision: await git(state.worktree, "rev-parse", "HEAD"),
-        baselineTreeDigest: state.item.execution.baselineTreeDigest,
-        workspaceTreeDigest: await computeWorkspaceTreeDigest(state.worktree),
-        configDigest: state.item.execution.configDigest,
-        attemptId: pkg.attemptId,
-        result: "passed" as const,
-      };
-      runtime.evidence = {
-        ...runtime.evidence,
-        [evidenceProjectionKey(pkg.stepId, "docs.integrity")]: { ...unsigned, recordHash: evidenceRecordHash(unsigned) },
-      };
-      return { status: "completed", artifacts: result.artifacts };
-    },
-  };
-}
 
 export async function createWorkflowFixture(options: { externalTargets?: boolean; documentation?: boolean } = {}): Promise<WorkflowFixture> {
   const root = await createGitRepository();

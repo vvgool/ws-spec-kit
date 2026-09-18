@@ -6,6 +6,7 @@ import { createExternalBinding, externalPublishTarget } from "../domain/external
 import { computeWorkspaceSnapshot, computeWorkspaceTreeDigest, sha256, type TreeEntry } from "../domain/digests.js";
 import { matchesRepositoryPath, resolveRepositoryRegularFile } from "../domain/repository-path.js";
 import { transitionStage, transitionWorkItem } from "../domain/states.js";
+import { documentationGate } from "./documentation-gate.js";
 import { deriveInitialStages } from "./initial-stages.js";
 import { applyProfileDecision, type ProfileDecision } from "./profile.js";
 import { prepareArtifactApproval } from "../engine/approvals.js";
@@ -921,6 +922,7 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
           redEvidence: current.evidence[tddRedEvidenceKey(runtimeState.item.workItemId)] as TrustedEvidence | undefined,
         });
       }
+      let trustedDocumentationEvidence: GateEvidence | undefined;
       let trustedTddEvidence: TrustedEvidence | undefined;
       let trustedTddCycle: TddCycleEvidence | undefined;
       let executionProjection = current;
@@ -1001,6 +1003,14 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
           }
           result = failedTddResult(input, error, disposition === "retry");
         }
+      } else if (target.step.action === "quality.docs.integrity" && runtimeState.snapshot.changePolicy.kind === "documentation-only") {
+        const original = current.contexts["verify-document"] as ApplicationAttemptRecord | undefined;
+        const evidenceAttempt = target.internal ? original?.workPackage.attemptId : input.attemptId;
+        if (evidenceAttempt === undefined) throw new ApplicationSubmitError("WSSPEC_ATTEMPT_NOT_ACTIVE", "文档复验缺少原 verify-document Attempt。");
+        const checked = await documentationGate(runtimeState, evidenceAttempt, input.attemptId);
+        trustedDocumentationEvidence = checked.evidence;
+        result = { ...input.result, status: checked.evidence === undefined ? "failed" : "completed", summary: checked.summary,
+          commands: [], evidence: [], ...(checked.evidence === undefined ? { failureCode: "WSSPEC_STEP_FAILED" as const } : {}) };
       } else {
         result = trustedSubmitResult(
           input.result,
@@ -1028,6 +1038,12 @@ export async function submitApplication(input: SubmitInput, dependencies: Submit
         contexts: { ...current.contexts, [target.stageId]: record },
         retries: { ...current.retries },
       };
+      if (target.step.action === "quality.docs.integrity") {
+        const evidence = { ...projection.evidence };
+        delete evidence[evidenceProjectionKey("verify-document", "docs.integrity")];
+        if (trustedDocumentationEvidence !== undefined) evidence[evidenceProjectionKey("verify-document", "docs.integrity")] = trustedDocumentationEvidence;
+        projection.evidence = evidence;
+      }
       if (target.step.id === "verify-red" && trustedTddEvidence !== undefined) {
         projection.evidence = { ...projection.evidence, [tddRedEvidenceKey(runtimeState.item.workItemId)]: trustedTddEvidence };
       } else if ((target.step.id === "verify-green" || (target.internal && target.step.id === "verify")) && trustedTddEvidence !== undefined && trustedTddCycle !== undefined) {

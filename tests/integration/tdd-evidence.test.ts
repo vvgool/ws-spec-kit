@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
 import test from "node:test";
 
+import type { AgentAction, SubmitResult } from "../../src/protocol/application.js";
+import type { WorkPackage } from "../../src/protocol/work-package.js";
 import { computeWorkspaceTreeDigest, sha256 } from "../../src/domain/digests.js";
 import { tddFailureDisposition } from "../../src/application/submit.js";
 import { recordGreenEvidence } from "../../src/engine/tdd/green-gate.js";
@@ -28,6 +31,7 @@ import {
   rewriteSelectedSnapshot,
   submitPackage,
   worktreeFor,
+  writeReviewArtifact,
 } from "./helpers/control-runtime.js";
 
 function featureTestSource(name = "feature remains red"): string {
@@ -974,8 +978,8 @@ test("Application acquire blocks implement without Red and consumes trusted Red 
   assert.match(cycle.greenEvidenceId, /^evidence-/u);
 });
 
-async function applicationVerifyGreen(testSource = featureTestSource()) {
-  const current = await controlRuntimeFixture();
+async function applicationVerifyGreen(testSource = featureTestSource(), now?: () => Date) {
+  const current = await controlRuntimeFixture(now === undefined ? {} : { now });
   await mkdir(path.join(current.root, "tests"), { recursive: true });
   await mkdir(path.join(current.root, "src"), { recursive: true });
   await writeFile(path.join(current.root, "tests", "feature.test.mjs"), testSource, "utf8");
@@ -1491,4 +1495,57 @@ test("unified recovery selects the failed Red path operation", async () => {
   await assert.rejects(runCommand(current.root, args.map(v => v === pkg.attemptId ? next.attemptId : v)), { code: "WSSPEC_TDD_EVIDENCE_INVALIDATED" });
   await submitPackage(current, next, completedResult(next, []));
   assert.equal((await readControlPlane(current.root, started.workItemId)).stages["verify-red"]?.status, "succeeded");
+});
+
+test("real CLI review-fix uses the default verification executor and reruns the fixed Test Gate", async () => {
+  const { current, started, worktree } = await applicationVerifyGreen(featureTestSource(), () => new Date());
+  const repositoryRoot = path.resolve(import.meta.dirname, "../..");
+  async function cli(args: string[]): Promise<AgentAction> {
+    const { stdout } = await promisify(execFile)(process.execPath, [
+      "--import", path.join(repositoryRoot, "node_modules/tsx/dist/loader.mjs"),
+      path.join(repositoryRoot, "src/cli/main.ts"), ...args,
+    ], { cwd: current.root }).catch((error: Error & { stdout?: string }) => { throw new Error(error.stdout ?? error.message); });
+    const response = JSON.parse(stdout) as { ok: boolean; result: AgentAction };
+    assert.equal(response.ok, true, stdout);
+    return response.result;
+  }
+  async function submit(pkg: WorkPackage, result: SubmitResult = completedResult(pkg, [])) {
+    const file = path.join(os.tmpdir(), `${pkg.attemptId}-cli-result.json`);
+    await writeFile(file, JSON.stringify(result));
+    try {
+      return await cli(["submit", pkg.workItemId, "--step", pkg.stepId, "--attempt", pkg.attemptId,
+        "--lease", pkg.lease.token, "--result", file]);
+    } finally { await rm(file, { force: true }); }
+  }
+  await writeFile(path.join(worktree, "src/feature.mjs"), "export const value = 1;\n");
+  const green = requireExecute(await cli(["acquire", started.workItemId, "--actor", "engine"]));
+  await submit(green);
+  const before = await readControlPlane(current.root, started.workItemId);
+  const cycleKey = `tdd:${started.workItemId}:cycle`;
+  await mutateControlPlane({
+    cwd: current.root, workItemId: started.workItemId, eventType: "projection.invalidated",
+    idempotencyKey: "test:cli:review-fix", operationInput: {},
+    mutate: projection => ({ projection: { ...projection, stages: { "review-fix": { status: "ready" } } }, value: null }),
+  });
+  const review = requireExecute(await cli(["acquire", started.workItemId, "--actor", "reviewer"]));
+  const rejected = await writeReviewArtifact({ fixture: current, worktree, workPackage: review, approved: false, filename: "cli-review.md" });
+  const fix = requireExecute(await submit(review, completedResult(review, [rejected])));
+  assert.equal(fix.stepId, "review-fix:1:fix");
+  await writeFile(path.join(worktree, "src/feature.mjs"), "export const value = 1; // review fix\n");
+  const verify = requireExecute(await submit(fix, { ...completedResult(fix, []), modifiedFiles: ["src/feature.mjs"] }));
+  assert.equal(verify.stepId, "review-fix:1:verify");
+  const nextReview = requireExecute(await submit(verify));
+  assert.equal(nextReview.stepId, "review-fix:2:review");
+  const after = await readControlPlane(current.root, started.workItemId);
+  assert.notDeepEqual(after.evidence[cycleKey], before.evidence[cycleKey]);
+  // Agent success cannot hide a regression in the following fix.
+  const rejectedAgain = await writeReviewArtifact({ fixture: current, worktree, workPackage: nextReview, approved: false, filename: "cli-review-2.md" });
+  const secondFix = requireExecute(await submit(nextReview, completedResult(nextReview, [rejectedAgain])));
+  await writeFile(path.join(worktree, "src/feature.mjs"), "export const value = 0;\n");
+  const secondVerify = requireExecute(await submit(secondFix, { ...completedResult(secondFix, []), modifiedFiles: ["src/feature.mjs"] }));
+  const failed = await submit(secondVerify);
+  assert.notEqual(failed.action === "execute" ? failed.workPackage.stepId : failed.action, "review-fix:3:review");
+  const failureProjection = await readControlPlane(current.root, started.workItemId);
+  const record = failureProjection.contexts[secondVerify.stepId] as { result: SubmitResult };
+  assert.equal(record.result.status, "failed");
 });
