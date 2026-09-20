@@ -604,7 +604,10 @@ async function assertNoPersistenceLeak(fixture: Fixture, worktree: string): Prom
   assert.ok(records.some(({ rootId, path: filename }) => rootId === "worktree"
     && /^work-items[/\\][^/\\]+[/\\]work-item\.yaml$/u.test(filename)));
   const text = records.map(({ content }) => content).join("\n");
-  for (const forbidden of [...secretMarkers, fixture.remoteRoot, os.homedir(), "oauth_token:", "access_token", "token: glpat-"]) {
+  // Repository receipt identities may legitimately live below the host home.
+  // The fixture credentials use their own HOME/config roots; those must never persist.
+  const credentialPaths = Object.values(fixture.environments).flatMap(environment => Object.values(environment));
+  for (const forbidden of [...secretMarkers, fixture.remoteRoot, ...credentialPaths, "oauth_token:", "access_token", "token: glpat-"]) {
     assert.equal(text.includes(forbidden), false, `persisted connector output leaked ${forbidden}`);
   }
   const requestAndEvents = records
