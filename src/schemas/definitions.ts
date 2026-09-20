@@ -206,7 +206,7 @@ const submitResultSchema: JsonSchema = {
     commands: { type: "array", items: { type: "object" } },
     evidence: { type: "array", items: { type: "object" } },
     externalWrites: { type: "array", items: { type: "object" } },
-    remainingRisks: { type: "array", items: { type: "object" } },
+    remainingRisks: { type: "array", items: { anyOf: [{ type: "object" }, { type: "string", pattern: "\\S" }] } },
   },
 };
 

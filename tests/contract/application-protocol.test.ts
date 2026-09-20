@@ -294,3 +294,18 @@ test("conversation confirmation is accepted only for ordinary approval", () => {
     { ...approval, kind: "external_reconciliation" },
   ]) assert.throws(() => validate("builtin.application-decision-input.v2", invalid));
 });
+
+test("SubmitResult accepts textual risks without losing structured risk signals", () => {
+  const base = {
+    version: 1, status: "completed", summary: "评估完成", modifiedFiles: [],
+    artifacts: [], commands: [], evidence: [], externalWrites: [],
+    remainingRisks: ["真实渠道尚未验收", { level: "high", description: "目标环境未验证" }],
+  };
+  assert.deepEqual(validate("builtin.submit-result.v1", base), base);
+  const input = { root: "/workspace", workItemId: "WSS-20260817-001", stepId: "intake", attemptId: "attempt-01", leaseToken: "lease", result: base };
+  assert.deepEqual(validate("builtin.application-submit-input.v1", input), input);
+  for (const risk of ["", "   ", "\n\t", null, 123, true, []]) {
+    assertSchemaError(() => validate("builtin.submit-result.v1", { ...base, remainingRisks: [risk] }), "WSSPEC_SCHEMA_INVALID_VALUE");
+  }
+  assertSchemaError(() => validate("builtin.submit-result.v1", { ...base, evidence: ["not trusted evidence"] }), "WSSPEC_SCHEMA_INVALID_VALUE");
+});

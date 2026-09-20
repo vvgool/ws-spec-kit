@@ -72,7 +72,7 @@ test("旧事件投影恢复时补齐累计风险信号", () => {
 
 async function submitExplore(
   profile: "auto" | "quick" | "standard" | "governed",
-  remainingRisks: Array<Record<string, unknown>>,
+  remainingRisks: SubmitResult["remainingRisks"],
 ) {
   const fixture = await controlRuntimeFixture();
   const started = await fixture.app.start({
@@ -114,6 +114,8 @@ test("auto 在 Explore 后将 low/unknown/high 分别选择为 quick/standard/go
     { label: "low", risks: [{ risk: "low" }], expected: "quick" },
     { label: "unknown", risks: [], expected: "standard" },
     { label: "high", risks: [{ risk: "high" }], expected: "governed" },
+    { label: "text-only", risks: ["high: src/auth/session.ts 尚未验收"], expected: "standard" },
+    { label: "mixed-high", risks: ["渠道尚未验收", { risk: "high" }], expected: "governed" },
   ] as const;
 
   for (const current of cases) {

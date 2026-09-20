@@ -113,6 +113,8 @@ Artifact 正文先写入 Work Package 授权的 draft，再通过 `artifact crea
 }
 ```
 
+`remainingRisks` 接受非空文字说明或结构化对象，可混用；纯空白文字、数组、数字和 null 不合法。需要影响 Profile 风险判定时，仍使用包含 `level`、`risk`、`affectedPaths` 等字段的结构化对象；文字说明仅用于记录，不自动推断风险等级。`commands`、`evidence` 和 `externalWrites` 仍必须是对象数组，风险说明不能替代可信验收证据。
+
 ```sh
 # 第一次提交，只建立外部动作 Request，预期返回 await_approval。
 wspec submit WSS-01H00000000000000000000000 --step issue-update --attempt attempt-01 --lease lease-01 --result .acceptance/submit-result.json

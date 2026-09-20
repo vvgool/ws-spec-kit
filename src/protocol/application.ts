@@ -52,7 +52,7 @@ export interface SubmitResult {
   commands: Array<Record<string, unknown>>;
   evidence: Array<Record<string, unknown>>;
   externalWrites: Array<Record<string, unknown>>;
-  remainingRisks: Array<Record<string, unknown>>;
+  remainingRisks: Array<string | Record<string, unknown>>;
 }
 
 export interface SubmitInput {

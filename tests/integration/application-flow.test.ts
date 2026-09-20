@@ -2193,7 +2193,6 @@ test("conversation approval cannot approve a different digest or changed workspa
   assert.equal(requireExecute(approved).stepId, "design");
 });
 
-
 test("CLI accepts conversation approval with piped stdin and resumes the next step", async () => {
   const current = await fixture();
   const { started, awaiting } = await prepareApproval(current, false);
@@ -2235,4 +2234,20 @@ test("unmaterialized approval still validates the formal Artifact independently 
     confirmation: { source: "conversation", userMessage: "可以" },
   }), { code: "WSSPEC_ARTIFACT_HASH_MISMATCH" });
   assert.equal((await readControlPlane(current.root, started.workItemId)).approvals[request.requestId]!.status, "pending");
+});
+
+test("textual remaining risks advance intake and preserve submit idempotency", async () => {
+  const { root, app } = await fixture();
+  const started = await app.start({ root, source: { type: "prompt", text: "评估项目上线标准" }, profile: "standard" });
+  const acquired = await app.acquire({ root, workItemId: started.workItemId, actor: "test" });
+  assert.equal(acquired.action, "execute");
+  if (acquired.action !== "execute") return;
+  const result = completedResult(acquired.workPackage);
+  result.remainingRisks = ["真实渠道尚未验收", { description: "目标环境未验证" }];
+  const request = { root, workItemId: started.workItemId, stepId: acquired.workPackage.stepId,
+    attemptId: acquired.workPackage.attemptId, leaseToken: acquired.workPackage.lease.token, result };
+  const next = await app.submit(request);
+  assert.equal(next.action, "execute");
+  if (next.action === "execute") assert.equal(next.workPackage.stepId, "explore");
+  assert.deepEqual(await app.submit(request), next);
 });

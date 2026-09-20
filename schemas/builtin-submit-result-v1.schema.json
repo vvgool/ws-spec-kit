@@ -104,7 +104,15 @@
     "remainingRisks": {
       "type": "array",
       "items": {
-        "type": "object"
+        "anyOf": [
+          {
+            "type": "object"
+          },
+          {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        ]
       }
     }
   }
