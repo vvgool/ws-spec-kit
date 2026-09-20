@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,20 +46,6 @@ async function runCli(
   return startCli(cwd, args, home, entrypoint, environment).result;
 }
 
-async function waitForWorkItem(root: string): Promise<{ workItemId: string; itemRoot: string }> {
-  for (let attempt = 0; attempt < 5_000; attempt += 1) {
-    const workItemId = (await readdir(root).catch(() => [])).find((candidate) => candidate.startsWith("WSS-"));
-    if (workItemId !== undefined) {
-      const itemRoot = path.join(root, workItemId);
-      try {
-        await access(path.join(itemRoot, "locator.json"));
-        return { workItemId, itemRoot };
-      } catch {}
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 1));
-  }
-  throw new Error("timed out waiting for injected CLI Work Item");
-}
 
 test("公开 CLI 只暴露 Application 命令并将旧命令拒绝为未知命令", async () => {
   const root = await createGitRepository();
@@ -204,34 +190,44 @@ test("CLI 对 delayed Start 与 rollback 双失败只输出固定安全消息", 
   const root = await createGitRepository();
   const home = await mkdtemp(path.join(os.tmpdir(), "wspec-cli-home-"));
   const secret = `cli-rollback-secret-${crypto.randomUUID()}`;
-  const workItemsRoot = path.join(root, ".git", "wsspec", "work-items");
+  const workItemsRoot = path.join(await realpath(root), ".git", "wsspec", "work-items");
   await initRepository(root);
   await writeFile(path.join(root, ".wsspec", "config.yaml"), `${JSON.stringify({
     ...defaultProjectConfig(),
     git: { worktrees: { enabled: true, root: `.worktrees/${secret}`, branchPrefix: "wspec/" } },
   }, null, 2)}\n`, "utf8");
-  const running = startCli(root, ["start", "--prompt", "rollback fault injection"], home);
-  const { itemRoot } = await waitForWorkItem(workItemsRoot);
-  const configSnapshot = path.join(itemRoot, "authority", "snapshot", "config.yaml");
-  for (let attempt = 0; attempt < 5_000; attempt += 1) {
-    try {
-      await access(configSnapshot);
-      break;
-    } catch (error) {
-      if (attempt === 4_999) throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+  // Inject inside the child at the first application snapshot write after the
+  // locator exists, so another mkdir cannot race the parent's directory swap.
+  const entrypoint = path.join(home, "rollback-injection.mjs");
+  const marker = path.join(home, "rollback-injected");
+  await writeFile(entrypoint, `
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+const originalMkdir = fs.mkdir;
+let injected = false;
+fs.mkdir = async function(directory, ...args) {
+  if (!injected && typeof directory === 'string'
+      && directory.startsWith(${JSON.stringify(workItemsRoot + path.sep)})
+      && path.basename(directory) === 'snapshot') {
+    const locatorPath = path.resolve(directory, '../../locator.json');
+    let locator;
+    try { locator = JSON.parse(await fs.readFile(locatorPath, 'utf8')); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (locator) {
+      injected = true;
+      await fs.writeFile(locatorPath, JSON.stringify({ ...locator, ownerToken: ${JSON.stringify(secret)} }));
+      await fs.writeFile(${JSON.stringify(marker)}, 'injected');
+      throw new Error(${JSON.stringify(`credential=${secret}`)});
     }
   }
-  const locatorPath = path.join(itemRoot, "locator.json");
-  const locator = JSON.parse(await readFile(locatorPath, "utf8")) as Record<string, unknown>;
-  const replacementLocator = `${locatorPath}.${crypto.randomUUID()}.tmp`;
-  await writeFile(replacementLocator, `${JSON.stringify({ ...locator, ownerToken: secret })}\n`, "utf8");
-  await rename(replacementLocator, locatorPath);
-  const snapshotRoot = path.join(itemRoot, "authority", "snapshot");
-  await rename(snapshotRoot, `${snapshotRoot}-moved`);
-  await writeFile(snapshotRoot, `credential=${secret}\n`, "utf8");
-
-  const result = await running.result;
+  return originalMkdir.call(this, directory, ...args);
+};
+syncBuiltinESMExports();
+await import(${JSON.stringify(path.join(repositoryRoot, "src/cli/main.ts"))});
+`, "utf8");
+  const result = await runCli(root, ["start", "--prompt", "rollback fault injection"], home, entrypoint);
+  assert.equal(await readFile(marker, "utf8"), "injected");
 
   assert.equal(result.code, 1);
   assert.equal(result.stderr, "");
