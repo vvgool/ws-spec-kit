@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
+import { loadApplicationState } from "../../src/application/state.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
 
 const execFileAsync = promisify(execFile);
@@ -89,8 +90,9 @@ const path = require("node:path");
 const text = process.argv.slice(2).join(" ");
 const phase = text.includes("WSSPECKIT_SMOKE_AUTO") ? "auto" : text.includes("WSSPECKIT_SMOKE_EXPLICIT") ? "explicit" : "recovery";
 const wrapper = execFileSync("/bin/sh", ["-c", "command -v wspec"], { encoding: "utf8", env: process.env }).trim();
-const workItemId = readdirSync(path.join(process.cwd(), ".worktrees")).find((value) => value.startsWith("WSS-"));
-const worktree = path.join(process.cwd(), ".worktrees", workItemId);
+const workItemId = readdirSync(path.join(process.cwd(), ".git", "wsspec", "work-items")).find((value) => value.startsWith("WSS-"));
+const locator = JSON.parse(readFileSync(path.join(process.cwd(), ".git", "wsspec", "work-items", workItemId, "locator.json"), "utf8"));
+const worktree = path.join(process.cwd(), locator.worktree);
 const actor = "codex-smoke";
 
 function envelope(output) {
@@ -285,7 +287,7 @@ test("prepare 创建隔离 TypeScript 仓库、真实 Quick Work Item 和宿主 
   assert.equal(wrapper.wsspeckitCommit, fixtureManifest.wsspeckitCommit);
   for (const field of ["dev", "ino", "mode", "uid", "size"]) assert.notEqual(wrapper[field], undefined, `wrapper.${field}`);
   const userIndex = fixtureManifest.userIndex as Record<string, unknown>;
-  assert.match(String(userIndex.path), /^\.git\/worktrees\/WSS-[0-9A-HJKMNP-TV-Z]{26}\/index$/u);
+  assert.match(String(userIndex.path), /^\.git\/worktrees\/Smoke-Requirement-[a-f0-9]{12}\/index$/u);
   assert.match(String(userIndex.digest), /^sha256:[a-f0-9]{64}$/u);
   assert.match(String(userIndex.identity), /^sha256:[a-f0-9]{64}$/u);
   for (const field of ["dev", "ino", "mode", "uid", "size"]) assert.notEqual(userIndex[field], undefined, `userIndex.${field}`);
@@ -412,7 +414,7 @@ test("observer 让 Host 只从 fixture/bin 命中 bound wspec、实际 inspect�
     "const phase = text.includes('WSSPECKIT_SMOKE_AUTO') ? 'auto' : text.includes('WSSPECKIT_SMOKE_EXPLICIT') ? 'explicit' : 'recovery';",
     "const wrapper = execFileSync('/bin/sh', ['-c', 'command -v wspec'], { encoding: 'utf8', env: process.env }).trim();",
     "if (wrapper !== path.join(process.cwd(), 'bin', 'wspec')) process.exit(43);",
-    "const workItemId = readdirSync(path.join(process.cwd(), '.worktrees')).find((value) => value.startsWith('WSS-'));",
+    "const workItemId = readdirSync(path.join(process.cwd(), '.git', 'wsspec', 'work-items')).find((value) => value.startsWith('WSS-'));",
     "if (!workItemId || text.includes(workItemId) || !/sha256:[a-f0-9]{64}/u.test(text)) process.exit(44);",
     "const inspected = JSON.parse(execFileSync(wrapper, ['inspect', workItemId], { encoding: 'utf8', env: process.env }));",
     "if (inspected.ok !== true || inspected.result.status !== 'active') process.exit(45);",
@@ -524,7 +526,7 @@ test("observer 对 bound wspec 的删除、同内容替换、symlink 与 digest 
         "const { appendFileSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } = require('node:fs');",
         "const path = require('node:path');",
         "const wrapper = execFileSync('/bin/sh', ['-c', 'command -v wspec'], { encoding: 'utf8', env: process.env }).trim();",
-        "const workItemId = readdirSync(path.join(process.cwd(), '.worktrees')).find((value) => value.startsWith('WSS-'));",
+        "const workItemId = readdirSync(path.join(process.cwd(), '.git', 'wsspec', 'work-items')).find((value) => value.startsWith('WSS-'));",
         "const inspected = JSON.parse(execFileSync(wrapper, ['inspect', workItemId], { encoding: 'utf8', env: process.env }));",
         "if (inspected.ok !== true) process.exit(45);",
         mutation === "delete" ? "rmSync(wrapper);" : "",
@@ -706,7 +708,7 @@ test("verifier 拒绝用另一个客户端标签复用 acceptance 状态", async
 
 test("verifier 从 clean checkout 执行 private challenges 和双 mutation 并拒绝硬编码、空断言或跳过测试", async () => {
   const prepared = await prepare("codex");
-  const worktree = path.join(prepared.root, ".worktrees", prepared.workItemId);
+  const { worktree } = await loadApplicationState(prepared.root, prepared.workItemId);
   await writeFile(path.join(worktree, "src", "labels.ts"), [
     "export function normalizeLabel(value: string): string { return value.trim().toLowerCase(); }",
     "export function formatLabelParts(parts: readonly string[]): string { return parts.map(normalizeLabel).filter(Boolean).join(' / '); }",

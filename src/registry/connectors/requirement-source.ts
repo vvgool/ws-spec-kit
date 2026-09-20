@@ -1,3 +1,4 @@
+import { workItemPrefix } from "../../domain/work-item-paths.js";
 import { constants, type BigIntStats } from "node:fs";
 import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
@@ -64,6 +65,7 @@ export interface CaptureRequirementInput {
   artifactRoot: string;
   artifactRootRepositoryRoot?: string;
   artifactPathPrefix?: string;
+  directoryName?: string;
   workItemId: string;
   source: CaptureRequirementSource;
 }
@@ -230,21 +232,21 @@ function artifactFromSource(source: NormalizedRequirementSource): SourceArtifact
   });
 }
 
-function referencePath(workItemId: string, artifactId: string): string {
+function referencePath(workItemId: string, artifactId: string, directoryName?: string): string {
   if (!workItemIdPattern.test(workItemId)) return fail("WSSPEC_SOURCE_INVALID", "Work Item ID 不合法。");
   const match = artifactIdPattern.exec(artifactId);
   if (match === null) return fail("WSSPEC_SOURCE_INVALID", "Source Artifact ID 不合法。");
-  return `.wsspec/work-items/${workItemId}/source/${match[1]}.json`;
+  return `${workItemPrefix({ workItemId, execution: directoryName === undefined ? {} : { directoryName } })}/source/${match[1]}.json`;
 }
 
-export function sourceArtifactReference(workItemId: string, artifact: SourceArtifact): SourceArtifactReference {
+export function sourceArtifactReference(workItemId: string, artifact: SourceArtifact, directoryName?: string): SourceArtifactReference {
   const match = artifactIdPattern.exec(artifact.artifactId);
   if (match === null) return fail("WSSPEC_SOURCE_INVALID", "Source Artifact ID 不合法。");
   return {
     artifactType: "requirement-source",
     schemaVersion: 1,
     artifactId: artifact.artifactId,
-    path: referencePath(workItemId, artifact.artifactId),
+    path: referencePath(workItemId, artifact.artifactId, directoryName),
     revision: 1,
     contentHash: `sha256:${match[1]}`,
     mediaType: "application/json",
@@ -425,7 +427,7 @@ export async function captureRequirement(input: CaptureRequirementInput): Promis
   const artifact = artifactFromSource(source);
   const encoded = canonicalize(artifact);
   if (encoded === undefined) return fail("WSSPEC_SOURCE_INVALID", "Source Artifact 无法规范化。");
-  const reference = sourceArtifactReference(input.workItemId, artifact);
+  const reference = sourceArtifactReference(input.workItemId, artifact, input.directoryName);
   const relativeDirectory = input.artifactPathPrefix === undefined
     ? path.posix.dirname(reference.path)
     : path.posix.dirname(reference.path).slice(input.artifactPathPrefix.length).replace(/^\//u, "");
@@ -472,8 +474,8 @@ function strictArtifact(value: unknown): SourceArtifact {
   return rebuilt;
 }
 
-export async function verifySourceArtifact(artifactRoot: string, workItemId: string, reference: SourceArtifactReference, artifactPathPrefix?: string): Promise<SourceArtifact> {
-  const expectedPath = referencePath(workItemId, reference.artifactId);
+export async function verifySourceArtifact(artifactRoot: string, workItemId: string, reference: SourceArtifactReference, artifactPathPrefix?: string, directoryName?: string): Promise<SourceArtifact> {
+  const expectedPath = referencePath(workItemId, reference.artifactId, directoryName);
   const match = artifactIdPattern.exec(reference.artifactId);
   if (reference.artifactType !== "requirement-source" || reference.schemaVersion !== 1 || reference.revision !== 1
     || reference.mediaType !== "application/json" || reference.path !== expectedPath

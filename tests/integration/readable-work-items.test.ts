@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { loadApplicationState } from "../../src/application/state.js";
+import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
+import { workItemPrefix } from "../../src/domain/work-item-paths.js";
+import { recoverControlPlane } from "../../src/storage/control-plane.js";
+import { controlRuntimeFixture, worktreeFor } from "./helpers/control-runtime.js";
+
+test("new tasks use bounded readable directories, preserve stable IDs and recover navigation after materialization", async () => {
+  const fixture = await controlRuntimeFixture();
+  const request = { root: fixture.root, source: { type: "prompt" as const, text: "修复文档校验" }, profile: "quick" as const };
+  const first = await fixture.app.start(request);
+  const second = await fixture.app.start(request);
+  let state = await loadApplicationState(fixture.root, first.workItemId);
+  const other = await loadApplicationState(fixture.root, second.workItemId);
+  assert.match(first.workItemId, /^WSS-[A-Z0-9]{26}$/u);
+  assert.match(state.item.execution.directoryName!, /^修复文档校验-[a-f0-9]{12}$/u);
+  assert.notEqual(state.item.execution.directoryName, other.item.execution.directoryName);
+  assert.equal(state.item.execution.materialized, false);
+  assert.match(await readFile(path.join(state.itemRoot, "README.md"), "utf8"), /修复文档校验/u);
+  assert.match(await readFile(path.join(state.itemRoot, "01-原始需求.md"), "utf8"), /修复文档校验/u);
+  const worktree = await worktreeFor(fixture.root, first.workItemId);
+  assert.equal(path.basename(worktree), state.item.execution.directoryName);
+  await fixture.app.inspect({ root: fixture.root, workItemId: first.workItemId });
+  state = await loadApplicationState(fixture.root, first.workItemId);
+  const before = await computeWorkspaceTreeDigest(worktree);
+  const mirror = path.join(worktree, workItemPrefix(state.item), "README.md");
+  assert.match(await readFile(mirror, "utf8"), /修复文档校验/u);
+  await recoverControlPlane({ cwd: fixture.root, workItemId: first.workItemId });
+  await fixture.app.inspect({ root: fixture.root, workItemId: first.workItemId });
+  assert.equal(await computeWorkspaceTreeDigest(worktree), before);
+  assert.equal((await loadApplicationState(fixture.root, first.workItemId)).item.execution.directoryName, state.item.execution.directoryName);
+});

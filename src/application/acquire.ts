@@ -548,7 +548,7 @@ function workPackageFor(input: {
     artifactAuthoring: {
       version: 1 as const,
       maxContentBytes: 1_048_576,
-      draftRoots: [".acceptance", `.wsspec/work-items/${input.workItemId}/drafts`],
+      draftRoots: [".acceptance", `${input.snapshot.source.path!.split("/source/")[0]}/drafts`, `.wsspec/work-items/${input.workItemId}/drafts`].filter((value, index, all) => all.indexOf(value) === index),
     },
     gates: input.step.gates.map((id) => ({ id, evidence: gatesById.get(id)?.evidence ?? "trusted", required: true })),
     resultSchema: "builtin.submit-result.v1" as const,

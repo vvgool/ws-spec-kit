@@ -1,3 +1,4 @@
+import { loadApplicationState } from "../../../src/application/state.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
@@ -350,7 +351,7 @@ export async function worktreeFor(root: string, workItemId: string): Promise<str
 
 async function snapshotFor(root: string, workItemId: string): Promise<FeatureWorkflowResult["snapshot"]> {
   const worktree = await worktreeFor(root, workItemId);
-  return JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", workItemId, "snapshot", "application.json"), "utf8")) as FeatureWorkflowResult["snapshot"];
+  return JSON.parse(await readFile(path.join((await loadApplicationState(worktree, workItemId)).itemRoot, "snapshot", "application.json"), "utf8")) as FeatureWorkflowResult["snapshot"];
 }
 
 async function writeArtifact(fixture: WorkflowFixture, worktree: string, pkg: WorkPackage, type: string, approved = true): Promise<ArtifactReference> {

@@ -627,6 +627,7 @@ export const schemas = {
           worktree: { type: "string", minLength: 1 },
           branch: { type: "string", minLength: 1 },
           materialized: { type: "boolean" },
+          directoryName: { type: "string", pattern: "^[\\p{L}\\p{N}][\\p{L}\\p{N}-]{0,100}$" },
           baselineRevision: { type: "string", minLength: 1 },
           baselineTreeDigest: { type: "string", pattern: digestPattern },
           workflowDigest: { type: "string", pattern: digestPattern },

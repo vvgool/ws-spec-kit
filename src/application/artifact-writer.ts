@@ -2,8 +2,9 @@ import { constants, type BigIntStats } from "node:fs";
 import { link, lstat, open, readdir, realpath, unlink } from "node:fs/promises";
 import path from "node:path";
 
+import { isArtifactFilename } from "../domain/artifact-names.js";
+
 const maximumRequestBytes = 2 * 1024 * 1024;
-const artifactFilenamePattern = /^[a-f0-9]{64}\.md$/u;
 
 interface SerializedIdentity {
   dev: string;
@@ -256,7 +257,7 @@ async function readRequest(): Promise<WriterRequest> {
     || typeof value.directoryPath !== "string" || !path.isAbsolute(value.directoryPath)
     || typeof value.directoryIdentity?.dev !== "string" || !/^\d+$/u.test(value.directoryIdentity.dev)
     || typeof value.directoryIdentity.ino !== "string" || !/^\d+$/u.test(value.directoryIdentity.ino)
-    || typeof value.filename !== "string" || !artifactFilenamePattern.test(value.filename)) {
+    || typeof value.filename !== "string" || !isArtifactFilename(value.filename)) {
     fail("Artifact writer 请求无效。");
   }
   if (value.operation === "write" && typeof value.contentBase64 !== "string") fail("Artifact writer 写入请求无效。");

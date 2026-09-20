@@ -108,12 +108,12 @@ export async function readEvents(controlPlane: string): Promise<StoredEvent[]> {
 
 export async function repairIncompleteEventTail(controlPlane: string): Promise<boolean> {
   const eventPath = path.join(controlPlane, "events.jsonl");
-  let content: string;
-  try { content = await readFile(eventPath, "utf8"); }
+  let content: Buffer;
+  try { content = await readFile(eventPath); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
-  if (content === "" || content.endsWith("\n")) return false;
-  const lastNewline = content.lastIndexOf("\n");
-  const tail = content.slice(lastNewline + 1);
+  if (content.length === 0 || content[content.length - 1] === 0x0a) return false;
+  const lastNewline = content.lastIndexOf(0x0a);
+  const tail = content.subarray(lastNewline + 1).toString("utf8");
   try { JSON.parse(tail); return false; } catch { /* An interrupted append is the only repairable corruption. */ }
   const handle = await open(eventPath, "r+");
   try { await handle.truncate(lastNewline + 1); await handle.sync(); }

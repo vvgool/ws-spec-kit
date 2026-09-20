@@ -452,7 +452,8 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
             input.authorityRoot ?? input.worktree,
             input.projection.workItemId,
             source,
-            input.authorityRoot === undefined ? undefined : `.wsspec/work-items/${input.projection.workItemId}`,
+            input.authorityRoot === undefined ? undefined : source.path.split("/source/")[0],
+            source.path.split("/")[2],
           );
           verified.push(reference);
         } catch {
@@ -464,7 +465,7 @@ async function projectionWithVerifiedArtifacts(input: WorktreeCloseChecklistInpu
         const artifactRoot = input.authorityRoot ?? input.worktree;
         const physicalPath = input.authorityRoot === undefined
           ? reference.path
-          : reference.path.replace(`.wsspec/work-items/${input.projection.workItemId}/`, "");
+          : reference.path.replace(/^\.wsspec\/work-items\/[^/]+\//u, "");
         const actual = await verifyArtifact(path.join(artifactRoot, physicalPath), {
           repositoryRoot: artifactRoot,
           artifactType: reference.artifactType,

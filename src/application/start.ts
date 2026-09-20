@@ -1,3 +1,5 @@
+import { redactText } from "../adapters/process/redaction.js";
+import { readableWorkItemDirectory, workItemPrefix } from "../domain/work-item-paths.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ulid } from "ulid";
@@ -239,13 +241,15 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       : await captureBuiltinConnectorSource(input.source, dependencies.connectorRuntime)
     : await captureLocalRequirement(identity.repositoryRoot, input.source);
   const workItemId = `WSS-${ulid()}` as `WSS-${string}`;
+  const title = "title" in requirement ? requirement.title : titleFor(requirement.text, requirement.origin);
   const createdAt = dependencies.now().toISOString();
   let item: WorkItem | undefined;
   try {
     item = await createWorkItem({
       root: identity.repositoryRoot,
       workItemId,
-      title: "title" in requirement ? requirement.title : titleFor(requirement.text, requirement.origin),
+      title,
+      directoryName: readableWorkItemDirectory(redactText(title), workItemId),
       source: input.source.type === "prompt"
         ? { type: "prompt", content: input.source.text }
         : input.source.type === "file"
@@ -266,7 +270,7 @@ export async function startApplication(input: StartInput, dependencies: StartDep
       artifactType: "requirement-source",
       schemaVersion: 1,
       artifactId: item.source.artifactId,
-      path: `.wsspec/work-items/${workItemId}/${item.source.snapshot}`,
+      path: `${workItemPrefix(item)}/${item.source.snapshot}`,
       revision: 1,
       contentHash: item.source.artifactDigest,
       mediaType: "application/json",

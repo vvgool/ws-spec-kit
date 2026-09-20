@@ -1,3 +1,4 @@
+import { refreshTaskNavigationFor } from "./task-navigation.js";
 import { execFile, spawn } from "node:child_process";
 import type { BigIntStats } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
@@ -5,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { artifactFilename } from "../domain/artifact-names.js";
+import { workItemDirectory, workItemPrefix } from "../domain/work-item-paths.js";
 import { createArtifactDocument } from "../domain/artifacts.js";
 import { sha256 } from "../domain/digests.js";
 import type { ArtifactCreateInput } from "../protocol/application.js";
@@ -531,7 +534,7 @@ export async function createApplicationArtifact(
   const artifactRoot = state.item.execution.materialized === false ? state.authorityRoot : state.worktree;
   const artifactDirectoryParts = state.item.execution.materialized === false
     ? ["artifacts", request.artifactType]
-    : [".wsspec", "work-items", request.workItemId, "artifacts", request.artifactType];
+    : [".wsspec", "work-items", workItemDirectory(state.item), "artifacts", request.artifactType];
   const preflight = activeWorkPackage(state.projection, request, dependencies.now());
   const preflightOutput = requiredArtifactOutput(preflight.workPackage, request);
   const source = await readStableDraft(
@@ -597,7 +600,9 @@ export async function createApplicationArtifact(
         });
         const directory = await ensureArtifactDirectory(artifactRoot, artifactDirectoryParts);
         await dependencies.artifactAuthoring?.afterArtifactDirectoryPrepared?.();
-        const filename = path.join(directory.path, `${document.reference.contentHash.slice("sha256:".length)}.md`);
+        const basename = artifactFilename({ artifactType: request.artifactType, stageId: request.stepId, contentHash: document.reference.contentHash });
+        const artifactPath = `${workItemPrefix(state.item)}/artifacts/${request.artifactType}/${basename}`;
+        const filename = path.join(directory.path, basename);
         const written = await writeArtifactNoClobber(
           filename,
           Buffer.from(document.content, "utf8"),
@@ -625,6 +630,7 @@ export async function createApplicationArtifact(
           projection,
           value: {
             ...document.reference,
+            path: artifactPath,
             ...(output.contentLevel === undefined ? {} : { contentLevel: output.contentLevel }),
             artifactDigest: sha256(document.content),
           },
@@ -639,12 +645,13 @@ export async function createApplicationArtifact(
     }
     throw error;
   }
-  const reference = value as Omit<ArtifactReference, "path"> & { artifactDigest: string };
+  await refreshTaskNavigationFor(request.root, request.workItemId);
+  const reference = value as Omit<ArtifactReference, "path"> & { path?: string; artifactDigest: string };
   return {
     artifactType: reference.artifactType,
     outputId: reference.outputId!,
     schemaVersion: reference.schemaVersion,
-    path: `.wsspec/work-items/${request.workItemId}/artifacts/${reference.artifactType}/${reference.contentHash!.slice("sha256:".length)}.md`,
+    path: reference.path ?? `.wsspec/work-items/${request.workItemId}/artifacts/${reference.artifactType}/${reference.contentHash!.slice("sha256:".length)}.md`,
     mediaType: reference.mediaType!,
     revision: reference.revision!,
     contentHash: reference.contentHash!,

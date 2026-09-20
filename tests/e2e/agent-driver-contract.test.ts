@@ -53,7 +53,7 @@ interface DriverForEachRule {
   bindings: {
     artifactType: "requiredOutput.artifactType";
     outputId: "requiredOutput.outputId";
-    contentFile: ".wsspec/work-items/${workItemId}/drafts/${outputId}.md";
+    contentFile: "${draftRoot}/${outputId}.md";
   };
   collect: { target: "artifactRefs"; value: "result" };
 }
@@ -332,7 +332,7 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
       assert.match(body, /不得调用模型 API/u, `${client}: 模型边界`);
       assert.match(body, /不得缓存.*对话/u, `${client}: 对话边界`);
       assert.match(body, /不得.*Artifact 正文.*协议 JSON/u, `${client}: Artifact 边界`);
-      assert.match(body, /\.wsspec\/work-items\/<workItemId>\/drafts\/<outputId>\.md/u, `${client}: draft 路径模板`);
+      assert.match(body, /<draftRoot>\/<outputId>\.md/u, `${client}: draft 路径模板`);
       assert.match(body, /artifact create/u, `${client}: Artifact authoring 命令`);
       assert.match(body, /submit.*只.*ArtifactRef/su, `${client}: submit 只携带 ArtifactRef`);
       assert.match(body, /builtin:\/\/workflows\/feature-delivery/u, `${client}: 功能 workflowRef`);
@@ -357,6 +357,7 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
             attemptId: "result.workPackage.attemptId",
             leaseToken: "result.workPackage.lease.token",
             requiredOutputs: "result.workPackage.requiredOutputs",
+            draftRoot: "result.workPackage.artifactAuthoring.draftRoots.1",
           },
           initialize: {
             target: "artifactRefs",
@@ -388,7 +389,7 @@ test("四类 Driver 通过 --client 安装到各自官方目录，且 dry-run、
           bindings: {
             artifactType: "requiredOutput.artifactType",
             outputId: "requiredOutput.outputId",
-            contentFile: ".wsspec/work-items/${workItemId}/drafts/${outputId}.md",
+            contentFile: "${draftRoot}/${outputId}.md",
           },
           collect: { target: "artifactRefs", value: "result" },
         },
@@ -452,6 +453,7 @@ test("Driver 对受治理外部动作在人工决定后以返回 Work Package �
           attemptId: "result.workPackage.attemptId",
           leaseToken: "result.workPackage.lease.token",
           requiredOutputs: "result.workPackage.requiredOutputs",
+          draftRoot: "result.workPackage.artifactAuthoring.draftRoots.1",
         },
         routeByValue: {
           field: "result.resumeSubmission",

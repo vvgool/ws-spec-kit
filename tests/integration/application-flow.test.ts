@@ -11,12 +11,13 @@ import { createApplication, type ApplicationDependencies } from "../../src/appli
 import { createApplicationArtifact } from "../../src/application/artifact.js";
 import { parseApplicationSnapshot } from "../../src/application/snapshot.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
+import { workItemDirectory } from "../../src/domain/work-item-paths.js";
 import { sha256 } from "../../src/domain/digests.js";
 import type { AgentAction, SubmitResult } from "../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
 import { captureLocalRequirement } from "../../src/registry/connectors/local-requirement.js";
 import { mutateControlPlane } from "../../src/engine/scheduler.js";
-import { readControlPlane, recoverControlPlane, writeProjection } from "../../src/storage/control-plane.js";
+import { readControlPlane, recoverControlPlane, resolveWorkItemContext, writeProjection } from "../../src/storage/control-plane.js";
 import { readEvents, withControlPlaneLock } from "../../src/storage/events.js";
 import { defaultProjectConfig, initRepository } from "../../src/storage/repository.js";
 import { createWorkItem, materializeWorkItem } from "../../src/storage/work-items.js";
@@ -44,6 +45,11 @@ async function fixture(overrides: Partial<ApplicationDependencies> = {}): Promis
     ...overrides,
   });
   return { root, app, now: () => new Date(currentTime), setNow: (value) => { currentTime = value; } };
+}
+
+async function itemDirectoryFor(root: string, workItemId: string): Promise<string> {
+  const context = await resolveWorkItemContext(root, workItemId);
+  return workItemDirectory({ workItemId, execution: context });
 }
 
 async function worktreeFor(root: string, workItemId: string): Promise<string> {
@@ -141,7 +147,7 @@ async function writeArtifact(input: {
     revision,
   };
   const contentHash = computeArtifactContentHash(metadata, input.body);
-  const relative = `.wsspec/work-items/${input.workItemId}/artifacts/${input.filename ?? `${input.artifactType}.md`}`;
+  const relative = `.wsspec/work-items/${await itemDirectoryFor(input.worktree, input.workItemId)}/artifacts/${input.filename ?? `${input.artifactType}.md`}`;
   await mkdir(path.dirname(path.join(input.worktree, relative)), { recursive: true });
   await writeFile(
     path.join(input.worktree, relative),
@@ -197,7 +203,7 @@ async function prepareApproval(current: Fixture, materialize = true): Promise<{
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "增加登录" }, profile: "standard" });
   const worktree = materialize ? await worktreeFor(current.root, started.workItemId) : current.root;
   const projection = await readControlPlane(current.root, started.workItemId);
-  const snapshotRoot = materialize ? path.join(worktree, ".wsspec", "work-items", started.workItemId) : path.join(path.dirname(projection.controlPlane), "authority");
+  const snapshotRoot = materialize ? path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId)) : path.join(path.dirname(projection.controlPlane), "authority");
   const application = JSON.parse(await readFile(path.join(snapshotRoot, "snapshot", "application.json"), "utf8")) as { source: ArtifactReference };
   const intake = requireExecute(await current.app.acquire({ root: current.root, workItemId: started.workItemId, actor: "codex" }));
   assert.equal(intake.version, 1);
@@ -333,7 +339,7 @@ test("start resolves explicit or active Workflow and persists a lightweight immu
     changePolicy: { kind: string; allowedPaths: string[] };
     source: ArtifactReference;
   };
-  const source = JSON.parse(await readFile(path.join(itemRoot, application.source.path!.slice(`.wsspec/work-items/${documentation.workItemId}/`.length)), "utf8")) as { body: string; contentDigest: string };
+  const source = JSON.parse(await readFile(path.join(itemRoot, application.source.path!.slice(`.wsspec/work-items/${await itemDirectoryFor(explicit.root, documentation.workItemId)}/`.length)), "utf8")) as { body: string; contentDigest: string };
   assert.equal(application.workflowRef, "builtin://workflows/documentation-delivery");
   assert.deepEqual(Object.keys(application.profiles).sort(), ["governed", "quick", "standard"]);
   assert.match(application.workflowPackageLock.contentDigest, /^sha256:/);
@@ -394,7 +400,7 @@ test("Global 与 Project Skill 在 Snapshot 和公开 Work Package 中使用中�
 
       const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "公开 Skill 描述" }, workflowRef: "project://workflows/feature-delivery", profile: "standard" });
       const worktree = await worktreeFor(current.root, started.workItemId);
-      const snapshot = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"), "utf8")) as {
+      const snapshot = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId), "snapshot", "application.json"), "utf8")) as {
         profiles: { standard: { steps: Array<{ id: string; skills: Array<{ description: string }> }> } };
       };
       assert.deepEqual(snapshot.profiles.standard.steps.find(({ id }) => id === "explore")?.skills.map(({ description }) => description), ["已锁定的工作流 Skill。"]);
@@ -417,7 +423,7 @@ test("snapshot and recovery preserve recursive compiled semantics and output con
     profile: "quick",
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId));
   const application = JSON.parse(await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8")) as {
     source: ArtifactReference;
     profiles: Record<string, { steps: Array<{
@@ -487,7 +493,7 @@ test("real Workflow preserves distinct output ids for repeated Artifact types", 
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
   const snapshot = JSON.parse(await readFile(
-    path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"),
+    path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId), "snapshot", "application.json"),
     "utf8",
   )) as { profiles: { quick: { steps: Array<{ id: string; outputs: unknown[] }> } } };
   assert.deepEqual(snapshot.profiles.quick.steps.find(({ id }) => id === "explore")?.outputs, [
@@ -551,7 +557,7 @@ test("application snapshot parser rejects unknown and malformed recursive fields
   const current = await fixture();
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "严格解析快照" } });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const applicationPath = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json");
+  const applicationPath = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId), "snapshot", "application.json");
   const snapshot = JSON.parse(await readFile(applicationPath, "utf8")) as Record<string, unknown>;
   assert.equal(parseApplicationSnapshot(snapshot).version, 1);
 
@@ -740,7 +746,7 @@ test("Knowledge target binding and config snapshot remain immutable after projec
     externalWorkItemId: started.workItemId,
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const configSnapshot = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "config.yaml");
+  const configSnapshot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId), "snapshot", "config.yaml");
   assert.equal(await readFile(configSnapshot, "utf8"), initialConfig);
 
   await writeFile(path.join(current.root, ".wsspec", "config.yaml"), [
@@ -806,8 +812,8 @@ test("start initializes the delayed control plane without creating Git resources
   await access(path.join(itemRoot, "control-plane", "runtime.json"));
   await access(path.join(itemRoot, "control-plane", "events.jsonl"));
   await access(path.join(itemRoot, "authority", "snapshot", "application.json"));
-  assert.equal(await git(current.root, "branch", "--list", `wspec/${started.workItemId}`), "");
-  await assert.rejects(access(path.join(current.root, ".worktrees", started.workItemId)));
+  assert.equal(await git(current.root, "branch", "--list", `wspec/${await itemDirectoryFor(current.root, started.workItemId)}`), "");
+  await assert.rejects(access(path.join(current.root, ".worktrees", await itemDirectoryFor(current.root, started.workItemId))));
 });
 
 test("start publishes delayed authority without materializing a worktree", async () => {
@@ -816,8 +822,8 @@ test("start publishes delayed authority without materializing a worktree", async
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "延迟物化" } });
   const locator = JSON.parse(await readFile(path.join(workItemsRoot, started.workItemId, "locator.json"), "utf8")) as { materialized: boolean };
   assert.equal(locator.materialized, false);
-  assert.equal(await git(current.root, "branch", "--list", `wspec/${started.workItemId}`), "");
-  await assert.rejects(access(path.join(current.root, ".worktrees", started.workItemId)));
+  assert.equal(await git(current.root, "branch", "--list", `wspec/${await itemDirectoryFor(current.root, started.workItemId)}`), "");
+  await assert.rejects(access(path.join(current.root, ".worktrees", await itemDirectoryFor(current.root, started.workItemId))));
 });
 
 test("delayed setup keeps authority and locator in the common directory", async () => {
@@ -826,7 +832,7 @@ test("delayed setup keeps authority and locator in the common directory", async 
   const itemRoot = path.join(current.root, ".git", "wsspec", "work-items", started.workItemId);
   await access(path.join(itemRoot, "authority", "work-item.yaml"));
   await access(path.join(itemRoot, "locator.json"));
-  await assert.rejects(access(path.join(current.root, ".worktrees", started.workItemId)));
+  await assert.rejects(access(path.join(current.root, ".worktrees", await itemDirectoryFor(current.root, started.workItemId))));
 });
 
 test("Work Item creation persists the exact pre-captured local source bytes", async () => {
@@ -848,7 +854,7 @@ test("Work Item creation persists the exact pre-captured local source bytes", as
     application: { workflowText, configText },
   });
   const source = JSON.parse(await readFile(
-    path.join(current.root, item.execution.worktree, ".wsspec", "work-items", item.workItemId, item.source.snapshot),
+    path.join(current.root, item.execution.worktree, ".wsspec", "work-items", workItemDirectory(item), item.source.snapshot),
     "utf8",
   )) as { title: string; body: string; contentDigest: string };
   assert.equal(source.title, "original requirement");
@@ -963,7 +969,7 @@ test("start and acquire use an uncommitted current-host config without copying i
   assert.equal((await app.acquire({ root, workItemId: started.workItemId, actor: "codex" })).action, "execute");
 
   const projection = await readControlPlane(root, started.workItemId);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(root, started.workItemId));
   for (const filename of [
     path.join(itemRoot, "snapshot", "application.json"),
     path.join(itemRoot, "snapshot", "config.yaml"),
@@ -1032,7 +1038,7 @@ test("additional Global roots retain their snapshotted provider when rebinding t
     workflowRef: "project://workflows/feature-delivery",
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId));
   const projection = await readControlPlane(current.root, started.workItemId);
   const applicationPath = path.join(itemRoot, "snapshot", "application.json");
   const configSnapshotPath = path.join(itemRoot, "snapshot", "config.yaml");
@@ -1233,9 +1239,9 @@ test("acquire rejects a locator whose real worktree escapes the repository", asy
   const locator = JSON.parse(await readFile(locatorPath, "utf8")) as Record<string, unknown>;
   const outside = path.join(path.dirname(current.root), `wspec-outside-${crypto.randomUUID()}`);
   await git(current.root, "worktree", "add", "-b", `outside-${crypto.randomUUID()}`, outside, "HEAD");
-  const outsideItem = path.join(outside, ".wsspec", "work-items", started.workItemId);
+  const outsideItem = path.join(outside, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId));
   await mkdir(path.dirname(outsideItem), { recursive: true });
-  await cp(path.join(worktree, ".wsspec", "work-items", started.workItemId), outsideItem, { recursive: true });
+  await cp(path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId)), outsideItem, { recursive: true });
   await writeFile(locatorPath, `${JSON.stringify({ ...locator, worktree: path.relative(current.root, outside) }, null, 2)}\n`, "utf8");
 
   await assert.rejects(
@@ -2049,7 +2055,7 @@ test("start assembles Task 6 ProjectGatePolicy from project configuration", asyn
   await git(current.root, "commit", "-m", "test: configure project Gate");
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: "Gate" }, profile: "standard" });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const snapshot = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "application.json"), "utf8")) as { gatePolicy: unknown };
+  const snapshot = JSON.parse(await readFile(path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId), "snapshot", "application.json"), "utf8")) as { gatePolicy: unknown };
   assert.deepEqual(snapshot.gatePolicy, { requiredGateIds: ["test"], configuredGateIds: ["test"] });
 });
 
@@ -2088,13 +2094,13 @@ test("start persists a content-addressed source reference and records no source 
   const body = "EVENT_MUST_NOT_CONTAIN_THIS_REQUIREMENT_BODY";
   const started = await current.app.start({ root: current.root, source: { type: "prompt", text: body }, profile: "standard" });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, started.workItemId));
   const application = JSON.parse(await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8")) as {
     source: ArtifactReference & { artifactId: string };
   };
 
   assert.match(application.source.artifactId, /^source-[a-f0-9]{64}$/u);
-  assert.match(application.source.path ?? "", new RegExp(`^\\.wsspec/work-items/${started.workItemId}/source/[a-f0-9]{64}\\.json$`, "u"));
+  assert.match(application.source.path ?? "", new RegExp(`^\\.wsspec/work-items/${await itemDirectoryFor(worktree, started.workItemId)}/source/[a-f0-9]{64}\\.json$`, "u"));
   const source = JSON.parse(await readFile(path.join(worktree, application.source.path!), "utf8")) as { artifactId: string; body: string };
   assert.equal(source.artifactId, application.source.artifactId);
   assert.equal(source.body, body);
@@ -2220,7 +2226,7 @@ test("unmaterialized approval still validates the formal Artifact independently 
   const projection = await readControlPlane(current.root, started.workItemId);
   const request = projection.approvals[awaiting.approval.requestId]!;
   const reference = request.artifacts![0]!;
-  const relative = reference.path.replace(`.wsspec/work-items/${started.workItemId}/`, "");
+  const relative = reference.path.replace(`.wsspec/work-items/${await itemDirectoryFor(current.root, started.workItemId)}/`, "");
   const artifact = path.join(path.dirname(projection.controlPlane), "authority", relative);
   await writeFile(artifact, `${await readFile(artifact, "utf8")}\nTampered after approval request.\n`);
   await assert.rejects(current.app.decide({

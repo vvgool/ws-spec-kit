@@ -1,3 +1,4 @@
+import { workItemPrefix } from "../domain/work-item-paths.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import * as canonicalizeModule from "canonicalize";
@@ -127,7 +128,9 @@ async function approvalWorkspaceDigest(cwd: string, workItemId: string, version?
   if (version === undefined) return computeWorkspaceTreeDigest(cwd);
   if (version !== 2) throw new ApprovalError("WSSPEC_APPROVAL_DIGEST_INVALID", "不支持此审批工作区摘要版本。");
   const draftPrefix = `.wsspec/work-items/${workItemId}/drafts/`;
-  const entries = (await computeWorkspaceSnapshot(cwd)).filter((entry) => !entry.path.startsWith(draftPrefix));
+  const context = await resolveWorkItemContext(cwd, workItemId);
+  const readableDraftPrefix = `${workItemPrefix({ workItemId, execution: context })}/drafts/`;
+  const entries = (await computeWorkspaceSnapshot(cwd)).filter((entry) => !entry.path.startsWith(draftPrefix) && !entry.path.startsWith(readableDraftPrefix));
   return sha256(`${JSON.stringify({ version: 1, entries })}\n`);
 }
 
@@ -145,7 +148,7 @@ export async function prepareArtifactApproval(input: {
   const artifactRoot = context.materialized ? worktree : context.authorityRoot;
   const physicalArtifactPath = (referencePath: string): string => context.materialized
     ? path.join(artifactRoot, referencePath)
-    : path.join(artifactRoot, referencePath.replace(`.wsspec/work-items/${input.workItemId}/`, ""));
+    : path.join(artifactRoot, referencePath.replace(`${workItemPrefix({ workItemId: input.workItemId, execution: context })}/`, ""));
   const artifacts = await Promise.all(input.artifacts.map(async (reference) => {
     if (reference.path === undefined) throw new ApprovalError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 缺少路径。`);
     const verified = await verifyArtifact(physicalArtifactPath(reference.path), {
@@ -256,7 +259,7 @@ async function verifyApprovalArtifacts(cwd: string, workItemId: string, request:
   const verifiedReferences = await Promise.all(references.map(async (reference) => {
     const physicalPath = context.materialized
       ? reference.path
-      : reference.path.replace(`.wsspec/work-items/${workItemId}/`, "");
+      : reference.path.replace(`${workItemPrefix({ workItemId, execution: context })}/`, "");
     const verified = await verifyArtifact(path.join(artifactRoot, physicalPath), {
       repositoryRoot: artifactRoot,
       artifactType: reference.artifactType,

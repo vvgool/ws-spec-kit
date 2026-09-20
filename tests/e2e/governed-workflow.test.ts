@@ -1,3 +1,4 @@
+import { loadApplicationState } from "../../src/application/state.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -113,7 +114,7 @@ test("Governed local automated recovery preserves frozen contracts through Revie
     profile: "governed",
   });
   const worktree = await worktreeFor(fixture.root, started.workItemId);
-  const itemRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId);
+  const itemRoot = (await loadApplicationState(fixture.root, started.workItemId)).itemRoot;
   const frozenContracts = await Promise.all([
     readFile(path.join(itemRoot, "snapshot", "application.json")),
     readFile(path.join(itemRoot, "snapshot", "workflow.lock.json")),

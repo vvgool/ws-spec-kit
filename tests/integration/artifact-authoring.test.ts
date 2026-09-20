@@ -6,6 +6,10 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { sha256 } from "../../src/domain/digests.js";
+import { artifactFilename } from "../../src/domain/artifact-names.js";
+import { workItemDirectory } from "../../src/domain/work-item-paths.js";
+import { loadApplicationState } from "../../src/application/state.js";
 import { createArtifactDocument, readArtifact } from "../../src/domain/artifacts.js";
 import type { ArtifactCreateInput, SubmitResult } from "../../src/protocol/application.js";
 import type { ArtifactReference, WorkPackage } from "../../src/protocol/work-package.js";
@@ -26,6 +30,10 @@ import {
   submitPackage,
   worktreeFor,
 } from "./helpers/control-runtime.js";
+
+async function itemDirectoryFor(root: string, id: string): Promise<string> {
+  return workItemDirectory((await loadApplicationState(root, id)).item);
+}
 
 function completed(workPackage: WorkPackage): SubmitResult {
   const source = workPackage.artifacts.find((artifact) => artifact.artifactType === "requirement-source");
@@ -160,7 +168,7 @@ test("active WorkPackage authors a canonical ArtifactRef from an ignored draft",
   assert.equal(reference.schemaVersion, 1);
   assert.equal(reference.revision, 1);
   assert.equal(reference.contentLevel, expectedContentLevel);
-  assert.match(reference.path ?? "", new RegExp(`^\\.wsspec/work-items/${workPackage.workItemId}/artifacts/exploration-report/[a-f0-9]{64}\\.md$`, "u"));
+  assert.match(reference.path ?? "", new RegExp(`^\\.wsspec/work-items/${await itemDirectoryFor(worktree, workPackage.workItemId)}/artifacts/exploration-report/02-现状分析-[a-f0-9]{12}\\.md$`, "u"));
   assert.match(reference.contentHash ?? "", /^sha256:[a-f0-9]{64}$/u);
 
   const stored = await readArtifact(path.join(worktree, reference.path!));
@@ -228,7 +236,7 @@ test("submit rejects a canonical-looking Artifact that has no durable authoring 
     attemptId: workPackage.attemptId,
     body: "# Bypassed authoring\n",
   });
-  const relative = `.wsspec/work-items/${workPackage.workItemId}/artifacts/exploration-report/${document.reference.contentHash.slice("sha256:".length)}.md`;
+  const relative = `.wsspec/work-items/${await itemDirectoryFor(worktree, workPackage.workItemId)}/artifacts/exploration-report/${artifactFilename({ artifactType: document.reference.artifactType, stageId: workPackage.stepId, contentHash: document.reference.contentHash })}`;
   await mkdir(path.dirname(path.join(worktree, relative)), { recursive: true, mode: 0o700 });
   await writeFile(path.join(worktree, relative), document.content, { encoding: "utf8", mode: 0o600 });
 
@@ -246,7 +254,7 @@ test("unsafe Artifact output directories and conflicting content-addressed targe
   await t.test("symlink output root", async () => {
     const { fixture, worktree, workPackage } = await activeExplore();
     const outside = await mkdtemp(path.join(os.tmpdir(), "wspec-authored-outside-"));
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
     await symlink(outside, artifactRoot);
     await mkdir(path.join(worktree, ".acceptance"), { recursive: true });
     const marker = `linked-output-${crypto.randomUUID()}`;
@@ -276,7 +284,7 @@ test("unsafe Artifact output directories and conflicting content-addressed targe
 
   await t.test("group-writable output root", async () => {
     const { fixture, worktree, workPackage } = await activeExplore();
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
     await mkdir(artifactRoot, { mode: 0o700 });
     await chmod(artifactRoot, 0o770);
     await mkdir(path.join(worktree, ".acceptance"), { recursive: true });
@@ -307,7 +315,7 @@ test("unsafe Artifact output directories and conflicting content-addressed targe
       attemptId: workPackage.attemptId,
       body,
     });
-    const relative = `.wsspec/work-items/${workPackage.workItemId}/artifacts/exploration-report/${document.reference.contentHash.slice("sha256:".length)}.md`;
+    const relative = `.wsspec/work-items/${await itemDirectoryFor(worktree, workPackage.workItemId)}/artifacts/exploration-report/${artifactFilename({ artifactType: document.reference.artifactType, stageId: workPackage.stepId, contentHash: document.reference.contentHash })}`;
     const target = path.join(worktree, relative);
     await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     await writeFile(target, "hostile-existing-bytes\n", { encoding: "utf8", mode: 0o600 });
@@ -403,7 +411,7 @@ test("unsafe, nonignored, linked, and oversized drafts fail before an Artifact i
         (error: unknown) => error instanceof Error && "code" in error
           && (error as Error & { code: string }).code === scenario.expected,
       );
-      const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+      const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
       assert.deepEqual(await readdir(artifactRoot).catch(() => []), []);
     });
   }
@@ -478,7 +486,7 @@ test("concurrent and fresh-process-equivalent authoring is idempotent and record
   assert.doesNotMatch(serialized, new RegExp(workPackage.lease.token, "u"));
   assert.doesNotMatch(serialized, new RegExp(worktree.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   assert.deepEqual(Object.keys((authored[0]!.result as { value: Record<string, unknown> }).value).sort(), [
-    "artifactDigest", "artifactType", "contentHash", "mediaType", "outputId", "revision", "schemaVersion",
+    "artifactDigest", "artifactType", "contentHash", "mediaType", "outputId", "path", "revision", "schemaVersion",
   ]);
 
   const replayed = replayEvents({
@@ -565,6 +573,9 @@ test("duplicate artifact types require an explicit output id", async () => {
   );
 
   const primary = await createArtifact(fixture, { ...request, outputId: "primary-report" });
+  assert.notEqual(primary.path, secondary.path);
+  assert.deepEqual((await readdir(path.dirname(path.join(worktree, primary.path!)))).sort(), [path.basename(primary.path!), path.basename(secondary.path!)].sort());
+  assert.equal((await readArtifact(path.join(worktree, secondary.path!))).metadata.outputId, "secondary-report");
   const next = requireExecute(await submitPackage(fixture, workPackage, {
     ...completed(workPackage),
     artifacts: [primary, secondary],
@@ -707,7 +718,7 @@ test("draft replacement between preflight and the control-plane lock is rejected
       && (error as Error & { code: string }).code === "WSSPEC_ARTIFACT_DRAFT_CHANGED",
   );
   assert.equal(invoked, 1);
-  const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+  const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
   assert.deepEqual(await readdir(artifactRoot).catch(() => []), []);
 });
 
@@ -779,7 +790,7 @@ test("draft and Artifact directory identities remain bound across pathname races
     );
     assert.equal(swapped, true);
     assert.equal(restored, true);
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
     assert.deepEqual(await readdir(artifactRoot).catch(() => []), []);
   });
 
@@ -789,7 +800,7 @@ test("draft and Artifact directory identities remain bound across pathname races
     await writeFile(path.join(worktree, ".acceptance", "output-swap.md"), "# Output swap\n", "utf8");
     const outside = await mkdtemp(path.join(os.tmpdir(), "wspec-output-swap-"));
     await mkdir(path.join(outside, "exploration-report"), { mode: 0o700 });
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
     const backup = `${artifactRoot}.backup`;
     const artifactAuthoring = {
       async afterArtifactDirectoryPrepared() {
@@ -820,7 +831,7 @@ test("draft and Artifact directory identities remain bound across pathname races
     await writeFile(path.join(worktree, ".acceptance", "output-window.md"), "# Output window\n", "utf8");
     const outside = await mkdtemp(path.join(os.tmpdir(), "wspec-output-window-"));
     await mkdir(path.join(outside, "exploration-report"), { mode: 0o700 });
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts");
     const backup = `${artifactRoot}.window-backup`;
     let restoration: Promise<void> | undefined;
     const artifactAuthoring = {
@@ -895,7 +906,7 @@ test("draft growth and post-write replacement fail before committing an Artifact
       (error: unknown) => error instanceof Error && "code" in error
         && (error as Error & { code: string }).code === "WSSPEC_ARTIFACT_DRAFT_CHANGED",
     );
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts", "exploration-report");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts", "exploration-report");
     assert.deepEqual(await readdir(artifactRoot).catch(() => []), []);
   });
 });
@@ -915,7 +926,7 @@ test("Artifact file cleanup follows event durability boundary", async (t) => {
       artifactType: "exploration-report", contentFile: ".acceptance/link-failure.md",
     }, { now: fixedNow, artifactAuthoring }));
     assert.equal(finalLinked, true);
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts", "exploration-report");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts", "exploration-report");
     assert.deepEqual(await readdir(artifactRoot).catch(() => []), []);
   });
 
@@ -936,7 +947,7 @@ test("Artifact file cleanup follows event durability boundary", async (t) => {
       (error: unknown) => error instanceof Error && "code" in error
         && (error as Error & { code: string }).code === "WSSPEC_ARTIFACT_CONFLICT",
     );
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts", "exploration-report");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts", "exploration-report");
     const interrupted = await readdir(artifactRoot);
     assert.equal(interrupted.length, 2);
     for (const entry of interrupted) assert.equal((await lstat(path.join(artifactRoot, entry), { bigint: true })).nlink, 2n);
@@ -962,10 +973,10 @@ test("Artifact file cleanup follows event durability boundary", async (t) => {
     const artifactAuthoring = { simulateWriterCrashBeforeFinalLink: true } satisfies ArtifactAuthoringDependencies;
 
     await assert.rejects(createApplicationArtifact(request, { now, artifactAuthoring }));
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts", "exploration-report");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts", "exploration-report");
     const interrupted = await readdir(artifactRoot);
     assert.equal(interrupted.length, 1);
-    assert.match(interrupted[0]!, /^\.[a-f0-9]{64}\.md\.[a-f0-9-]+\.tmp$/u);
+    assert.match(interrupted[0]!, /^\.02-现状分析-[a-f0-9]{12}\.md\.[a-f0-9-]+\.tmp$/u);
 
     const recovered = await createApplicationArtifact(request, { now });
     assert.match(await readFile(path.join(worktree, recovered.path!), "utf8"), /# Writer prelink crash/u);
@@ -985,11 +996,11 @@ test("Artifact file cleanup follows event durability boundary", async (t) => {
     const artifactAuthoring = { simulateWriterCrashDuringTempWrite: true } satisfies ArtifactAuthoringDependencies;
 
     await assert.rejects(createApplicationArtifact(request, { now, artifactAuthoring }));
-    const artifactRoot = path.join(worktree, ".wsspec", "work-items", workPackage.workItemId, "artifacts", "exploration-report");
+    const artifactRoot = path.join(worktree, ".wsspec", "work-items", await itemDirectoryFor(worktree, workPackage.workItemId), "artifacts", "exploration-report");
     const interrupted = await readdir(artifactRoot);
     assert.equal(interrupted.length, 1);
     const orphan = path.join(artifactRoot, interrupted[0]!);
-    assert.match(interrupted[0]!, /^\.[a-f0-9]{64}\.md\.[a-f0-9-]+\.tmp$/u);
+    assert.match(interrupted[0]!, /^\.02-现状分析-[a-f0-9]{12}\.md\.[a-f0-9-]+\.tmp$/u);
     const orphanSize = (await lstat(orphan, { bigint: true })).size;
     assert.ok(orphanSize > 0n);
 
@@ -1007,7 +1018,7 @@ test("Artifact file cleanup follows event durability boundary", async (t) => {
       artifactType: "exploration-report", outputId: "exploration-report", workItemId: workPackage.workItemId,
       stageId: workPackage.stepId, attemptId: workPackage.attemptId, body,
     });
-    const target = path.join(worktree, `.wsspec/work-items/${workPackage.workItemId}/artifacts/exploration-report/${document.reference.contentHash.slice("sha256:".length)}.md`);
+    const target = path.join(worktree, `.wsspec/work-items/${await itemDirectoryFor(worktree, workPackage.workItemId)}/artifacts/exploration-report/${artifactFilename({ artifactType: document.reference.artifactType, stageId: workPackage.stepId, contentHash: document.reference.contentHash })}`);
     const now = () => new Date();
     const artifactAuthoring = { simulateEventFailure: true } satisfies ArtifactAuthoringDependencies;
 
@@ -1080,7 +1091,7 @@ test("Artifact file cleanup follows event durability boundary", async (t) => {
     });
     const target = path.join(
       worktree,
-      `.wsspec/work-items/${request.workItemId}/artifacts/${request.artifactType}/${document.reference.contentHash.slice("sha256:".length)}.md`,
+      `.wsspec/work-items/${await itemDirectoryFor(worktree, request.workItemId)}/artifacts/${request.artifactType}/${artifactFilename({ artifactType: document.reference.artifactType, stageId: workPackage.stepId, contentHash: document.reference.contentHash })}`,
     );
     const now = () => new Date();
     const artifactAuthoring = {
@@ -1215,4 +1226,38 @@ test("known plan, review, and TDD output types use the existing content contract
         && (error as Error & { code: string }).code === "WSSPEC_ARTIFACT_INCOMPLETE",
     );
   });
+});
+
+test("legacy authored events without a path replay the original hash filename", async () => {
+  const { fixture, worktree, workPackage } = await activeExplore(() => new Date());
+  const body = "# Legacy Artifact\n";
+  const output = workPackage.requiredOutputs.find(({ artifactType }) => artifactType === "exploration-report")!;
+  const request: ArtifactCreateInput = {
+    root: worktree, workItemId: workPackage.workItemId, stepId: workPackage.stepId,
+    attemptId: workPackage.attemptId, leaseToken: workPackage.lease.token,
+    artifactType: "exploration-report", contentFile: ".acceptance/legacy.md",
+  };
+  await mkdir(path.join(worktree, ".acceptance"), { recursive: true });
+  await writeFile(path.join(worktree, request.contentFile), body);
+  const document = createArtifactDocument({ artifactType: request.artifactType, outputId: output.outputId!, workItemId: request.workItemId, stageId: request.stepId, attemptId: request.attemptId, body });
+  const legacyPath = `.wsspec/work-items/${request.workItemId}/artifacts/${request.artifactType}/${document.reference.contentHash.slice(7)}.md`;
+  await mkdir(path.dirname(path.join(worktree, legacyPath)), { recursive: true, mode: 0o700 });
+  await writeFile(path.join(worktree, legacyPath), document.content, { mode: 0o600 });
+  await mutateControlPlane({
+    cwd: worktree, workItemId: request.workItemId, eventType: "artifact.authored",
+    stageId: request.stepId, attemptId: request.attemptId,
+    idempotencyKey: `artifact:${request.stepId}:${request.attemptId}:${output.outputId}`,
+    operationInput: {
+      workItemId: request.workItemId, stepId: request.stepId, attemptId: request.attemptId,
+      leaseDigest: sha256(request.leaseToken), artifactType: request.artifactType,
+      outputId: output.outputId, ...(output.contentLevel === undefined ? {} : { contentLevel: output.contentLevel }), sourceDigest: sha256(body),
+    },
+    mutate: (projection) => ({ projection, value: { ...document.reference, ...(output.contentLevel === undefined ? {} : { contentLevel: output.contentLevel }), artifactDigest: sha256(document.content) } }),
+  });
+  await recoverControlPlane({ cwd: worktree, workItemId: request.workItemId });
+  const reference = await createArtifact(fixture, request);
+  assert.equal(reference.path, legacyPath);
+  assert.equal(await readFile(path.join(worktree, reference.path!), "utf8"), document.content);
+  const projection = await readControlPlane(worktree, request.workItemId);
+  assert.equal((await readEvents(projection.controlPlane)).filter(({ eventType }) => eventType === "artifact.authored").length, 1);
 });

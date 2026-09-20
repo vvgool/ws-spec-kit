@@ -105,6 +105,20 @@ test("public config migration preserves snapshots, rotates Claim and survives ev
   assert.equal((await readControlPlane(root, pkg.workItemId)).claims["write-tests"]?.attemptId, next.workPackage.attemptId);
 });
 
+test("config migration accepts legacy Driver drafts in a readable task worktree", async () => {
+  const { root, pkg } = await readyForTests();
+  const state = await loadApplicationState(root, pkg.workItemId);
+  assert.notEqual(state.item.execution.directoryName, pkg.workItemId);
+  const draft = path.join(state.worktree, ".wsspec/work-items", pkg.workItemId, "drafts/migrate.json");
+  const config = defaultProjectConfig() as any;
+  config.quality.gates.test.timeoutSeconds = 90;
+  await mkdir(path.dirname(draft), { recursive: true });
+  await writeFile(draft, JSON.stringify(config));
+  const result = await migrateTestingConfig({ root, workItemId: pkg.workItemId, config, expectedDigest: state.item.execution.configDigest, actor: "test" });
+  assert.equal(result.action, "inspect_then_acquire");
+  assert.equal((await loadApplicationState(root, pkg.workItemId)).projection.claims["write-tests"], undefined);
+});
+
 
 test("ambiguous Vitest scopes fail init without leaving an initialized identity", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "wspec-ambiguous-"));

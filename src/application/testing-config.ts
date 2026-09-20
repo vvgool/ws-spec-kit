@@ -1,3 +1,4 @@
+import { workItemPrefix } from "../domain/work-item-paths.js";
 import { readTestingConfigMigration, testingConfigEvidenceKey, type TestingConfigMigration } from "../storage/testing-config-migration.js";
 import * as canonicalizeModule from "canonicalize";
 import { parse } from "yaml";
@@ -65,9 +66,9 @@ export async function migrateTestingConfig(input: { root: string; workItemId: st
       const retries = { ...projection.retries };
       for (const claim of Object.values(claims)) {
         if (claim.stageId !== "write-tests" || claim.actor !== input.actor) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "其他步骤有活动 Claim，不能迁移。");
-        const prefix = `.wsspec/work-items/${input.workItemId}/drafts/`;
-        const baseline = claim.workspaceSnapshot.filter(entry => !entry.path.startsWith(prefix));
-        const current = (await computeWorkspaceSnapshot(state.worktree)).filter(entry => !entry.path.startsWith(prefix));
+        const prefixes = [`${workItemPrefix(state.item)}/drafts/`, `.wsspec/work-items/${input.workItemId}/drafts/`];
+        const baseline = claim.workspaceSnapshot.filter(entry => !prefixes.some(prefix => entry.path.startsWith(prefix)));
+        const current = (await computeWorkspaceSnapshot(state.worktree)).filter(entry => !prefixes.some(prefix => entry.path.startsWith(prefix)));
         if (canonicalize(current) !== canonicalize(baseline)) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "活动 Attempt 已修改工作区，不能迁移并重置基线。");
         delete claims[claim.stageId];
         delete contexts[claim.stageId];

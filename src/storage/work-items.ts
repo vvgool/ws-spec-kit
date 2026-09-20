@@ -1,3 +1,4 @@
+import { workItemDirectory, workItemPrefix } from "../domain/work-item-paths.js";
 import { access, cp, lstat, mkdir, open, readFile, realpath, rm, rmdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import { parse, stringify } from "yaml";
@@ -45,6 +46,7 @@ export interface CreateWorkItemInput {
   source: PromptSource | FileSource | ExternalSource;
   createdAt?: string;
   materialize?: boolean;
+  directoryName?: string;
   capturedSource?: {
     type: "prompt" | "file";
     origin: string;
@@ -70,6 +72,7 @@ export interface WorkItem {
     worktree: string;
     branch: string;
     materialized?: boolean;
+    directoryName?: string;
     baselineRevision: string;
     baselineTreeDigest: string;
     workflowDigest: string;
@@ -280,9 +283,11 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
   const { workflowText, configText, config } = await readProjectContracts(root, input.application);
   const portableConfigText = portableProjectConfigText(parse(configText));
   const worktreeRoot = repositoryRelativePath(root, config.git.worktrees.root);
-  const branch = `${config.git.worktrees.branchPrefix}${input.workItemId}`;
-  const worktree = path.join(worktreeRoot.absolute, input.workItemId);
-  const worktreeRelative = `${worktreeRoot.relative}/${input.workItemId}`;
+  const directoryName = workItemDirectory({ workItemId: input.workItemId, execution: input });
+  const prefix = workItemPrefix({ workItemId: input.workItemId, execution: { directoryName } });
+  const branch = `${config.git.worktrees.branchPrefix}${directoryName}`;
+  const worktree = path.join(worktreeRoot.absolute, directoryName);
+  const worktreeRelative = `${worktreeRoot.relative}/${directoryName}`;
   const locator = path.join(identity.commonDir, "wsspec", "work-items", input.workItemId, "locator.json");
 
   if ((await exists(worktree)) || (await exists(locator)) || (await branchExists(root, branch))) {
@@ -303,7 +308,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
   try {
     const baselineTreeDigest = materialize ? await computeWorkspaceTreeDigest(worktree) : await baselineTreeDigestForRevision(root, baselineRevision);
     const itemRoot = materialize
-      ? path.join(worktree, ".wsspec", "work-items", input.workItemId)
+      ? path.join(worktree, ".wsspec", "work-items", directoryName)
       : path.join(identity.commonDir, "wsspec", "work-items", input.workItemId, "authority");
     const snapshotRoot = path.join(itemRoot, "snapshot");
     await writeFileAtomic(path.join(snapshotRoot, "config.yaml"), portableConfigText);
@@ -312,13 +317,14 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
       artifactRoot: materialize ? worktree : itemRoot,
       ...(materialize ? {} : {
         artifactRootRepositoryRoot: identity.commonDir,
-        artifactPathPrefix: `.wsspec/work-items/${input.workItemId}`,
+        artifactPathPrefix: prefix,
       }),
       workItemId: input.workItemId,
+      directoryName,
       source: requirementCaptureSource(input),
     });
-    const sourceReference = sourceArtifactReference(input.workItemId, source);
-    const itemRelativeSource = path.posix.relative(`.wsspec/work-items/${input.workItemId}`, sourceReference.path);
+    const sourceReference = sourceArtifactReference(input.workItemId, source, directoryName);
+    const itemRelativeSource = path.posix.relative(prefix, sourceReference.path);
 
     const workItem: WorkItem = {
       version: 1,
@@ -329,6 +335,7 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
       status: "active",
       execution: {
         worktree: worktreeRelative,
+        ...(input.directoryName === undefined ? {} : { directoryName }),
         branch,
         materialized: materialize,
         baselineRevision,
@@ -355,10 +362,11 @@ export async function createWorkItem(input: CreateWorkItemInput): Promise<WorkIt
           repositoryId: identity.repositoryId,
           workItemId: input.workItemId,
           worktree: worktreeRelative,
+          ...(input.directoryName === undefined ? {} : { directoryName }),
           ownerToken,
           ...(materialize ? {} : { authorityRoot: "authority" }),
           materialized: materialize,
-          snapshot: materialize ? `.wsspec/work-items/${input.workItemId}/snapshot` : "authority/snapshot",
+          snapshot: materialize ? `${prefix}/snapshot` : "authority/snapshot",
         },
         null,
         2,
@@ -426,7 +434,7 @@ export async function materializeWorkItem(input: { root: string; item: WorkItem 
       const anchor = JSON.parse(originalAnchor) as Record<string, unknown>;
       await writeFileAtomic(anchorPath, `${JSON.stringify({ ...anchor, manifestDigest: sha256(stringify(updated, { lineWidth: 0 })) }, null, 2)}\n`);
     }
-    const worktreeItemRoot = path.join(worktree, ".wsspec", "work-items", input.item.workItemId);
+    const worktreeItemRoot = path.join(worktree, ".wsspec", "work-items", workItemDirectory(input.item));
     await mkdir(path.dirname(worktreeItemRoot), { recursive: true });
     await cp(path.join(workItemRoot, "authority"), worktreeItemRoot, { recursive: true, force: false });
     await writeFileAtomic(path.join(worktreeItemRoot, "work-item.yaml"), stringify(updated, { lineWidth: 0 }));

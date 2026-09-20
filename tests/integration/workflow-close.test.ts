@@ -7,6 +7,7 @@ import * as canonicalizeModule from "canonicalize";
 
 import { loadApplicationState, type SnapshotProfile } from "../../src/application/state.js";
 import { computeArtifactContentHash } from "../../src/domain/artifacts.js";
+import { workItemPrefix } from "../../src/domain/work-item-paths.js";
 import { sha256 } from "../../src/domain/digests.js";
 import { createExternalBinding } from "../../src/domain/external-receipt.js";
 import { closeChecklist, closeChecklistForWorktree } from "../../src/engine/archive.js";
@@ -1055,7 +1056,7 @@ test("Close 保留 Source Artifact 身份并重新验证内容寻址文件", asy
   (current.contexts.intake as { result: { artifacts: unknown[] } }).result.artifacts = [source];
   input.source = source;
 
-  const sourcePath = source.path.replace(`.wsspec/work-items/${started.workItemId}/`, "");
+  const sourcePath = source.path.replace(`${workItemPrefix(state.item)}/`, "");
   await writeFile(path.join(state.authorityRoot, sourcePath), "{}\n", "utf8");
   assert.deepEqual((await closeChecklistForWorktree(input)).missing, [
     { category: "artifact", id: "requirement-source" },

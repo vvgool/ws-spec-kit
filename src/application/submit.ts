@@ -1,3 +1,4 @@
+import { workItemPrefix } from "../domain/work-item-paths.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -177,8 +178,8 @@ function executionTarget(profile: ReturnType<typeof selectedProfile>, projection
   return { stageId: loopStep.id, stepInstanceId, step: child, internal: true };
 }
 
-function internalPath(workItemId: string, filename: string): boolean {
-  return filename === `.wsspec/work-items/${workItemId}` || filename.startsWith(`.wsspec/work-items/${workItemId}/`);
+function internalPath(item: ApplicationState["item"], filename: string): boolean {
+  return filename === workItemPrefix(item) || filename.startsWith(`${workItemPrefix(item)}/`) || filename.startsWith(`.wsspec/work-items/${item.workItemId}/drafts/`);
 }
 
 async function actualChangedFiles(state: ApplicationState, before: readonly TreeEntry[]): Promise<string[]> {
@@ -192,7 +193,7 @@ async function actualChangedFiles(state: ApplicationState, before: readonly Tree
   const beforeByPath = new Map(before.map((entry) => [entry.path, identity(entry)]));
   const afterByPath = new Map(after.map((entry) => [entry.path, identity(entry)]));
   return [...new Set([...beforeByPath.keys(), ...afterByPath.keys()].filter((file) => beforeByPath.get(file) !== afterByPath.get(file)))]
-    .filter((file) => !internalPath(state.item.workItemId, file))
+    .filter((file) => !internalPath(state.item, file))
     .sort((left, right) => left.localeCompare(right));
 }
 
@@ -225,7 +226,7 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
   const delayed = state.item.execution.materialized === false;
   const artifactRoot = delayed ? state.authorityRoot : state.worktree;
   const physicalPath = delayed
-    ? normalized.replace(`.wsspec/work-items/${state.item.workItemId}/`, "")
+    ? normalized.replace(`${workItemPrefix(state.item)}/`, "")
     : normalized;
   const filename = path.join(artifactRoot, physicalPath);
   const verified = await verifyArtifact(filename, {
@@ -244,12 +245,13 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
     || (reference.mediaType !== undefined && verified.mediaType !== reference.mediaType)) {
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 身份与提交引用不一致。 `);
   }
-  const canonicalPath = `.wsspec/work-items/${state.item.workItemId}/artifacts/${reference.artifactType}/${reference.contentHash.slice("sha256:".length)}.md`;
+  const legacyPath = `.wsspec/work-items/${state.item.workItemId}/artifacts/${reference.artifactType}/${reference.contentHash.slice("sha256:".length)}.md`;
   const artifactDigest = sha256(await readFile(filename));
   const authored = (await readEvents(state.projection.controlPlane)).some((event) => {
     if (event.eventType !== "artifact.authored" || event.stageId !== step.id || event.attemptId !== attemptId) return false;
     const value = record((event.result as { value?: unknown }).value);
-    return value?.artifactType === reference.artifactType
+    return normalized === (value?.path ?? legacyPath)
+      && value?.artifactType === reference.artifactType
       && value.outputId === reference.outputId
       && value.schemaVersion === reference.schemaVersion
       && value.revision === reference.revision
@@ -258,7 +260,7 @@ async function verifySubmittedArtifact(state: ApplicationState, step: SnapshotSt
       && value.contentLevel === reference.contentLevel
       && value.artifactDigest === artifactDigest;
   });
-  if (normalized !== canonicalPath || !authored) {
+  if (!authored) {
     throw new ApplicationSubmitError("WSSPEC_ARTIFACT_REFERENCE_INVALID", `Artifact ${reference.artifactType} 缺少匹配的受治理 authoring 事件。`);
   }
 }
@@ -272,7 +274,7 @@ async function verifyPublicationArtifacts(state: ApplicationState, artifacts: re
       if (reference.path === undefined || reference.contentHash === undefined || reference.revision === undefined) throw new Error("incomplete reference");
       const normalized = reference.path.replaceAll("\\", "/");
       const physicalPath = delayed
-        ? normalized.replace(`.wsspec/work-items/${state.item.workItemId}/`, "")
+        ? normalized.replace(`${workItemPrefix(state.item)}/`, "")
         : normalized;
       const filename = await resolveRepositoryRegularFile(artifactRoot, physicalPath);
       const artifact = await readArtifact(filename);

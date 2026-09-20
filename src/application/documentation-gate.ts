@@ -1,3 +1,4 @@
+import { workItemPrefix } from "../domain/work-item-paths.js";
 import { lstat } from "node:fs/promises";
 import path from "node:path";
 import { computeWorkspaceTreeDigest } from "../domain/digests.js";
@@ -13,7 +14,7 @@ export async function documentationGate(state: ApplicationState, attemptId: stri
   const files = [...new Set([
     ...(await runGitRaw(state.worktree, ["diff", "--name-only", "--no-renames", "-z", state.item.execution.baselineRevision, "--"])).split("\0"),
     ...(await runGitRaw(state.worktree, ["ls-files", "--others", "--exclude-standard", "-z"])).split("\0"),
-  ])].filter(file => file !== "" && !file.startsWith(`.wsspec/work-items/${state.item.workItemId}/`)).sort();
+  ])].filter(file => file !== "" && !file.startsWith(`${workItemPrefix(state.item)}/`) && !file.startsWith(`.wsspec/work-items/${state.item.workItemId}/drafts/`)).sort();
   const present: string[] = [];
   for (const file of files) {
     if (!state.snapshot.changePolicy.allowedPaths.some(pattern => matchesRepositoryPath(pattern, file))) {

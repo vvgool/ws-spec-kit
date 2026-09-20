@@ -103,7 +103,7 @@ async function authorityArtifactPaths(root: string): Promise<string[]> {
 export async function computeWorkspaceSnapshot(cwd: string): Promise<TreeEntry[]> {
   const root = await repositoryRoot(cwd);
   const paths = (await listedPaths(root)).filter((candidate) => !artifactPath(candidate)
-    && !volatileRuntimePath(candidate) && !candidate.startsWith(".wsspec/archive/"));
+    && !volatileRuntimePath(candidate) && !/^\.wsspec\/work-items\/[^/]+\/(?:README|01-原始需求)\.md$/u.test(candidate) && !candidate.startsWith(".wsspec/archive/"));
   return snapshotPaths(root, paths);
 }
 

@@ -217,7 +217,7 @@ CLI 仍使用 `wspec decide --input <decisionPath> --actor <agent>`。`requestId
 
 Driver 在用户确认前说明审批方式，对当前版本已明确批准则直接记录并继续；版本发生变化须重新展示，不能把旧确认用于新版本。仅 `execute.resumeSubmission: true` 可以原样重提，其他返回的 Work Package 必须重新执行。
 
-现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v12；已安装的 v11 及更早版本不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
+现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v13；已安装的 v12 及更早版本不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
 
 ### `inspect`
 
@@ -432,3 +432,13 @@ wspec acquire <workItemId> --actor <操作者>
 Driver v12 的 inspect 合同按 nextAction 分支：acquire/await_approval 转 acquire 获取完整 Work Package 或审批，revalidate-red/retry-test-gate 转 recover 并以建议原因作为 reason；blocked/reconcile 停止，completed 结束。recover 后若仍要求恢复则停止，不无限重试。普通 blocked 停止当前循环并展示原因，问题解决后从 inspect 按建议恢复；租约/证据错误从 inspect 恢复，recover 仍仅尝试一次；此流程不批准审批、不重发外部动作。
 
 文档完整性门禁由引擎执行，校验从 Work Item Git 基线起的全部差异及未跟踪文档，包含 Review-Fix 新增文件；允许范围内的删除作为有效变更处理。失败返回可重试的步骤失败并撤销旧完整性证据。成功复验更新 verify-document 门禁证据，保留原步骤 Attempt 绑定，并使用当前复验 Attempt 生成独立 Evidence ID。
+
+### 任务目录与文档导航
+
+新建任务使用「需求标题-短编号」命名 Worktree、Git 分支与任务资料目录，例如 `.worktrees/修复文档校验-a7b3c2d4e5f6/`、`.wsspec/work-items/修复文档校验-a7b3c2d4e5f6/`。内部 `workItemId` 保持稳定，CLI 的任务参数仍使用该 ID。目录名在创建时冻结，标题修改不会移动目录；历史任务没有 `execution.directoryName` 时沿用原 ID 路径。
+
+任务目录中的 `README.md` 展示状态、阶段和文档链接，`01-原始需求.md` 是需求的阅读副本。导航来自可信状态和事件，可在 `inspect` 时刷新，不参与审批或测试证据。用户占用的同名文件不会被覆盖，刷新失败不会撤销成功的工作流动作。
+
+正文产物仍由 `artifact create` 保存，文件名采用 `02-现状分析-短摘要.md`、`03-需求规格-短摘要.md`、`04-技术方案-短摘要.md`、`05-实施计划-短摘要.md`、`第01轮-评审结果-短摘要.md` 等形式。短摘要区分 Attempt 和修订，完整摘要仍在元数据中校验，历史版本不覆盖。自定义产物使用安全化的类型名称。旧版完整哈希文件名和已保存引用继续有效。
+
+Agent 应读取 Work Package 的 `artifactAuthoring.draftRoots`，把草稿写入授权目录，不根据 ID 猜测产物目录。

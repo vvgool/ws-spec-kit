@@ -1,3 +1,4 @@
+import { refreshTaskNavigationFor } from "./task-navigation.js";
 import os from "node:os";
 
 import type { WSSpecApplication } from "../protocol/application.js";
@@ -37,10 +38,30 @@ export function createApplication(input: ApplicationDependencies = {}): WSSpecAp
     ...(input.workflowTrust === undefined ? {} : { workflowTrust: input.workflowTrust }),
   };
   return {
-    start: (request) => startApplication(request, dependencies),
-    acquire: (request) => acquireApplication(request, dependencies),
-    submit: (request) => submitApplication(request, dependencies),
-    decide: (request) => decideApplication(request, dependencies),
-    inspect: inspectApplication,
+    start: async (request) => {
+      const result = await startApplication(request, dependencies);
+      await refreshTaskNavigationFor(request.root, result.workItemId);
+      return result;
+    },
+    acquire: async (request) => {
+      const result = await acquireApplication(request, dependencies);
+      await refreshTaskNavigationFor(request.root, request.workItemId);
+      return result;
+    },
+    submit: async (request) => {
+      const result = await submitApplication(request, dependencies);
+      await refreshTaskNavigationFor(request.root, request.workItemId);
+      return result;
+    },
+    decide: async (request) => {
+      const result = await decideApplication(request, dependencies);
+      if ("workItemId" in request) await refreshTaskNavigationFor(request.root, request.workItemId);
+      return result;
+    },
+    inspect: async (request) => {
+      const result = await inspectApplication(request);
+      await refreshTaskNavigationFor(request.root, request.workItemId);
+      return result;
+    },
   };
 }

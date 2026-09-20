@@ -1,3 +1,4 @@
+import { workItemDirectory, workItemPrefix } from "../domain/work-item-paths.js";
 import { mkdir, open, readFile, realpath, rmdir } from "node:fs/promises";
 import path from "node:path";
 import * as canonicalizeModule from "canonicalize";
@@ -29,6 +30,7 @@ export interface ResolvedWorkItemContext {
   worktree: string;
   authorityRoot: string;
   executionWorktree: string;
+  directoryName?: string;
   materialized: boolean;
 }
 
@@ -160,7 +162,7 @@ function sourceReferenceFromEvents(events: readonly StoredEvent[], workItemId: s
   const reference = value as Record<string, unknown>;
   if (Object.keys(reference).sort().join("\0") !== ["artifactId", "digest", "path"].join("\0")
     || typeof reference.artifactId !== "string" || typeof reference.path !== "string" || typeof reference.digest !== "string"
-    || !reference.path.startsWith(`.wsspec/work-items/${workItemId}/source/`)) {
+    || (!reference.path.startsWith(`.wsspec/work-items/${workItemId}/source/`) && !/^\.wsspec\/work-items\/[\p{L}\p{N}][\p{L}\p{N}-]{0,100}\/source\/[a-f0-9]{64}\.json$/u.test(reference.path))) {
     throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source 捕获事件引用不完整。");
   }
   return {
@@ -258,7 +260,7 @@ async function readApplicationAnchorFile(controlPlane: string): Promise<Applicat
 export async function resolveWorkItemContext(cwd: string, workItemId: string): Promise<ResolvedWorkItemContext> {
   const repository = await loadRepository(cwd);
   const locatorPath = path.join(repository.commonDir, "wsspec", "work-items", workItemId, "locator.json");
-  let locator: { repositoryId?: string; workItemId?: string; worktree?: string; authorityRoot?: string; materialized?: boolean };
+  let locator: { repositoryId?: string; workItemId?: string; worktree?: string; authorityRoot?: string; materialized?: boolean; directoryName?: string };
   try {
     locator = JSON.parse(await readFile(locatorPath, "utf8")) as { repositoryId?: string; workItemId?: string; worktree?: string };
   } catch (error) {
@@ -297,13 +299,14 @@ export async function resolveWorkItemContext(cwd: string, workItemId: string): P
     throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_LOCATION_INVALID", "Work Item locator 的真实路径越出仓库边界。");
   }
   return {
+    ...(locator.directoryName === undefined ? {} : { directoryName: workItemDirectory({ workItemId, execution: locator }) }),
     directory: path.join(repository.commonDir, "wsspec", "work-items", workItemId, "control-plane"),
     repositoryId: repository.repositoryId,
     repositoryRoot: cachedRoot,
     worktree: materialized ? worktreeRelative : ".",
     authorityRoot: locator.authorityRoot === "authority"
       ? path.join(repository.commonDir, "wsspec", "work-items", workItemId, "authority")
-      : path.join(worktree, ".wsspec", "work-items", workItemId),
+      : path.join(worktree, ".wsspec", "work-items", workItemDirectory({ workItemId, execution: locator })),
     executionWorktree: worktree,
     materialized,
   };
@@ -311,7 +314,7 @@ export async function resolveWorkItemContext(cwd: string, workItemId: string): P
 
 export async function resolveWorkItemContextFromControlPlane(controlPlane: string, workItemId: string): Promise<ResolvedWorkItemContext> {
   const workItemRoot = path.dirname(controlPlane);
-  const locator = JSON.parse(await readFile(path.join(workItemRoot, "locator.json"), "utf8")) as { repositoryId?: string; workItemId?: string; worktree?: string; authorityRoot?: string; materialized?: boolean };
+  const locator = JSON.parse(await readFile(path.join(workItemRoot, "locator.json"), "utf8")) as { repositoryId?: string; workItemId?: string; worktree?: string; authorityRoot?: string; materialized?: boolean; directoryName?: string };
   const cache = JSON.parse(await readFile(path.resolve(controlPlane, "../../../repository.json"), "utf8")) as { repositoryId?: string; repositoryRoot?: string };
   if (locator.repositoryId !== cache.repositoryId || locator.workItemId !== workItemId || typeof cache.repositoryRoot !== "string") {
     throw new ControlPlaneStorageError("WSSPEC_REPOSITORY_ID_MISMATCH", "Work Item locator 与仓库缓存身份不一致。");
@@ -332,7 +335,7 @@ export async function resolveWorkItemContextFromControlPlane(controlPlane: strin
   }
   const relative = path.relative(cachedRoot, worktree);
   if (materialized && (relative === "" || relative.startsWith("..") || path.isAbsolute(relative))) throw new ControlPlaneStorageError("WSSPEC_WORK_ITEM_LOCATION_INVALID", "Work Item locator 越出仓库边界。");
-  return { directory: controlPlane, repositoryId: cache.repositoryId!, repositoryRoot: cachedRoot, worktree: materialized ? relative : ".", authorityRoot: locator.authorityRoot === "authority" ? path.join(workItemRoot, "authority") : path.join(worktree, ".wsspec", "work-items", workItemId), executionWorktree: worktree, materialized };
+  return { ...(locator.directoryName === undefined ? {} : { directoryName: workItemDirectory({ workItemId, execution: locator }) }), directory: controlPlane, repositoryId: cache.repositoryId!, repositoryRoot: cachedRoot, worktree: materialized ? relative : ".", authorityRoot: locator.authorityRoot === "authority" ? path.join(workItemRoot, "authority") : path.join(worktree, ".wsspec", "work-items", workItemDirectory({ workItemId, execution: locator })), executionWorktree: worktree, materialized };
 }
 
 async function resolveControlPlane(cwd: string, workItemId: string): Promise<ResolvedWorkItemContext> {
@@ -411,7 +414,17 @@ export async function authenticateApplicationSourceAuthority(input: {
   workItemId: string;
   repositoryId?: string;
 }): Promise<AuthenticatedApplicationSourceAuthority> {
-  const itemRoot = input.authorityRoot ?? path.join(input.worktree, ".wsspec", "work-items", input.workItemId);
+  let directoryName: string | undefined;
+  if (input.authorityRoot === undefined) {
+    try {
+      const locator = JSON.parse(await readFile(path.join(path.dirname(input.controlPlane), "locator.json"), "utf8")) as { directoryName?: string };
+      directoryName = locator.directoryName;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const itemRoot = input.authorityRoot ?? path.join(input.worktree, ".wsspec", "work-items",
+    workItemDirectory({ workItemId: input.workItemId, execution: directoryName === undefined ? {} : { directoryName } }));
   let applicationText: string;
   try {
     applicationText = await readFile(path.join(itemRoot, "snapshot", "application.json"), "utf8");
@@ -460,7 +473,7 @@ export async function authenticateApplicationSourceAuthority(input: {
     artifactType: "requirement-source",
     schemaVersion: 1,
     artifactId: manifest.source.artifactId,
-    path: `.wsspec/work-items/${input.workItemId}/${manifest.source.snapshot}`,
+    path: `${workItemPrefix(manifest)}/${manifest.source.snapshot}`,
     revision: 1,
     contentHash: manifest.source.artifactDigest,
     mediaType: "application/json",
@@ -470,12 +483,13 @@ export async function authenticateApplicationSourceAuthority(input: {
     throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Application、Work Item manifest 与可信 Source 捕获事件不一致。");
   }
 
-  const delayedAuthority = input.authorityRoot !== undefined && input.authorityRoot !== path.join(input.worktree, ".wsspec", "work-items", input.workItemId);
+  const delayedAuthority = itemRoot !== path.join(input.worktree, ".wsspec", "work-items", workItemDirectory(manifest));
   const source = await verifySourceArtifact(
     delayedAuthority ? itemRoot : input.worktree,
     input.workItemId,
     eventSourceReference,
-    delayedAuthority ? `.wsspec/work-items/${input.workItemId}` : undefined,
+    delayedAuthority ? workItemPrefix(manifest) : undefined,
+    manifest.execution.directoryName,
   );
   if (source.contentDigest !== manifest.source.contentDigest || source.type !== manifest.source.type) {
     throw new ControlPlaneStorageError("WSSPEC_SOURCE_SNAPSHOT_CHANGED", "Source Artifact 与 Work Item manifest 不一致。");

@@ -7,6 +7,8 @@ import test from "node:test";
 import { parse } from "yaml";
 
 import { runWorkflowCommand } from "../../src/adapters/cli/workflow.js";
+import { loadApplicationState } from "../../src/application/state.js";
+import { workItemDirectory } from "../../src/domain/work-item-paths.js";
 import { createApplication } from "../../src/application/application.js";
 import { resolveProjectWorkflowContext } from "../../src/application/start.js";
 import type { WorkflowTrustSummary } from "../../src/workflow-package/types.js";
@@ -226,7 +228,7 @@ test("活动 Work Item 固定编译合同与 Locks，并在绑定 Step 使用锁
     profile: "quick",
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const snapshotRoot = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot");
+  const snapshotRoot = path.join(worktree, ".wsspec", "work-items", workItemDirectory((await loadApplicationState(worktree, started.workItemId)).item), "snapshot");
   const applicationPath = path.join(snapshotRoot, "application.json");
   const snapshotPaths = [
     applicationPath,
@@ -308,7 +310,7 @@ test("活动 Work Item 的 Global 主项漂移或消失都 fail closed，且不�
     profile: "quick",
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const lockPath = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "skill.lock.json");
+  const lockPath = path.join(worktree, ".wsspec", "work-items", workItemDirectory((await loadApplicationState(worktree, started.workItemId)).item), "snapshot", "skill.lock.json");
   const primaryLock = await readFile(lockPath, "utf8");
 
   await writeFile(path.join(current.globalDirectory, "SKILL.md"), "# 已漂移的 Global Skill\n", "utf8");
@@ -563,7 +565,7 @@ test("Global fallback 选择写入 Work Item 的 Skill Lock 决策记录", async
     profile: "quick",
   });
   const worktree = await worktreeFor(current.root, started.workItemId);
-  const lockPath = path.join(worktree, ".wsspec", "work-items", started.workItemId, "snapshot", "skill.lock.json");
+  const lockPath = path.join(worktree, ".wsspec", "work-items", workItemDirectory((await loadApplicationState(worktree, started.workItemId)).item), "snapshot", "skill.lock.json");
   const lock = JSON.parse(await readFile(lockPath, "utf8")) as {
     skills: Array<{
       requested: string;
