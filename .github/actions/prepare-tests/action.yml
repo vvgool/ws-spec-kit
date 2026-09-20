@@ -8,3 +8,10 @@ runs:
         test_tmp=$(mktemp -d "$HOME/wspec-ci.XXXXXX")
         chmod 700 "$test_tmp"
         echo "TMPDIR=$test_tmp" >> "$GITHUB_ENV"
+        if [[ "$RUNNER_OS" == "Linux" ]]; then
+          # Hosted toolcache ancestors may be writable by other users. Keep the
+          # Node executable used by process tests under the same trusted root.
+          node -e 'const fs = require("node:fs"); const path = require("node:path"); let p = fs.realpathSync(process.execPath); for (;;) { const s = fs.statSync(p); console.log(p, (s.mode & 0o7777).toString(8), s.uid, s.size); const parent = path.dirname(p); if (parent === p) break; p = parent; }'
+          install -m 700 "$(command -v node)" "$test_tmp/node"
+          echo "$test_tmp" >> "$GITHUB_PATH"
+        fi
