@@ -1,0 +1,10 @@
+name: Private test temporary directory
+description: Keep fixture executables under the runner's private home instead of shared /tmp.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        test_tmp=$(mktemp -d "$HOME/wspec-ci.XXXXXX")
+        chmod 700 "$test_tmp"
+        echo "TMPDIR=$test_tmp" >> "$GITHUB_ENV"

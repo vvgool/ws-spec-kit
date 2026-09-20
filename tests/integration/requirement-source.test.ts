@@ -93,6 +93,9 @@ test("local.file stores NFC identity while opening the caller's NFD or NFC spell
   await writeFile(path.join(current.repositoryRoot, nfd), "# Unicode path\n", "utf8");
 
   const fromNfd = await captureRequirement({ ...current, workItemId, source: { type: "local.file", path: nfd } });
+  // Linux treats NFC/NFD as distinct filenames; macOS may alias both spellings.
+  // Create each spelling before reading it rather than requiring filesystem aliasing.
+  await writeFile(path.join(current.repositoryRoot, nfc), "# Unicode path\n", "utf8");
   const fromNfc = await captureRequirement({ ...current, workItemId, source: { type: "local.file", path: nfc } });
 
   assert.equal(fromNfd.stableId, nfc);

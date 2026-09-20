@@ -1,6 +1,6 @@
 {
   "name": "ws-spec-kit",
-  "version": "0.1.0-beta.14",
+  "version": "0.1.0-beta.15",
   "description": "由 Agent Skill 驱动的可定制软件交付工作流引擎",
   "license": "Apache-2.0",
   "type": "module",
@@ -23,7 +23,8 @@
     "test:contract": "node --import tsx --test tests/contract/**/*.test.ts",
     "test:e2e": "node --import tsx --test tests/e2e/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "schemas:generate": "tsx src/schemas/generate.ts schemas"
+    "schemas:generate": "tsx src/schemas/generate.ts schemas",
+    "prepublishOnly": "node scripts/check-publish-ci.mjs && npm run build"
   },
   "dependencies": {
     "ajv": "^8.20.0",

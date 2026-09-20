@@ -78,3 +78,13 @@ WSSpecKit, with the package name `ws-spec-kit`, is an Agent Skill-driven, config
 ## License
 
 Licensed under [Apache-2.0](LICENSE).
+
+## 发布 beta 版本
+
+更新版本号和发布说明后，提交并推送 `main`。等待该提交的全部 CI 作业成功，再创建并推送同一提交的 `v<版本号>` 标签，执行：
+
+```sh
+npm publish --tag beta --registry=https://registry.npmjs.org
+```
+
+`prepublishOnly` 通过已登录的 `gh` 核对当前提交的 CI，要求干净的 `main`、本地/远程版本标签和远程 `main` 一致，并重新构建发布包。失败、未完成、缺少必需作业或其他提交的 CI 不能通过门禁。不要用 `--ignore-scripts` 绕过发布检查。

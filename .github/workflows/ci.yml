@@ -26,6 +26,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/prepare-tests
       - run: npm ci
       - run: npm run build
       - run: npm run lint
@@ -33,7 +34,7 @@ jobs:
 
   contract:
     name: Contract tests
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +42,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/prepare-tests
       - run: npm ci
       - run: npm run test:contract
 
@@ -54,8 +56,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/prepare-tests
       - run: npm ci
-      - run: node --import tsx --test tests/unit/**/*.test.ts
+      - run: node --import tsx --test --test-concurrency=2 tests/unit/**/*.test.ts
 
   integration:
     name: Integration tests
@@ -67,12 +70,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/prepare-tests
       - run: npm ci
       - run: node --import tsx --test --test-concurrency=1 tests/integration/**/*.test.ts
 
   e2e:
     name: End-to-end tests
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -80,8 +84,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/prepare-tests
       - run: npm ci
-      - run: npm run test:e2e
+      - run: node --import tsx --test --test-concurrency=2 tests/e2e/**/*.test.ts
 
   package:
     name: Package contents
@@ -93,6 +98,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: ./.github/actions/prepare-tests
       - run: npm ci
       - run: npm run build
       - name: Verify publishable package contents
