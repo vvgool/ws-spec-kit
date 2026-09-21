@@ -16,14 +16,17 @@ export const publicCommandDescriptors: readonly PublicCommandDescriptor[] = Obje
   { command: "retry-test-gate", usage: "wspec retry-test-gate <workItemId> --expected-attempt <attemptId> --actor <actor> --reason <原因>" },
   { command: "init", usage: "wspec init [--test-root <path>]" },
   { command: "config", usage: "wspec config suggest | migrate <workItemId> --file <configPath> --expected-digest <digest> --actor <actor>" },
-  { command: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
+  { command: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用> | --intent <feature|fix|assessment|docs>] [--profile <档位>]" },
   { command: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
   { command: "artifact", usage: "wspec artifact create --work-item <Work Item> --step <步骤> --attempt <尝试> --lease-token <令牌> --artifact-type <类型> [--output <输出 ID>] --content-file <.acceptance 内正文文件>" },
   { command: "submit", usage: "wspec submit <workItemId> --step <步骤> --attempt <尝试> --lease <令牌> --result <结果文件>" },
   { command: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },
+  { command: "status", usage: "wspec status <workItemId>" },
+  { command: "continue", usage: "wspec continue <workItemId> --actor <执行者>" },
+  { command: "complete", usage: "wspec complete <workItemId> --actor <执行者> --package <领取结果文件> --input <输出文件映射与结果JSON>" },
   { command: "inspect", usage: "wspec inspect <workItemId>" },
   { command: "workflow", usage: "wspec workflow <list|show|eject|validate|use>" },
-  { command: "agent", usage: "wspec agent install --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { command: "agent", usage: "wspec agent install --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run] | wspec agent setup --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run] | wspec agent project <setup|remove> [--dry-run] | wspec agent status --client <codex|claude|cursor|generic> [--target <目录>]" },
   { command: "doctor", usage: "wspec doctor connectors" },
 ]);
 
@@ -34,11 +37,15 @@ export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Ob
   { route: "revalidate-red", usage: "wspec revalidate-red <workItemId> --expected-evidence <redEvidenceId> --actor <actor> --reason <原因>" },
   { route: "retry-test-gate", usage: "wspec retry-test-gate <workItemId> --expected-attempt <attemptId> --actor <actor> --reason <原因>" },
   { route: "init", usage: "wspec init [--test-root <path>]" },
-  { route: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用>] [--profile <档位>]" },
+  { route: "start", usage: "wspec start (--prompt <需求> | --file <路径> | --source-provider <github|gitlab|feishu> --source-id <稳定标识> [--source-url <规范 URL>]) [--workflow <引用> | --intent <feature|fix|assessment|docs>] [--profile <档位>]" },
   { route: "acquire", usage: "wspec acquire <workItemId> --actor <执行者>" },
   { route: "artifact create", usage: "wspec artifact create --work-item <Work Item> --step <步骤> --attempt <尝试> --lease-token <令牌> --artifact-type <类型> [--output <输出 ID>] --content-file <.acceptance 内正文文件>" },
   { route: "submit", usage: "wspec submit <workItemId> --step <步骤> --attempt <尝试> --lease <令牌> --result <结果文件>" },
   { route: "decide", usage: "wspec decide --input <决定文件> --actor <执行者>" },
+  { route: "status", usage: "wspec status <workItemId>" },
+  { route: "continue", usage: "wspec continue <workItemId> --actor <执行者>" },
+  { route: "complete", usage: "wspec complete <workItemId> --actor <执行者> --package <领取结果文件> --input <输出文件映射与结果JSON>" },
+  { route: "agent project", usage: "wspec agent project <setup|remove> [--dry-run]" },
   { route: "inspect", usage: "wspec inspect <workItemId>" },
   { route: "workflow list", usage: "wspec workflow list" },
   { route: "workflow show", usage: "wspec workflow show <引用>" },
@@ -46,10 +53,12 @@ export const publicCliRouteDescriptors: readonly PublicCliRouteDescriptor[] = Ob
   { route: "workflow validate", usage: "wspec workflow validate <引用> [--provider <Provider>]" },
   { route: "workflow use", usage: "wspec workflow use <引用> [--profile <档位>] [--provider <Provider>]" },
   { route: "agent install", usage: "wspec agent install --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { route: "agent setup", usage: "wspec agent setup --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run]" },
+  { route: "agent status", usage: "wspec agent status --client <codex|claude|cursor|generic> [--target <目录>]" },
   { route: "doctor connectors", usage: "wspec doctor connectors" },
 ]);
 
-const coreRoutes: ReadonlySet<string> = new Set(["recover", "revalidate-red", "retry-test-gate", "init", "start", "acquire", "submit", "decide", "inspect"]);
+const coreRoutes: ReadonlySet<string> = new Set(["recover", "revalidate-red", "retry-test-gate", "init", "start", "acquire", "submit", "decide", "inspect", "status", "continue", "complete"]);
 const workflowRoutes: ReadonlySet<string> = new Set(["list", "show", "eject", "validate", "use"]);
 
 export function publicCliErrorRoute(argv: readonly string[]): PublicCliErrorRoute {
@@ -60,7 +69,8 @@ export function publicCliErrorRoute(argv: readonly string[]): PublicCliErrorRout
     const subcommand = argv[1];
     return subcommand !== undefined && workflowRoutes.has(subcommand) ? `workflow ${subcommand}` as PublicCliRoute : "workflow";
   }
-  if (command === "agent") return argv[1] === "install" ? "agent install" : "agent";
+  if (command === "agent" && argv[1] === "project") return "agent project";
+  if (command === "agent") return argv[1] === "install" ? "agent install" : argv[1] === "status" ? "agent status" : argv[1] === "setup" ? "agent setup" : "agent";
   if (command === "artifact") return argv[1] === "create" ? "artifact create" : "artifact";
   if (command === "doctor") return argv[1] === "connectors" ? "doctor connectors" : "dispatch";
   return "dispatch";

@@ -10,10 +10,10 @@ description: 审查实现。用于 review：同时看 Standards 与 Spec，按�
 ## 步骤
 
 1. **钉范围**
-   读 `specification`、`design`、`tasks` 和本次 diff。完成：审查边界等于 Work Package 允许路径。
+   先读当前 Workflow、`tasks` 与本次 diff。feature-delivery 对照已有 `specification` 及启用时的 `design`；bugfix-delivery 对照 `requirement-source`、诊断 `tasks` 中的预期行为、根因和回归证据。未在当前 Workflow 产生的规格或设计文档不作为审查前置。完成：审查边界等于 Work Package 允许路径。
 
 2. **Spec 轴**
-   规格里的行为在 diff 里有没有落地；有没有多做没要的。完成：每条规格要么已兑现，要么是一条 finding。
+   对照当前流程已确认的行为检查 diff：功能实现是否兑现规格，故障修复是否恢复 tasks 中的预期行为并有回归证据；有没有多做没要的。完成：每条验收行为要么已兑现，要么是一条 finding。
 
 3. **Standards 轴**
    看 seam 是否变浅、测试是否钉行为、错误是否 fail closed、有没有密钥或越权写入。完成：每个问题都能指到文件。

@@ -12,9 +12,11 @@ Skill Resolver 按显式 URI 解析可执行说明，并将选择结果快照到
 - `builtin://skills/tdd-implementation`
 - `builtin://skills/code-review`
 - `builtin://skills/bug-fixing`
+- `builtin://skills/bugfix-diagnosis`
 - `builtin://skills/documentation-exploration`
 - `builtin://skills/documentation-editing`
 - `builtin://skills/documentation-review`
+- `builtin://skills/assessment`
 
 ```yaml contract=skill-lock-v1
 version: 1

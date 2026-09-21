@@ -239,6 +239,15 @@ async function readStableDraft(
   );
 }
 
+/** Read through the same bounded, no-symlink draft boundary used for authoring. */
+export async function readArtifactDraftDigest(
+  worktree: string,
+  contentFile: string,
+  contract: NonNullable<WorkPackage["artifactAuthoring"]>,
+): Promise<string> {
+  return (await readStableDraft(worktree, contentFile, contract)).digest;
+}
+
 interface SerializedIdentity {
   dev: string;
   ino: string;

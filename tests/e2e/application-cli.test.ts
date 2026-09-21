@@ -62,7 +62,7 @@ test("公开 CLI 只暴露 Application 命令并将旧命令拒绝为未知命�
   assert.match(help.stdout, /\bagent install\b/);
   assert.doesNotMatch(help.stdout, /\bnew-file\b|\bclaim\b|\bresume\b/);
 
-  for (const legacy of ["new", "resume", "claim", "complete"]) {
+  for (const legacy of ["new", "resume", "claim"]) {
     const result = await runCli(root, [legacy], home);
     assert.equal(result.code, 1, legacy);
     assert.match(`${result.stdout}${result.stderr}`, /WSSPEC_COMMAND_UNKNOWN/, legacy);
@@ -339,4 +339,130 @@ test("每个公开 CLI route 至少保留一个可机器恢复的进程级领域
       await rm(runtime, { recursive: true, force: true });
     }
   });
+});
+
+test("agent status 在未初始化目录运行并返回接入指引，拒绝 install 专属参数", async () => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-status-home-")));
+  try {
+    for (const selector of [["--client", "codex"], ["codex"]]) {
+      const response = await runCli(home, ["agent", "status", ...selector], home);
+      assert.equal(response.code, 0, response.stdout);
+      const result = JSON.parse(response.stdout).result;
+      assert.equal(result.status, "missing");
+      assert.equal(result.hostLoaded, "unknown");
+      assert.equal(result.target, path.join(home, ".agents/skills/wsspeckit-driver"));
+    }
+    const invalid = await runCli(home, ["agent", "status", "codex", "--dry-run"], home);
+    assert.equal(invalid.code, 1);
+    assert.match(invalid.stdout, /WSSPEC_ARGUMENT_INVALID/);
+    await assert.rejects(access(path.join(home, ".agents")), /ENOENT/);
+  } finally { await rm(home, {recursive: true, force: true}); }
+});
+
+test("agent setup 一条命令完成目录创建和安装，支持预演与重复运行", async () => {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-setup-home-")));
+  try {
+    const args = ["agent", "setup", "--client", "codex"];
+    const preview = await runCli(home, [...args, "--dry-run"], home);
+    assert.equal(preview.code, 0, preview.stdout);
+    assert.equal(JSON.parse(preview.stdout).result.status, "missing");
+    await assert.rejects(access(path.join(home, ".agents")), /ENOENT/);
+    for (let count = 0; count < 2; count++) {
+      const result = await runCli(home, args, home);
+      assert.equal(result.code, 0, result.stdout);
+      assert.equal(JSON.parse(result.stdout).result.status, "current");
+      assert.equal(JSON.parse(result.stdout).result.hostLoaded, "unknown");
+    }
+  } finally { await rm(home, {recursive: true, force: true}); }
+});
+
+test("start intent routes explicit user intent and rejects ambiguous selection", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-intent-home-")));
+  for (const [intent, workflow] of [["feature", "feature-delivery"], ["fix", "bugfix-delivery"], ["assessment", "assessment"], ["docs", "documentation-delivery"]]) {
+    const output = await runCli(root, ["start", "--prompt", "验证意图入口", "--intent", intent!, "--profile", "quick"], home);
+    assert.equal(output.code, 0, output.stdout);
+    assert.equal(JSON.parse(output.stdout).result.workflowRef, `builtin://workflows/${workflow}`);
+  }
+  for (const args of [["--intent", "guess"], ["--intent", "fix", "--workflow", "builtin://workflows/feature-delivery"]]) {
+    const output = await runCli(root, ["start", "--prompt", "歧义", ...args], home);
+    assert.equal(output.code, 1);
+    assert.match(output.stdout, /WSSPEC_ARGUMENT_INVALID/);
+  }
+});
+
+test("agent project setup and remove preserve existing instructions", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const filename = path.join(root, "AGENTS.md");
+  const original = "# 用户项目规则\n保持中文\n";
+  await writeFile(filename, original);
+  for (const args of [["setup", "--dry-run"], ["setup"], ["setup"], ["remove"]]) {
+    const output = await runCli(root, ["agent", "project", ...args], root);
+    assert.equal(output.code, 0, output.stdout);
+    if (args.includes("--dry-run")) assert.equal(await readFile(filename, "utf8"), original);
+  }
+  assert.equal(await readFile(filename, "utf8"), original);
+});
+
+test("continue resumes the same grant and status reports the same Work Item", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const started = JSON.parse((await runCli(root, ["start", "--prompt", "只读评估", "--workflow", "builtin://workflows/assessment"], root)).stdout).result;
+  const args = ["continue", started.workItemId, "--actor", "codex"];
+  const first = await runCli(root, args, root);
+  const second = await runCli(root, args, root);
+  assert.equal(first.code, 0, first.stdout);
+  assert.equal(second.code, 0, second.stdout);
+  assert.deepEqual(JSON.parse(second.stdout).result, JSON.parse(first.stdout).result);
+  const view = await runCli(root, ["status", started.workItemId], root);
+  assert.equal(view.code, 0, view.stdout);
+  assert.equal(JSON.parse(view.stdout).result.workItemId, started.workItemId);
+});
+
+test("complete accepts captured CLI JSON and output mapping through assessment completion", async () => {
+  const root = await createGitRepository();
+  await initRepository(root);
+  const start = await runCli(root, ["start", "--prompt", "只读评估", "--intent", "assessment"], root);
+  assert.equal(start.code, 0, start.stdout);
+  const id = JSON.parse(start.stdout).result.workItemId;
+  const first = await runCli(root, ["continue", id, "--actor", "codex"], root);
+  const scratch = await mkdtemp(path.join(os.tmpdir(), "wspec-completion-input-"));
+  const packageFile = path.join(scratch, "grant.json");
+  const inputFile = path.join(scratch, "completion.json");
+  const result = {version: 1, status: "completed", summary: "完成", modifiedFiles: [], commands: [], evidence: [], externalWrites: [], remainingRisks: []};
+  await writeFile(packageFile, first.stdout);
+  await writeFile(inputFile, JSON.stringify({outputs: [], result}));
+  const args = ["complete", id, "--actor", "codex", "--package", packageFile, "--input", inputFile];
+  const second = await runCli(root, args, root);
+  assert.equal(second.code, 0, second.stdout);
+  const wp = JSON.parse(second.stdout).result.workPackage;
+  assert.equal(wp.stepId, "assess");
+  const draft = path.join(root, wp.artifactAuthoring.draftRoots[1], "assessment.md");
+  await mkdir(path.dirname(draft), {recursive:true});
+  await writeFile(draft, "# 评估\n基于已读取资料给出结论，真实部署验证尚未执行。\n");
+  await writeFile(packageFile, second.stdout);
+  await writeFile(inputFile, JSON.stringify({outputs: [{outputId: "assessment-report", contentFile: path.relative(root, draft)}], result}));
+  const final = await runCli(root, args, root);
+  assert.equal(final.code, 0, final.stdout);
+  assert.equal(JSON.parse(final.stdout).result.action, "completed");
+});
+
+test("Host 禁止 Git 控制面写入时 start 返回明确权限错误且不创建任务", { skip: process.platform !== "darwin" }, async () => {
+  const root = await realpath(await createGitRepository());
+  await initRepository(root);
+  const profile = `(version 1) (allow default) (deny file-write* (subpath ${JSON.stringify(path.join(root, ".git"))}))`;
+  const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, process.execPath, "--import", path.join(repositoryRoot, "node_modules/tsx/dist/loader.mjs"), path.join(repositoryRoot, "src/cli/main.ts"), "start", "--intent", "assessment", "--prompt", "权限验收"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", chunk => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+  const code = await new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+  assert.equal(code, 1, stderr);
+  const output = JSON.parse(stdout) as { ok: boolean; error: { code: string; message: string } };
+  assert.equal(output.error.code, "WSSPEC_FILESYSTEM_PERMISSION_DENIED");
+  assert.match(output.error.message, /Host 沙箱/u);
+  assert.equal(stdout.includes(root), false);
+  await assert.rejects(access(path.join(root, ".git/wsspec/work-items")), /ENOENT/u);
 });

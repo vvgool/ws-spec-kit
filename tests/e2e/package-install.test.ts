@@ -35,8 +35,9 @@ test("packed CLI installs and runs from a clean consumer directory", async () =>
   assert.match(help.stdout, /WSSpecKit/);
   assert.match(help.stdout, /用法/);
   assert.match(help.stdout, /wspec init/);
-  assert.doesNotMatch(help.stdout, /issues|knowledge|wspec next|wspec claim|wspec context|wspec complete/);
-  assert.equal(catalog.stdout.trim(), "2");
+  assert.doesNotMatch(help.stdout, /issues|knowledge|wspec next|wspec claim|wspec context/);
+  assert.match(help.stdout, /wspec complete/);
+  assert.equal(catalog.stdout.trim(), "4");
 });
 
 test("打包产物不包含旧 Workflow、Project Config、编排器或 StageContext", async () => {

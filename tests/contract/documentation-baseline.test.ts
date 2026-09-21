@@ -375,3 +375,15 @@ test("仓库生产面不保留旧产品名、旧 Schema 或旧命令", async () 
   const matches = await Promise.all(productionFiles.map(async (filename) => ({ filename, content: await readFile(filename, "utf8") })));
   assert.deepEqual(matches.filter(({ content }) => pattern.test(content)).map(({ filename }) => path.relative(root, filename)), []);
 });
+
+test("CLI 文件系统权限失败给出固定恢复指引而不泄漏原始路径", () => {
+  for (const code of ["EPERM", "EACCES", "EROFS"]) {
+    const error = Object.assign(new Error("credential=secret /private/sensitive"), { code, syscall: "mkdir", path: "/private/sensitive/.git/wsspec/work-items" });
+    const output = errorOutput(error, "start");
+    assert.equal(output.error.code, "WSSPEC_FILESYSTEM_PERMISSION_DENIED");
+    assert.match(output.error.message, /Host|沙箱/u);
+    assert.doesNotMatch(JSON.stringify(output), /secret|sensitive/u);
+  }
+  // A process or network permission error is not proof of filesystem denial.
+  assert.equal(errorOutput(Object.assign(new Error("secret"), {code: "EPERM", syscall: "spawn git"}), "start").error.code, "WSSPEC_INTERNAL_ERROR");
+});

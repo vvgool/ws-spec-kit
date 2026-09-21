@@ -1,0 +1,29 @@
+version: 1
+profile:
+  id: governed
+  workflow: bugfix-delivery
+steps:
+  review-fix:
+    maxIterations: 5
+    independentReviewActor: true
+  verify-green:
+    gates:
+      - test
+  explore:
+    approval: true
+    artifactLevel: complete
+    artifacts:
+      tasks:
+        required: true
+        contentLevel: complete
+publishing:
+  issueRequired: true
+  knowledgeRequired: true
+  readBackRequired: true
+audit:
+  level: complete
+  retention: extended
+  recordDecisions: true
+  recordApprovals: true
+  recordActors: true
+  recordPublishing: true

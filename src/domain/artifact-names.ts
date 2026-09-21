@@ -1,5 +1,6 @@
 /** Presentation names never replace the full content hash stored in Artifact metadata. */
 const labels: Readonly<Record<string, string>> = {
+  "assessment-report": "评估报告",
   "exploration-report": "02-现状分析",
   specification: "03-需求规格",
   design: "04-技术方案",

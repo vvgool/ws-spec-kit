@@ -45,6 +45,7 @@ import { workPackageIdentityDigest } from "../domain/work-package-identity.js";
 import { materializeWorkItem } from "../storage/work-items.js";
 
 export interface AcquireDependencies {
+  preserveActiveClaim?: boolean;
   now(): Date;
   executors: ExecutorRegistry;
   home: string;
@@ -881,6 +882,7 @@ export async function acquireNextLocked(input: {
         throw new ApplicationAcquireError("WSSPEC_ACTIVE_CLAIM_INVALID", "活动 Claim 与当前 Application、Attempt 或 Work Package 绑定不一致。");
       }
       if (claim.actor === actor) {
+        if (dependencies.preserveActiveClaim === true) return { projection, action: { action: "execute", workPackage: active.context.workPackage }, skippedStepIds: [] };
         const reacquired = await reacquireActiveClaim({
           state,
           projection,
@@ -901,6 +903,7 @@ export async function acquireNextLocked(input: {
         skippedStepIds: [],
       };
     }
+    if (dependencies.preserveActiveClaim === true) throw new ApplicationAcquireError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Lease 已过期；continue 不自动重新领取，请显式 acquire。 ");
     const retry = ownProjection(projection.retries, claim.stageId);
     if (retry !== undefined) projection.retries[claim.stageId] = interruptedRetry(retry);
     const current = projection.stages[stepId];
@@ -1065,6 +1068,26 @@ export async function acquireNextLocked(input: {
     now,
   });
   return { projection: acquired.projection, action: acquired.action, skippedStepIds: promoted.skippedStepIds };
+}
+
+/** Resume an existing grant without acquiring, extending its lease, or dispatching effects. */
+export async function resumeActiveApplication(
+  input: AcquireInput,
+  dependencies: Pick<AcquireDependencies, "now" | "home">,
+): Promise<AgentAction | undefined> {
+  const state = await loadApplicationState(input.root, input.workItemId);
+  const entries = Object.entries(state.projection.claims);
+  if (entries.length === 0) return undefined;
+  if (entries.length !== 1) throw new ApplicationAcquireError("WSSPEC_ACTIVE_CLAIM_INVALID", "活动 Claim 不唯一。");
+  const [stageId, claim] = entries[0]!;
+  const now = dependencies.now();
+  if (claim.actor !== input.actor) throw new ApplicationAcquireError("WSSPEC_STAGE_ALREADY_CLAIMED", "活动 Claim 属于其他 actor。");
+  if (Date.parse(claim.expiresAt) <= now.getTime()) throw new ApplicationAcquireError("WSSPEC_ATTEMPT_NOT_ACTIVE", "Lease 已过期，请显式 acquire。");
+  const active = await activeClaimContext({ state, projection: state.projection, profile: selectedProfile(state.snapshot), stageId, claim, now });
+  await revalidateExecutionSources(state, input.root, dependencies.home);
+  return pendingExternalAction(state.projection, input.workItemId, now)
+    ?? pendingApproval(state.projection, input.workItemId)
+    ?? { action: "execute", workPackage: active.context.workPackage };
 }
 
 type CompiledStepShape = Pick<import("../domain/workflow.js").CompiledStep, "uses" | "action" | "securityClass">;

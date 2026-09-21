@@ -12,9 +12,15 @@
 | `artifact create` | Attempt 作用域辅助能力 | `builtin.application-artifact-create-input.v1` | 把活动 Work Package 授权的 draft 规范化为不可变 `ArtifactRef`；不属于五个 Application 生命周期操作。 |
 | `submit` | `submit` | `builtin.application-submit-input.v1` | 提交本次 Attempt 的结果、Artifact 和 Evidence 引用。 |
 | `decide` | `decide` | `builtin.application-decision-input.v2` | 对步骤审批、外部动作授权或 Workflow 信任作出明确决定，签发拒绝确认凭据，或触发只读外部协调回查。 |
+| `status` | inspect alias | `builtin.application-inspect-input.v1` | 简明入口，保留 inspect 恢复语义。 |
+| `continue` | Agent convenience | 无 | 原样恢复有效执行包；不会自动审批或重领过期 Lease。 |
+| `complete` | Agent convenience | 无 | 从原执行包和输出文件映射安全 author 并 submit。 |
+| `agent project` | Project guidance | 无 | setup/remove 当前已初始化项目的受管 AGENTS.md 区块。 |
 | `inspect` | `inspect` | `builtin.application-inspect-input.v1` | 读取已快照的 Work Item 状态，不创建新 Attempt。 |
 | `workflow` | workflow management | 无 | 支持 `list`、`show`、`validate`、`eject`、`use`。 |
 | `agent install` | Driver installation | 无 | 安装 `codex`、`claude`、`cursor` 或 `generic` Driver Skill。 |
+| `agent setup` | Driver setup | 无 | 创建缺失目录并安装 Driver，支持只读预演。 |
+| `agent status` | Driver inspection | 无 | 只读检查磁盘 Driver；不会初始化项目或创建目录。 |
 | `doctor connectors` | Connector Doctor | 无 | 分别诊断 `git`、`gh`、`glab` 与 `lark-cli`，不执行外部写入。 |
 
 ### `start`
@@ -219,7 +225,7 @@ CLI 仍使用 `wspec decide --input <decisionPath> --actor <agent>`。`requestId
 
 Driver 在用户确认前说明审批方式，对当前版本已明确批准则直接记录并继续；版本发生变化须重新展示，不能把旧确认用于新版本。仅 `execute.resumeSubmission: true` 可以原样重提，其他返回的 Work Package 必须重新执行。
 
-现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v13；已安装的 v12 及更早版本不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时先备份并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
+现有 v2 决定兼容不带 `confirmation` 的输入，v1 Schema 保持不变。Driver 当前为 v15；已安装的 v14 及更早版本不会自动改变。当前安全安装器拒绝原地覆盖旧 Driver，升级时确认并移走旧 `SKILL.md`，再使用新版 CLI 执行对应的 `wspec agent install`，让 Host 重新加载 Skill。
 
 ### `inspect`
 
@@ -310,7 +316,7 @@ skills:
 | `internal` | `WSSPEC_INTERNAL_ERROR` |
 | `dispatch` | `WSSPEC_COMMAND_UNKNOWN` |
 | `arguments` | `WSSPEC_ARGUMENT_INVALID`、`WSSPEC_ARGUMENT_REQUIRED` |
-| `repository` | `WSSPEC_GIT_REPOSITORY_REQUIRED`、`WSSPEC_REPOSITORY_ID_INVALID`、`WSSPEC_REPOSITORY_ID_MISMATCH`、`WSSPEC_REPOSITORY_NOT_INITIALIZED` |
+| `repository` | `WSSPEC_FILESYSTEM_PERMISSION_DENIED`、`WSSPEC_GIT_REPOSITORY_REQUIRED`、`WSSPEC_REPOSITORY_ID_INVALID`、`WSSPEC_REPOSITORY_ID_MISMATCH`、`WSSPEC_REPOSITORY_NOT_INITIALIZED` |
 | `schema` | `WSSPEC_SCHEMA_INVALID_VALUE`、`WSSPEC_SCHEMA_REQUIRED_FIELD`、`WSSPEC_SCHEMA_UNKNOWN_FIELD`、`WSSPEC_SCHEMA_UNSUPPORTED_VERSION` |
 | `builtin` | `WSSPEC_BUILTIN_CATALOG_INVALID`、`WSSPEC_BUILTIN_PROFILE_ID_MISMATCH`、`WSSPEC_BUILTIN_PROFILE_WORKFLOW_MISMATCH`、`WSSPEC_BUILTIN_RESOURCE_PATH_ESCAPE`、`WSSPEC_BUILTIN_RESOURCE_PATH_INVALID`、`WSSPEC_BUILTIN_WORKFLOW_ID_MISMATCH` |
 | `workflowPackage` | `WSSPEC_WORKFLOW_PACKAGE_BUILTIN_PROVENANCE_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_FILE_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_FILE_MISSING`、`WSSPEC_WORKFLOW_PACKAGE_LOCK_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_LOCK_MISSING`、`WSSPEC_WORKFLOW_PACKAGE_MANIFEST_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_MANIFEST_MISSING`、`WSSPEC_WORKFLOW_PACKAGE_NOT_FOUND`、`WSSPEC_WORKFLOW_PACKAGE_PATH_ESCAPE`、`WSSPEC_WORKFLOW_PACKAGE_PATH_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_PROFILE_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_PROFILE_MISSING`、`WSSPEC_WORKFLOW_PACKAGE_SKILL_MISSING`、`WSSPEC_WORKFLOW_PACKAGE_SKILL_UNDECLARED`、`WSSPEC_WORKFLOW_PACKAGE_VERSION_UNSUPPORTED`、`WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_INVALID`、`WSSPEC_WORKFLOW_PACKAGE_WORKFLOW_MISSING` |
@@ -366,6 +372,12 @@ skills:
 | `workflow validate` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`tdd` |
 | `workflow use` | `internal`、`arguments`、`repository`、`schema`、`builtin`、`workflowPackage`、`skill`、`projectConfig`、`compiler`、`executor`、`connectorRegistry`、`connectorProvider`、`workflowTrust`、`tdd` |
 | `agent install` | `internal`、`arguments`、`agentInstall` |
+| `agent status` | `internal`、`arguments`、`agentInstall` |
+| `agent setup` | `internal`、`arguments`、`agentInstall` |
+| `status` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction`、`tdd` |
+| `continue` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd`、`externalAction` |
+| `complete` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction`、`gitCommit` |
+| `agent project` | `internal`、`arguments`、`repository`、`agentInstall` |
 | `doctor connectors` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider` |
 
 `WSSPEC_INTERNAL_ERROR` 是 CLI 对未建模失败的公开兜底 code，不是允许透传原始内部消息的业务错误。无论异常显式携带该 code，还是来自未知 `WSSPEC_` code、普通 Error、非 Error 抛出值或 JSON parser 等底层组件，CLI 都只返回固定消息 `发生未预期的内部错误。`。其他已注册 public code 保留其中文消息。此规则只约束 CLI 输出适配层，不改变 Application 直接 API 的异常类型、code 或 message。
@@ -444,3 +456,44 @@ Driver v12 的 inspect 合同按 nextAction 分支：acquire/await_approval 转 
 正文产物仍由 `artifact create` 保存，文件名采用 `02-现状分析-短摘要.md`、`03-需求规格-短摘要.md`、`04-技术方案-短摘要.md`、`05-实施计划-短摘要.md`、`第01轮-评审结果-短摘要.md` 等形式。短摘要区分 Attempt 和修订，完整摘要仍在元数据中校验，历史版本不覆盖。自定义产物使用安全化的类型名称。旧版完整哈希文件名和已保存引用继续有效。
 
 Agent 应读取 Work Package 的 `artifactAuthoring.draftRoots`，把草稿写入授权目录，不根据 ID 猜测产物目录。
+
+
+### Agent 接入检查
+
+`wspec agent status --client <codex|claude|cursor|generic> [--target <目录>]`，也支持位置参数 client；只有 generic 支持并要求 target。不接受 install/setup 支持的 dry-run。
+
+结果包含 agent、target、status（missing/current/outdated/conflict）、expectedVersion、可选 installedVersion、installationSupported、nextSteps。复用安装器的文件归属及路径验证，不执行写入。current 指与 CLI 内置 Driver 匹配，不代表 npm 最新版本。hostLoaded 恒为 unknown：磁盘检查不能证明真实 Host 已发现或自动触发技能。missing/outdated/conflict 是检查结果，CLI 返回成功；非法参数仍返回公开错误。
+
+
+### Agent 一键安装
+
+`wspec agent setup --client <codex|claude|cursor|generic> [--target <目录>] [--dry-run]`，支持位置参数 client。返回 DriverSkillStatus 加 dryRun。setup 只处理 Driver 接入，项目配置仍由 `wspec init` 初始化；不修改项目 AGENTS.md，也不宣称当前 Host 已加载技能。
+
+setup 从最近的现有 canonical 祖先开始固定 inode，安全 helper 使用 dir_fd 与 O_NOFOLLOW 创建缺失目录，并在同一次调用中保持目录句柄完成 Skill 写入；已有目录复用原安装器创建或复验 Skill。预演不会创建目录或文件；旧版及自定义内容拒绝覆盖。失败后可能保留本次创建的空目录，不尝试递归删除。当前安装仅支持 macOS。
+
+Driver v15 在交付请求中使用明确的功能/修复/文档触发词；已有相关 Work Item 优先 inspect 恢复。咨询和只读评估不创建 Work Item。明确要求使用 WSSpecKit 记录只读评估时，选择 assessment；普通咨询和临时 review 直接处理。
+
+
+### 意图与日常操作
+
+start 增加可选 `--intent feature|fix|assessment|docs`，分别选择 feature-delivery、bugfix-delivery、assessment、documentation-delivery。intent 和 workflow 不可同时传入，不按关键词猜测用户意图。不传两者时保留现有项目默认行为。
+
+`wspec continue <workItemId> --actor <actor>` 返回原有有效执行包，或按 inspect 指引推进；等待审批等返回 `{action:"guidance",view}`。过期或他人 Claim 明确拒绝，过期需按明确恢复决定重新 acquire。`wspec status <workItemId>` 保持 inspect 语义，可能执行原有控制面恢复，不是磁盘级纯只读。
+
+`wspec complete <workItemId> --actor <actor> --package <JSON文件> --input <JSON文件>` 接受原始 WorkPackage、execute 对象或完整 CLI stdout envelope。领取结果和提交 JSON 保存在业务工作区外的临时目录，避免这些协议文件被只读检查视为业务修改。input 只含 outputs 和 result：outputs 为 `[{outputId,contentFile}]`，result 为 SubmitResult 除 artifacts 外字段。不得自行修改原包；contentFile 使用相对于原包工作目录的路径，必须位于 artifactAuthoring.draftRoots 授权目录内，不传绝对路径。自动复用系统提供的 requirement-source，可信 Red/Green 的 outputs 为空，由引擎运行并产证据。重复提交必须使用同一包及同样内容，跨任务、过期授权和冲突不被自动修复。
+
+### 项目指引
+
+`wspec agent project setup [--dry-run]` 在当前已初始化 Git 项目根 AGENTS.md 添加自包含受管区块；`wspec agent project remove [--dry-run]` 仅删除原封不动的已登记区块。其他内容与换行保留；自定义、损坏和未知区块拒绝覆盖。仅支持当前 macOS 安全写入器。
+
+替换已存在文件时，结果中的 recoveryFile 保留原 inode，避免编辑器仍持有旧文件句柄时丢失更新；确认编辑器不再写入旧文件后可人工清理。预演与幂等调用不产生副本。输入/输出预算都在写入前校验，失败不能留下超预算 AGENTS 文件。
+
+### 专用工作流与测试范围
+
+bugfix-delivery 将诊断与计划合成一份 tasks，quick 下没有独立 clarify/design/plan 步骤；保留可信 Red/Green、review-fix、commit 审批及按绑定执行的 issue/wiki 交付。风险提高时仍升级强度，governed 重新要求诊断审批和完整产物。
+
+assessment 只进行 intake、assess、close，保存 assessment-report、导航和归档，不物化业务 Worktree、不提交或发布。代码 Test Gate 豁免仅限该内置引用且所有步骤符合只读执行器白名单、无 Gate 的情况；可写步骤、命令执行或外部写入不适用。
+
+### Host 文件系统权限
+
+`WSSPEC_FILESYSTEM_PERMISSION_DENIED` 表示系统拒绝文件访问（EPERM/EACCES/EROFS），不反射底层绝对路径。WSSpecKit 需要在 Git 公共目录的 wsspec 下持久化任务，创建 Worktree 还需要 Git 元数据权限；只允许修改业务文件的 Host 沙箱可能不满足这些条件。请由用户或 Host 配置当前仓库所需权限，不自动关闭沙箱。已有任务先 status/inspect，未创建任务才重试 start，不通过重复创建或换 workflow 处理权限问题。

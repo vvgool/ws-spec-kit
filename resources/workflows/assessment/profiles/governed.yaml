@@ -1,0 +1,16 @@
+version: 1
+profile:
+  id: governed
+  workflow: assessment
+steps:
+  assess:
+    artifacts:
+      assessment-report: { required: true, contentLevel: complete }
+publishing: { issueRequired: false, knowledgeRequired: false, readBackRequired: false }
+audit:
+  level: complete
+  retention: extended
+  recordDecisions: true
+  recordApprovals: false
+  recordActors: true
+  recordPublishing: false

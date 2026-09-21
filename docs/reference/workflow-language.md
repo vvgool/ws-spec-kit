@@ -4,7 +4,7 @@ Workflow Language v1 描述可审计的交付步骤。它不执行任意脚本�
 
 ## 1. Package 结构
 
-每个 Workflow Package 包含 `manifest.yaml`、`workflow.yaml`、声明的 Profile 文件，以及可选的 `skills/`、`schemas/`、`templates/`。引用可为 `builtin://workflows/<id>` 或 `project://workflows/<id>`；`builtin://workflows/feature-delivery` 与 `builtin://workflows/documentation-delivery` 是当前两个内置 Package。
+每个 Workflow Package 包含 `manifest.yaml`、`workflow.yaml`、声明的 Profile 文件，以及可选的 `skills/`、`schemas/`、`templates/`。引用可为 `builtin://workflows/<id>` 或 `project://workflows/<id>`；当前内置 Package 为 `builtin://workflows/feature-delivery`（功能）、`builtin://workflows/bugfix-delivery`（修复）、`builtin://workflows/assessment`（留档只读评估）和 `builtin://workflows/documentation-delivery`（文档）。
 
 每个 Step 必须显式声明 `workspace`：`read-only` 表示仅读取调用方当前 checkout，`isolated-worktree` 表示首次执行该写入型 Step 时按需物化并复用隔离 Worktree。系统不会根据 Step 名称、Executor 或 Agent 意图推断模式，也不会把 `read-only` 静默升级为隔离 Worktree。
 

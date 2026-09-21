@@ -310,6 +310,13 @@ function engineTddStep(step: SnapshotStep, internal = false, hasCycle = false): 
     || (internal && hasCycle && step.id === "verify" && step.action === "quality.verify");
 }
 
+/** Artifact ownership is derived from the pinned workflow and execution state, never output names. */
+export function submissionArtifactsOwnedByEngine(state: ApplicationState, stepId: string, projection = state.projection): boolean {
+  const profile = state.snapshot.profiles[projection.profile.selected];
+  const target = executionTarget(profile, projection, stepId);
+  return engineTddStep(target.step, target.internal, projection.evidence[tddCycleEvidenceKey(state.item.workItemId)] !== undefined);
+}
+
 type TddFailureDisposition = "restart-red" | "restart-implementation" | "retry" | "fail-closed";
 
 export function tddFailureDisposition(input: { phase: "red" | "green"; internal: boolean }, code: TddVerificationCode): TddFailureDisposition {

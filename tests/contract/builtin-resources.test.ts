@@ -22,10 +22,10 @@ async function writeCatalogFixture(workflow: string, profile: string, catalogSuf
   return root;
 }
 
-test("内置目录提供两个完整中文工作流及其 Skill", async () => {
+test("内置目录提供完整中文工作流及其 Skill", async () => {
   const catalog = await loadBuiltinCatalog();
-  assert.deepEqual(catalog.workflows.map((item) => item.workflow.id).sort(), ["documentation-delivery", "feature-delivery"]);
-  assert.ok(catalog.skills.length >= 9);
+  assert.deepEqual(catalog.workflows.map((item) => item.workflow.id).sort(), ["assessment", "bugfix-delivery", "documentation-delivery", "feature-delivery"]);
+  assert.equal(catalog.skills.length, 11);
   const skillRefs = new Set(catalog.skills.map((skill) => `builtin://skills/${skill.id}`));
   for (const skill of catalog.skills) {
     assert.match(skill.description, /[\u4e00-\u9fff]/u);
@@ -63,7 +63,7 @@ test("功能交付绑定可信 Red/Green Gate，文档交付保持纯文档边�
   assert.deepEqual(docs.gates.find((gate) => gate.id === "docs.integrity")?.command, ["wspec", "gate", "docs.integrity"]);
 });
 
-test("六个内置 Profile 只使用正式 overlay 结构", async () => {
+test("内置 Profile 只使用正式 overlay 结构", async () => {
   const catalog = await loadBuiltinCatalog();
   for (const workflow of catalog.workflows) for (const profile of workflow.profiles) {
     assert.deepEqual(Object.keys(profile).sort(), ["audit", "profile", "publishing", "steps", "version"]);
@@ -75,13 +75,13 @@ test("六个内置 Profile 只使用正式 overlay 结构", async () => {
     assert.equal(typeof profile.audit.recordApprovals, "boolean");
     assert.equal(typeof profile.audit.recordActors, "boolean");
     assert.equal(typeof profile.audit.recordPublishing, "boolean");
-    if (profile.profile.id === "governed") {
+    if (profile.profile.id === "governed" && workflow.workflow.id !== "assessment") {
       assert.equal(profile.steps["review-fix"]?.independentReviewActor, true);
       assert.equal(profile.publishing.readBackRequired, true);
       assert.equal(profile.audit.retention, "extended");
     } else {
       assert.equal(profile.publishing.readBackRequired, false);
-      assert.equal(profile.audit.retention, "standard");
+      assert.equal(profile.audit.retention, profile.profile.id === "governed" ? "extended" : "standard");
     }
   }
 });
@@ -192,4 +192,19 @@ test("Builtin Catalog 拒绝 Profile 绑定其他 Workflow", async () => {
     loadBuiltinCatalog(root),
     (error: unknown) => error instanceof WorkflowPackageError && error.code === "WSSPEC_BUILTIN_PROFILE_WORKFLOW_MISMATCH",
   );
+});
+
+test("bugfix 的诊断与审查指引使用本流程实际提供的证据，不要求补造规格设计", async () => {
+  const catalog = await loadBuiltinCatalog();
+  const bugfix = catalog.workflows.find(item => item.workflow.id === "bugfix-delivery")!;
+  const diagnosis = bugfix.steps.find(step => step.id === "explore")!;
+  assert.deepEqual(diagnosis.inputs, ["requirement-source"]);
+  assert.deepEqual(diagnosis.outputs, ["tasks"]);
+  assert.deepEqual(diagnosis.skills?.map(skill => skill.ref), ["builtin://skills/bugfix-diagnosis"]);
+  const diagnosisText = await readFile(catalog.skills.find(skill => skill.id === "bugfix-diagnosis")!.entry, "utf8");
+  assert.match(diagnosisText, /specification.*design.*不是此流程的前置或输出/u);
+  assert.match(diagnosisText, /后续 write-tests \/ verify-red/u);
+  const reviewText = await readFile(catalog.skills.find(skill => skill.id === "code-review")!.entry, "utf8");
+  assert.match(reviewText, /bugfix-delivery 对照 `requirement-source`、诊断 `tasks`/u);
+  assert.match(reviewText, /未在当前 Workflow 产生的规格或设计文档不作为审查前置/u);
 });

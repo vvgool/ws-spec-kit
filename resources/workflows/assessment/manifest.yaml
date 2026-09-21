@@ -1,0 +1,8 @@
+version: 1
+id: assessment
+description: 只读评估工作流，记录事实、风险与建议，不修改或发布项目
+profiles: [quick, standard, governed]
+entry: workflow.yaml
+capabilities: [agent-execution, connector-execution, control-flow]
+externalSideEffects: []
+connectors: [requirement]

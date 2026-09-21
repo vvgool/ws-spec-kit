@@ -1,3 +1,4 @@
+import { isReadOnlyAssessmentPackage } from "../workflow-package/read-only.js";
 import { sha256 } from "../domain/digests.js";
 import { isRepositoryRelativePattern, matchesRepositoryPath } from "../domain/repository-path.js";
 import { ExpressionError, type ExpressionAst } from "./expressions/ast.js";
@@ -230,7 +231,7 @@ function validateProfileSafety(packageRef: string, workflowId: string, sourceSte
 }
 
 function validateBuiltinProfileMatrix(packageRef: string, workflowId: string, sourceSteps: readonly WorkflowStep[], profiles: ReadonlyMap<string, ProfileDefinition>): void {
-  if (packageRef !== `builtin://workflows/${workflowId}` || (workflowId !== "feature-delivery" && workflowId !== "documentation-delivery")) return;
+  if (packageRef !== `builtin://workflows/${workflowId}` || (workflowId !== "feature-delivery" && workflowId !== "documentation-delivery" && workflowId !== "bugfix-delivery")) return;
   const byId = new Map(sourceSteps.map((step) => [step.id, step]));
   const profile = (id: "quick" | "standard" | "governed"): ProfileDefinition => {
     const definition = profiles.get(id);
@@ -265,7 +266,14 @@ function validateBuiltinProfileMatrix(packageRef: string, workflowId: string, so
     if (effectiveIterations(step("review-fix"), profile(profileId)) !== 5) profileSafetyFailure(profileId, "/steps/review-fix/maxIterations", "Standard/Governed Builtin Profile 的 Review-Fix 上限必须为 5 轮。");
   }
 
-  if (workflowId === "feature-delivery") {
+  if (workflowId === "bugfix-delivery") {
+    for (const profileId of ["quick", "standard", "governed"] as const) {
+      for (const { id } of sourceSteps) requireEnabled(profileId, id);
+      requireArtifact(profileId, "explore", "tasks", profileId === "quick" ? "compact" : "complete");
+    }
+    requireApproval("standard", "explore");
+    requireApproval("governed", "explore");
+  } else if (workflowId === "feature-delivery") {
     if (effectiveEnabled(step("design"), profile("quick"))) profileSafetyFailure("quick", "/steps/design/enabled", "Feature Quick 必须跳过独立 design。");
     for (const id of sourceSteps.map(({ id }) => id).filter((id) => id !== "design")) requireEnabled("quick", id);
     for (const profileId of ["standard", "governed"] as const) for (const { id } of sourceSteps) requireEnabled(profileId, id);
@@ -759,8 +767,8 @@ export function compileWorkflow(pkg: WorkflowPackage, selected: CompileProfile, 
       validateManifestDeclarations(pkg, compiledSteps);
       manifestValidated = true;
     }
-    if (changePolicy.kind === "feature") validateFeatureSafety(pkg.workflow, pkg.ref, profileId, compiledSteps, byId);
-    else validateDocumentationSafety(pkg.workflow, compiledSteps, byId);
+    if (changePolicy.kind === "feature" && !isReadOnlyAssessmentPackage(pkg)) validateFeatureSafety(pkg.workflow, pkg.ref, profileId, compiledSteps, byId);
+    else if (changePolicy.kind === "documentation-only") validateDocumentationSafety(pkg.workflow, compiledSteps, byId);
     validateProfileGatePolicy(profileId, compiledSteps, gatePolicy);
     validateExpressions(pkg.workflow.steps, compiledSteps);
     validateArtifactDependencies(compiledSteps, "/steps");

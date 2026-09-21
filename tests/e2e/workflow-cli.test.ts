@@ -14,6 +14,8 @@ test("Workflow 命令列出、展示、校验内置 Package，并且拒绝不存
   const root = await createGitRepository();
   const listed = await runWorkflowCommand({ root, argv: ["list"] }) as { workflows: Array<{ ref: string }> };
   assert.deepEqual(listed.workflows.map(({ ref }) => ref), [
+    "builtin://workflows/assessment",
+    "builtin://workflows/bugfix-delivery",
     "builtin://workflows/documentation-delivery",
     "builtin://workflows/feature-delivery",
   ]);

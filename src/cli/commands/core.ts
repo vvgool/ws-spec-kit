@@ -1,4 +1,6 @@
 import { recoverApplication } from "../../application/recover.js";
+import { createAgentActions, type AgentCompleteInput } from "../../application/agent-actions.js";
+import { manageProjectGuidance } from "../../adapters/skills/project-guidance.js";
 import { revalidateRed } from "../../application/revalidate-red.js";
 import { retryTestGate } from "../../application/retry-test-gate.js";
 import { parse } from "yaml";
@@ -9,7 +11,7 @@ import { access, readFile, realpath } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { installDriverSkill, type DriverAgent } from "../../adapters/skills/install.js";
+import { inspectDriverSkill, installDriverSkill, setupDriverSkill, type DriverAgent } from "../../adapters/skills/install.js";
 import { CliAdapterError } from "../../adapters/cli/output.js";
 import { runWorkflowCommand } from "../../adapters/cli/workflow.js";
 import { createApplication } from "../../application/application.js";
@@ -17,7 +19,7 @@ import { createApplicationArtifact } from "../../application/artifact.js";
 import { doctorConnectors } from "../../application/doctor-connectors.js";
 import type { ArtifactCreateInput, DecisionInput, StartInput, SubmitInput } from "../../protocol/application.js";
 import type { SkillProvider } from "../../registry/skills/types.js";
-import { initRepository } from "../../storage/repository.js";
+import { initRepository, loadRepository } from "../../storage/repository.js";
 import { loadBuiltinCatalog } from "../../resources/catalog.js";
 import type { ConnectorExecutable } from "../../registry/connectors/types.js";
 
@@ -65,7 +67,7 @@ function application(home: string, actor: string | undefined, selectedProvider: 
 async function start(root: string, argv: string[], home: string): Promise<unknown> {
   const args = parseArguments(argv, 0, [
     "--prompt", "--file", "--source-provider", "--source-id", "--source-url",
-    "--workflow", "--profile", "--actor", "--provider",
+    "--workflow", "--intent", "--profile", "--actor", "--provider",
   ]);
   const prompt = args.values["--prompt"];
   const file = args.values["--file"];
@@ -87,7 +89,12 @@ async function start(root: string, argv: string[], home: string): Promise<unknow
       );
     }
   }
-  const workflowRef = args.values["--workflow"];
+  const intent = args.values["--intent"];
+  const workflows: Record<string, string> = { feature: "feature-delivery", fix: "bugfix-delivery", assessment: "assessment", docs: "documentation-delivery" };
+  if (intent !== undefined && (!Object.hasOwn(workflows, intent) || args.values["--workflow"] !== undefined)) {
+    throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "--intent 支持 feature、fix、assessment、docs，不能同时提供 --workflow。");
+  }
+  const workflowRef = intent === undefined ? args.values["--workflow"] : "builtin://workflows/" + workflows[intent];
   const profile = args.values["--profile"];
   if (profile !== undefined && !["auto", "quick", "standard", "governed"].includes(profile)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "Profile 必须是 auto、quick、standard 或 governed。");
   const input: StartInput = {
@@ -157,14 +164,47 @@ async function inspect(root: string, argv: string[], home: string): Promise<unkn
   return application(home, undefined, "generic").inspect({ root, workItemId: args.positional[0]! as `WSS-${string}` });
 }
 
-async function agent(argv: string[], home: string): Promise<unknown> {
-  if (argv[0] !== "install") throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知 Agent 命令：${argv[0] ?? ""}`);
+async function readObject(root: string, filename: string): Promise<Record<string, unknown>> {
+  try {
+    const value: unknown = JSON.parse(await readFile(path.resolve(root, filename), "utf8"));
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  } catch { /* Report an actionable CLI input error. */ }
+  throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "输入文件必须是可读取的 JSON 对象。");
+}
+
+async function agentAction(root: string, argv: string[], home: string, command: "continue" | "complete"): Promise<unknown> {
+  const args = parseArguments(argv, 1, command === "continue" ? ["--actor"] : ["--actor", "--package", "--input"]);
+  const actor = required(args.values["--actor"], "--actor");
+  const actions = createAgentActions({ home, provider: "generic", terminal: process.stdin,
+    workflowTrust: { interactive: process.stdin.isTTY === true, actor } });
+  const binding = { root, workItemId: args.positional[0]! as AgentCompleteInput["workItemId"], actor };
+  if (command === "continue") return actions.continue(binding);
+  const captured = await readObject(root, required(args.values["--package"], "--package"));
+  const envelope = captured.result !== null && typeof captured.result === "object" ? captured.result as Record<string, unknown> : captured;
+  const wp = envelope.workPackage ?? envelope;
+  const input = await readObject(root, required(args.values["--input"], "--input"));
+  if (Object.keys(input).some(key => key !== "outputs" && key !== "result")) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "complete 输入只接受 outputs 与 result。");
+  return actions.complete({ ...binding, workPackage: wp as AgentCompleteInput["workPackage"],
+    outputs: input.outputs as AgentCompleteInput["outputs"], result: input.result as AgentCompleteInput["result"] });
+}
+
+async function agent(argv: string[], home: string, root: string): Promise<unknown> {
+  if (argv[0] === "project") {
+    const operation = argv[1];
+    if (operation !== "setup" && operation !== "remove") throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "agent project 支持 setup 或 remove。");
+    const args = parseArguments(argv.slice(2), 0, [], ["--dry-run"]);
+    const identity = await loadRepository(root);
+    return manageProjectGuidance({ root: identity.repositoryRoot, operation, dryRun: args.flags.has("--dry-run") });
+  }
+  if (argv[0] !== "install" && argv[0] !== "status" && argv[0] !== "setup") throw new CliAdapterError("WSSPEC_COMMAND_UNKNOWN", `未知 Agent 命令：${argv[0] ?? ""}`);
   const usesClientOption = argv.includes("--client");
-  const args = parseArguments(argv.slice(1), usesClientOption ? 0 : 1, ["--client", "--target"], ["--dry-run"]);
+  const args = parseArguments(argv.slice(1), usesClientOption ? 0 : 1, ["--client", "--target"], argv[0] !== "status" ? ["--dry-run"] : []);
   const name = usesClientOption ? required(args.values["--client"], "--client") : args.positional[0]!;
   if (!(["codex", "claude", "cursor", "generic"] as string[]).includes(name)) throw new CliAdapterError("WSSPEC_ARGUMENT_INVALID", "Agent 必须是 codex、claude、cursor 或 generic。");
   const target = args.values["--target"];
-  return installDriverSkill({ agent: name as DriverAgent, home, ...(target === undefined ? {} : { target }), dryRun: args.flags.has("--dry-run") });
+  if (argv[0] === "status") return inspectDriverSkill({ agent: name as DriverAgent, home, ...(target === undefined ? {} : { target }) });
+  const install = argv[0] === "setup" ? setupDriverSkill : installDriverSkill;
+  return install({ agent: name as DriverAgent, home, ...(target === undefined ? {} : { target }), dryRun: args.flags.has("--dry-run") });
 }
 
 async function locateExecutable(executable: ConnectorExecutable): Promise<string | undefined> {
@@ -231,8 +271,11 @@ const routes: Readonly<Record<string, (cwd: string, args: string[], home: string
   submit,
   decide,
   inspect,
+  status: inspect,
+  continue: (root, args, home) => agentAction(root, args, home, "continue"),
+  complete: (root, args, home) => agentAction(root, args, home, "complete"),
   workflow: (cwd, args, home) => runWorkflowCommand({ root: cwd, argv: args, home, interactive: process.stdin.isTTY === true }),
-  agent: async (_cwd, args, home) => agent(args, home),
+  agent: async (cwd, args, home) => agent(args, home, cwd),
   doctor: async (_cwd, args, home) => doctor(args, home),
 });
 

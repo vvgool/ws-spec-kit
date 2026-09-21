@@ -147,6 +147,8 @@ test("公开 CLI 串联 Workflow 自定义与四类 Skill Resolver，并记录 G
   const listed = await cli<{ workflows: Array<{ ref: string }> }>(current.root, ["workflow", "list"], current.home);
   assert.equal(listed.process.code, 0);
   assert.deepEqual(listed.envelope.result?.workflows.map(({ ref }) => ref), [
+    "builtin://workflows/assessment",
+    "builtin://workflows/bugfix-delivery",
     "builtin://workflows/documentation-delivery",
     "builtin://workflows/feature-delivery",
   ]);

@@ -3,11 +3,17 @@ export const applicationInternalError = {
   message: "发生未预期的内部错误。",
 } as const;
 
+export const applicationFilesystemPermissionError = {
+  code: "WSSPEC_FILESYSTEM_PERMISSION_DENIED",
+  message: "文件系统访问被权限或只读限制拒绝。请检查目标目录与 Host 沙箱授权；任务控制面需要写入 Git 公共目录下的 wsspec。保留现有任务状态，授权后先检查状态再重试，不要反复创建任务。",
+} as const;
+
 export const applicationPublicErrorGroups = {
   internal: [applicationInternalError.code],
   dispatch: ["WSSPEC_COMMAND_UNKNOWN"],
   arguments: ["WSSPEC_ARGUMENT_INVALID", "WSSPEC_ARGUMENT_REQUIRED"],
   repository: [
+    applicationFilesystemPermissionError.code,
     "WSSPEC_GIT_REPOSITORY_REQUIRED", "WSSPEC_REPOSITORY_ID_INVALID", "WSSPEC_REPOSITORY_ID_MISMATCH", "WSSPEC_REPOSITORY_NOT_INITIALIZED",
   ],
   schema: [
@@ -183,8 +189,8 @@ export const applicationFixedPublicErrors = {
 
 export const publicCliRoutes = [
   "recover", "revalidate-red", "retry-test-gate", "config suggest", "config migrate", "init", "start", "acquire", "artifact create", "submit", "decide", "inspect",
-  "workflow list", "workflow show", "workflow eject", "workflow validate", "workflow use", "agent install",
-  "doctor connectors",
+  "workflow list", "workflow show", "workflow eject", "workflow validate", "workflow use", "agent install", "agent status", "agent setup",
+  "doctor connectors", "status", "continue", "complete", "agent project",
 ] as const;
 export type PublicCliRoute = typeof publicCliRoutes[number];
 
@@ -222,12 +228,18 @@ export const applicationPublicErrorGroupNamesByRoute = {
     "approval", "workflowPackage", "workflowTrust", "externalAction",
   ],
   inspect: ["internal", "arguments", "repository", "schema", "snapshot", "workItem", "externalAction", "tdd"],
+  status: ["internal", "arguments", "repository", "schema", "snapshot", "workItem", "externalAction", "tdd"],
+  continue: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "expression", "acquire", "close", "tdd", "externalAction"],
+  complete: ["internal", "arguments", ...applicationGroups, "skill", "projectConfig", "executor", "source", "acquire", "artifact", "submit", "approval", "tdd", "externalAction", "gitCommit"],
+  "agent project": ["internal", "arguments", "repository", "agentInstall"],
   "workflow list": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
   "workflow show": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage"],
   "workflow eject": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider", "workflowPackage", "workflowEject"],
   "workflow validate": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider", "tdd"],
   "workflow use": ["internal", "arguments", ...workflowValidationGroups, "connectorRegistry", "connectorProvider", "workflowTrust", "tdd"],
   "agent install": ["internal", "arguments", "agentInstall"],
+  "agent status": ["internal", "arguments", "agentInstall"],
+  "agent setup": ["internal", "arguments", "agentInstall"],
   "doctor connectors": ["internal", "arguments", "builtin", "connectorRegistry", "connectorProvider"],
 } as const satisfies Readonly<Record<PublicCliErrorRoute, readonly ApplicationPublicErrorGroup[]>>;
 

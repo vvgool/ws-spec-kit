@@ -2,6 +2,8 @@ version: 1
 workflows:
   - feature-delivery
   - documentation-delivery
+  - assessment
+  - bugfix-delivery
 connectors:
   - git-native
   - github-cli
@@ -35,3 +37,9 @@ skills:
   - id: documentation-review
     version: 1.0.0
     description: 审查文档准确性与完整性，不改文件
+  - id: assessment
+    version: 1.0.0
+    description: 只读评估目标、证据与风险，给出可执行建议而不修改项目
+  - id: bugfix-diagnosis
+    version: 1.0.0
+    description: 只读诊断故障并合成修复任务，明确预期行为、根因与回归验证

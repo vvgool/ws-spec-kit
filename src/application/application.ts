@@ -15,6 +15,8 @@ import type { ExternalActionExecutor } from "./external-action.js";
 
 export interface ApplicationDependencies {
   provider?: SkillProvider;
+  /** High-level continue must not renew or replace a previously granted lease. */
+  preserveActiveClaim?: boolean;
   home?: string;
   terminal?: { isTTY?: boolean };
   now?: () => Date;
@@ -29,6 +31,7 @@ export function createApplication(input: ApplicationDependencies = {}): WSSpecAp
   const connectorRuntime = input.connectorRuntime ?? createDefaultBuiltinConnectorRuntime(home);
   const dependencies = {
     provider: input.provider ?? "generic",
+    ...(input.preserveActiveClaim === undefined ? {} : { preserveActiveClaim: input.preserveActiveClaim }),
     home,
     terminal: input.terminal ?? process.stdin,
     now: input.now ?? (() => new Date()),

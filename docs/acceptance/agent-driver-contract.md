@@ -9,35 +9,30 @@ Claude 或 Cursor Host 已发现、触发或执行该 Skill。真实 Host 的自
 
 ## 文件安装
 
-当前安全安装只在 macOS 验证，并依赖系统 `/usr/bin/python3`。先创建最终目标目录，再执行公开命令：
+当前安全安装只在 macOS 验证，并依赖系统 `/usr/bin/python3`。使用 setup 创建缺失目录并安装（install 仍要求预创建目录）：
 
 ```sh
-mkdir -p ~/.agents/skills/wsspeckit-driver
-wspec agent install --client codex
-mkdir -p ~/.claude/skills/wsspeckit-driver
-wspec agent install --client claude
-mkdir -p ~/.cursor/skills/wsspeckit-driver
-wspec agent install --client cursor
-mkdir -p <安装目录>
-wspec agent install --client generic --target <安装目录>
+wspec agent setup --client codex
+wspec agent setup --client claude
+wspec agent setup --client cursor
+wspec agent setup --client generic --target <安装目录>
 ```
 
 Codex、Claude、Cursor 分别安装到宿主约定的 `~/.agents/skills/wsspeckit-driver/SKILL.md`、
 `~/.claude/skills/wsspeckit-driver/SKILL.md` 和 `~/.cursor/skills/wsspeckit-driver/SKILL.md`。
-Generic 没有可推断的宿主目录，必须显式提供 `--target`。四类目标目录都必须预先存在，安装器不会创建
-任何祖先或目标目录。安装器支持 `--dry-run`；同 v12 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
+Generic 没有可推断的宿主目录，必须显式提供 `--target`。install 要求四类目标目录预先存在；setup 在固定的现有祖先目录下逐段创建缺失目录，不跟随链接。安装器支持 `--dry-run`；同 v15 canonical 摘要只读复验并保持幂等，历史版本、未知或被修改的
 同名内容均拒绝原地覆盖，必须由用户人工迁移。四类安装只生成中文说明的 `SKILL.md`，不生成 `.mdc`
 或后台 Runner。
 
 安全 helper 固定使用 canonical、root-owned 且不可 group/world write 的 `/usr/bin/python3 -I -S`；请求只从
 stdin 接收结构化 JSON，stdout 仅允许有界固定 JSON，不继承 HOME、PYTHONPATH 或用户凭据，并受超时和
 输出上限约束。helper 从根目录开始以 `dir_fd`、`O_DIRECTORY`、`O_NOFOLLOW` 逐段打开预创建目标并核对
-最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v12 只读复验，不执行 pathname `mkdir` 或替换。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
+最终 inode；新文件只用 `O_CREAT | O_EXCL | O_NOFOLLOW` 写入、fsync 和关闭，现有 v15 只读复验，不替换已有文件。setup 的目录创建使用固定目录句柄的 `mkdir(..., dir_fd=...)`，失败可能留下空目录。祖先/最终 symlink、hardlink、非普通文件和 parent-swap race 都 fail
 closed，且对抗测试验证外部目录无新增或修改。
 
 ## 模拟协议循环
 
-Driver v12 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
+Driver v15 正文同时提供人可执行的中文 Host 指南和 fenced JSON `wsspeckit-driver-contract`。结构化合同声明
 功能/文档 Workflow 选择、`new`/`recovery` 入口、各命令的 argv 模板、输出 capture、action 分支与终点。
 验收解释器只从安装后的 JSON 合同派生命令，不在测试代码中维护第二套协议。
 
@@ -62,9 +57,9 @@ claim 下一份 Work Package，Host 必须直接执行并继续 submit；若同�
 每条 Fixture 都验证 fresh-process recovery、至少两个 execute grants 和至少两次 submit，并到达明确 blocked
 终点；功能 Fixture 由本地可信门禁边界停止，文档 Fixture 在不执行真实编辑的边界显式提交 failed 后停止。
 
-功能任务固定选择 `builtin://workflows/feature-delivery`，纯文档或无代码变更任务固定选择
+功能任务固定选择 `builtin://workflows/feature-delivery`，新增或修改文档且不涉及代码的交付任务固定选择
 `builtin://workflows/documentation-delivery`。项目默认 Workflow 在创建后发生变化时，已有 Work Item 仍
-保持创建时的 `workflowRef`，Driver 不得静默切换。
+保持创建时的 `workflowRef`，Driver 不得静默切换。咨询和只读评估不创建 Work Item。
 
 Driver 和 WSSpecKit Runtime 不调用模型 API，不缓存或管理 Agent 对话、Token、记忆或隐藏推理。模型上下文
 由真实 Agent Host 自主管理。Work Package 和其他协议 JSON 只携带 Artifact 引用，不内嵌 Artifact 正文；
@@ -96,4 +91,4 @@ inode、mode、uid、size 与组合 identity，verifier 在结束后逐项复验
 
 过期路由验收从实际安装的 Driver JSON 合同读取 `result.problems.0.code`，解释器支持数组下标。真实 CLI 在未物化工作区触发审批过期后，必须按合同执行 `decide -> inspect -> acquire -> artifact -> submit -> decide`，验证新 Attempt、新审批与重新确认后进入 design；其他 blocked 仍停止。此项是本地合同执行证据，不替代真实 Host 验收。
 
-Driver v12 的恢复路由合同覆盖 revalidate-red/retry-test-gate 到 recover，以及 recover 后 acquire；recover 后仍要求恢复、reconcile 或 blocked 时停止，防止自动重试循环。审批建议通过 acquire 获取完整审批对象，不自动批准。
+Driver v15 的恢复路由合同覆盖 revalidate-red/retry-test-gate 到 recover，以及 recover 后 acquire；recover 后仍要求恢复、reconcile 或 blocked 时停止，防止自动重试循环。审批建议通过 acquire 获取完整审批对象，不自动批准。

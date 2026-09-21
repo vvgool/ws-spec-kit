@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createDriverSkillInstaller, installDriverSkill, secureInstallDriverFile } from "../../src/adapters/skills/install.js";
+import { setupDriverSkill, createDriverSkillSetup, inspectDriverSkill, createDriverSkillInstaller, installDriverSkill, secureInstallDriverFile } from "../../src/adapters/skills/install.js";
 
 const historicalDriverDigests = {
   initial: {
@@ -110,7 +110,7 @@ test("安装器只幂等复验当前 canonical Driver", async () => {
   const first = await readFile(ownedTarget, "utf8");
   await installDriverSkill({ agent: "codex", home: ownedHome, dryRun: false });
   assert.equal(await readFile(ownedTarget, "utf8"), first);
-  assert.match(first, /wsspeckit-driver-version: 13/);
+  assert.match(first, /wsspeckit-driver-version: 15/);
 });
 
 test("安装器拒绝原地升级历史 canonical Driver", async (t) => {
@@ -278,4 +278,164 @@ test("安全 helper 拒绝在 JS 预检后新增的 hardlink", async () => {
       && "code" in error
       && (error as Error & { code: string }).code === "WSSPEC_SKILL_INSTALL_CONFLICT",
   );
+});
+
+async function driverStatus(agent: DriverAgent, home: string, target?: string) {
+  return inspectDriverSkill({agent, home, ...(target === undefined ? {} : {target})});
+}
+
+test("Driver status 缺失不创建目录，且不宣称 Host 已加载", async () => {
+  const home = await temporaryHome();
+  const result = await driverStatus("codex", home);
+  assert.equal(result.status, "missing");
+  assert.equal(result.hostLoaded, "unknown");
+  assert.ok(result.nextSteps.some(step => step.includes("agent setup")));
+  assert.deepEqual(await readdir(home), []);
+});
+
+test("Driver status 区分当前安装、历史安装和自定义内容并保持只读", async () => {
+  const home = await temporaryHome();
+  await install("codex", home);
+  const filename = path.join(targetFor("codex", home), "SKILL.md");
+  const current = await driverStatus("codex", home);
+  assert.equal(current.status, "current");
+  assert.equal(current.installedVersion, 15);
+  assert.equal(current.expectedVersion, 15);
+  assert.equal(current.hostLoaded, "unknown");
+  const old = historicalDriver("codex", "initial");
+  await writeFile(filename, old);
+  assert.equal((await driverStatus("codex", home)).status, "outdated");
+  assert.equal(await readFile(filename, "utf8"), old);
+  await writeFile(filename, "用户自定义 Skill");
+  assert.equal((await driverStatus("codex", home)).status, "conflict");
+  assert.equal(await readFile(filename, "utf8"), "用户自定义 Skill");
+});
+
+test("Driver status 不跟随链接目标或将非 generic target 当作有效参数", async () => {
+  const home = await temporaryHome();
+  const outside = await temporaryHome();
+  await symlink(outside, path.join(home, ".agents"));
+  assert.equal((await driverStatus("codex", home)).status, "conflict");
+  assert.deepEqual(await readdir(outside), []);
+  await assert.rejects(driverStatus("codex", home, outside), {code: "WSSPEC_ARGUMENT_INVALID"});
+  await assert.rejects(driverStatus("generic", home), {code: "WSSPEC_ARGUMENT_REQUIRED"});
+});
+
+test("Driver status 区分空目录与不安全 Skill 文件，不改变检查对象", async () => {
+  const home = await temporaryHome();
+  const target = targetFor("codex", home);
+  await mkdir(target, {recursive: true});
+  assert.equal((await driverStatus("codex", home)).status, "missing");
+  const filename = path.join(target, "SKILL.md");
+  const external = path.join(home, "custom.md");
+  await writeFile(external, "custom");
+  await symlink(external, filename);
+  assert.equal((await driverStatus("codex", home)).status, "conflict");
+  assert.equal(await readFile(external, "utf8"), "custom");
+  await unlink(filename);
+  await writeFile(filename, "x".repeat(1_048_577));
+  assert.equal((await driverStatus("codex", home)).status, "conflict");
+  assert.equal((await readFile(filename)).length, 1_048_577);
+});
+
+async function setupDriver(input: { agent: DriverAgent; home: string; target?: string; dryRun?: boolean }) {
+  return setupDriverSkill(input);
+}
+
+test("Driver setup 从空 HOME 安装并幂等，dry-run 不创建目录", async () => {
+  const home = await temporaryHome();
+  assert.equal((await setupDriver({agent: "codex", home, dryRun: true})).status, "missing");
+  assert.deepEqual(await readdir(home), []);
+  const result = await setupDriver({agent: "codex", home});
+  assert.equal(result.status, "current");
+  assert.equal(result.hostLoaded, "unknown");
+  const filename = path.join(targetFor("codex", home), "SKILL.md");
+  const before = await readFile(filename, "utf8");
+  assert.equal((await setupDriver({agent: "codex", home})).status, "current");
+  assert.equal(await readFile(filename, "utf8"), before);
+});
+
+test("Driver setup 支持四类客户端并保留冲突文件与历史版本", async () => {
+  for (const agent of ["codex", "claude", "cursor", "generic"] as const) {
+    const home = await temporaryHome();
+    const target = targetFor(agent, home);
+    const input = {agent, home, ...(agent === "generic" ? {target} : {})};
+    assert.equal((await setupDriver(input)).status, "current");
+    const filename = path.join(target, "SKILL.md");
+    for (const content of ["custom", historicalDriver(agent, "initial")]) {
+      await writeFile(filename, content);
+      await assert.rejects(setupDriver(input), {code: "WSSPEC_SKILL_INSTALL_CONFLICT"});
+      assert.equal(await readFile(filename, "utf8"), content);
+    }
+  }
+});
+
+test("Driver setup 不跟随缺失目标的祖先链接", async () => {
+  const home = await temporaryHome();
+  const outside = await temporaryHome();
+  await symlink(outside, path.join(home, ".agents"));
+  await assert.rejects(setupDriver({agent: "codex", home}), {code: "WSSPEC_SKILL_INSTALL_CONFLICT"});
+  assert.deepEqual(await readdir(outside), []);
+});
+
+test("Driver setup 用 pinned authority 拒绝预检后的祖先置换", async () => {
+  const home = await temporaryHome();
+  const parent = path.join(home, ".agents");
+  const moved = path.join(home, "moved");
+  const outside = await temporaryHome();
+  await mkdir(parent);
+  const setup = createDriverSkillSetup({secureInstall: async request => {
+    assert.equal(request.operation, "setup");
+    await rename(parent, moved);
+    await symlink(outside, parent);
+    await secureInstallDriverFile(request);
+  }});
+  await assert.rejects(setup({agent: "codex", home}), {code: "WSSPEC_SKILL_INSTALL_CONFLICT"});
+  assert.deepEqual(await readdir(outside), []);
+  assert.deepEqual(await readdir(moved), []);
+});
+
+test("Driver v15 明确触发和只读边界，仍识别 v13 为历史版本", async () => {
+  const home = await temporaryHome();
+  await setupDriver({agent: "codex", home});
+  const filename = path.join(targetFor("codex", home), "SKILL.md");
+  const current = await readFile(filename, "utf8");
+  assert.match(current, /wsspeckit-driver-version: 15/);
+  const old = await readFile(new URL("../fixtures/drivers/codex-v13.md", import.meta.url), "utf8");
+  await writeFile(filename, old);
+  const status = await driverStatus("codex", home);
+  assert.equal(status.status, "outdated");
+  assert.equal(status.installedVersion, 13);
+  await assert.rejects(setupDriver({agent: "codex", home}), {code: "WSSPEC_SKILL_INSTALL_CONFLICT"});
+  assert.equal(await readFile(filename, "utf8"), old);
+});
+
+test("Driver setup 不在 helper 完成后接受新建的普通替换目录", async () => {
+  const home = await temporaryHome();
+  const parent = path.join(home, ".agents");
+  await mkdir(parent);
+  let replaced = false;
+  const setup = createDriverSkillSetup({secureInstall: async request => {
+    await secureInstallDriverFile(request);
+    if (!replaced) {
+      replaced = true;
+      await rename(parent, path.join(home, "original"));
+      await mkdir(targetFor("codex", home), {recursive: true});
+    }
+  }});
+  await assert.rejects(setup({agent: "codex", home}), {code: "WSSPEC_SKILL_INSTALL_CONFLICT"});
+  assert.deepEqual(await readdir(targetFor("codex", home)), []);
+});
+
+test("Driver 提供可直接提交的 complete 输入模板，无需逐个猜必填字段", async () => {
+  const home = await temporaryHome();
+  await install("codex", home);
+  const content = await readFile(path.join(targetFor("codex", home), "SKILL.md"), "utf8");
+  const sample = content.match(/输入模板：`([^`]+)`/u)?.[1];
+  assert.ok(sample, "Driver must include a complete input example");
+  const input = JSON.parse(sample) as { outputs: unknown[]; result: Record<string, unknown> };
+  assert.deepEqual(input.outputs, []);
+  const { validate } = await import("../../src/schemas/index.js");
+  assert.doesNotThrow(() => validate("builtin.submit-result.v1", { ...input.result, artifacts: [] }));
+  assert.match(content, /不能靠逐条补字段/u);
 });

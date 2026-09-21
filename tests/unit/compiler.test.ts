@@ -601,3 +601,62 @@ test("documentation glob narrowing shares zero-directory globstar semantics", ()
 
   assert.deepEqual(resolved.allowedPaths, ["docs/readme.md"]);
 });
+
+test("bugfix quick merges diagnosis and planning while retaining red/green, review and commit approval", async () => {
+  const {pkg, profile} = await fixture("bugfix-delivery", "quick");
+  const compiled = compileWorkflow(pkg, profile);
+  assert.deepEqual(compiled.order.slice(0, 4), ["intake", "explore", "write-tests", "verify-red"]);
+  assert.equal(compiled.steps.some(step => ["clarify", "design", "plan"].includes(step.id)), false);
+  assert.equal(compiled.steps.find(step => step.id === "explore")?.workspace, "read-only");
+  for (const id of ["write-tests", "verify-red", "implement", "verify-green", "review-fix", "commit"]) {
+    assert.equal(compiled.steps.find(step => step.id === id)?.enabled, true, id);
+  }
+  assert.equal(compiled.steps.find(step => step.id === "commit")?.authorizationRequired, true);
+  assert.equal(compiled.steps.find(step => step.id === "verify-red")?.expectedOutcome, "test-failure");
+  assert.equal(compiled.steps.find(step => step.id === "verify-green")?.expectedOutcome, "success");
+});
+
+test("bugfix stronger profiles require diagnosis approval and retain external publishing policy", async () => {
+  for (const id of ["standard", "governed"]) {
+    const {pkg, profile} = await fixture("bugfix-delivery", id);
+    const compiled = compileWorkflow(pkg, profile);
+    assert.equal(compiled.steps.find(step => step.id === "explore")?.approval, true);
+    assert.equal(compiled.steps.find(step => step.id === "update-wiki")?.securityClass, "external-write");
+    if (id === "governed") {
+      assert.equal(compiled.steps.find(step => step.id === "review-fix")?.independentReviewActor, true);
+    }
+  }
+});
+
+test("assessment ignores code Test Gates only while its entire workflow is read-only", async () => {
+  const {projectConfiguration} = await import("../../src/application/start.js");
+  const {defaultProjectConfig} = await import("../../src/storage/repository.js");
+  const {pkg, profile} = await fixture("assessment", "governed");
+  const config = projectConfiguration(defaultProjectConfig(), pkg);
+  assert.deepEqual(config.gatePolicy, {requiredGateIds: [], configuredGateIds: []});
+  assert.doesNotThrow(() => compileWorkflow(pkg, profile, config.gatePolicy));
+  step(pkg, "assess").workspace = "isolated-worktree";
+  assert.deepEqual(projectConfiguration(defaultProjectConfig(), pkg).gatePolicy.requiredGateIds, ["test"]);
+});
+
+test("bugfix profiles cannot turn off mandatory regression or diagnosis steps", async () => {
+  const {pkg, profile: selected} = await fixture("bugfix-delivery", "quick");
+  for (const current of pkg.profiles.values()) current.steps.commit = { ...current.steps.commit, enabled: false };
+  expectCompileError(() => compileWorkflow(pkg, selected), "WSSPEC_COMPILE_PROFILE_SAFETY_DOWNGRADE");
+});
+
+test("read-only assessment gate exemption excludes mutable and non-builtin contracts", async () => {
+  const {isReadOnlyAssessmentPackage} = await import("../../src/workflow-package/read-only.js");
+  const {pkg} = await fixture("assessment", "quick");
+  assert.equal(isReadOnlyAssessmentPackage(pkg), true);
+  for (const mutate of [
+    (copy: WorkflowPackage) => { copy.ref = "project://workflows/assessment"; },
+    (copy: WorkflowPackage) => { step(copy, "assess").workspace = "isolated-worktree"; },
+    (copy: WorkflowPackage) => { step(copy, "assess").uses = "command.execute"; step(copy, "assess").action = "quality.test"; },
+    (copy: WorkflowPackage) => { step(copy, "assess").uses = "connector.execute"; step(copy, "assess").action = "git.commit"; },
+  ]) {
+    const copy = clonePackage(pkg);
+    mutate(copy);
+    assert.equal(isReadOnlyAssessmentPackage(copy), false);
+  }
+});

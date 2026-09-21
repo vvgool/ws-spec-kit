@@ -1,3 +1,4 @@
+import { isReadOnlyAssessmentPackage } from "../workflow-package/read-only.js";
 import { redactText } from "../adapters/process/redaction.js";
 import { readableWorkItemDirectory, workItemPrefix } from "../domain/work-item-paths.js";
 import { readFile } from "node:fs/promises";
@@ -83,7 +84,9 @@ export function projectConfiguration(raw: unknown, pkg: WorkflowPackage): Projec
   const defaultGate = pkg.workflow.workflow.id === "documentation-delivery" ? "docs.integrity" : "test";
   let gatePolicy: ProjectGatePolicy;
   const knownGateIds = new Set(pkg.workflow.gates.map(({ id }) => id));
-  if (gates === undefined) {
+  if (isReadOnlyAssessmentPackage(pkg)) {
+    gatePolicy = { requiredGateIds: [], configuredGateIds: [] };
+  } else if (gates === undefined) {
     gatePolicy = { requiredGateIds: [defaultGate], configuredGateIds: [defaultGate] };
   } else {
     const configuredGateIds = Object.keys(gates).filter((id) => knownGateIds.has(id)).sort();

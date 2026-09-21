@@ -17,6 +17,6 @@ test("各宿主安装中文 Driver，显式传递自身 Provider 且只使用 Ap
     assert.match(content, new RegExp(`--provider ${agent}`));
     assert.match(content, /inspect -> acquire/);
     assert.match(content, /submit/);
-    assert.doesNotMatch(content, /wspec next|wspec claim|wspec context|wspec complete/);
+    assert.doesNotMatch(content, /wspec next|wspec claim|wspec context/);
   }
 });

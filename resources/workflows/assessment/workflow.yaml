@@ -1,0 +1,29 @@
+version: 1
+workflow:
+  id: assessment
+  version: 1
+inputs:
+  requirement:
+    accepts: [user.prompt, local.file, github.issue, gitlab.issue, feishu.document]
+steps:
+  - id: intake
+    uses: connector.execute
+    workspace: read-only
+    action: requirement.capture
+    inputs: [requirement-source]
+    outputs: [requirement-source]
+  - id: assess
+    uses: agent.execute
+    workspace: read-only
+    needs: [intake]
+    inputs: [requirement-source]
+    skills:
+      - ref: builtin://skills/assessment
+        required: true
+    outputs: [assessment-report]
+  - id: close
+    uses: control.close
+    workspace: read-only
+    needs: [assess]
+    inputs: [assessment-report]
+gates: []
