@@ -10,6 +10,14 @@ interface PackageMetadata {
   peerDependencies?: Record<string, string>;
 }
 
+export interface RunnerPathRelocation { from: string; to: string }
+
+export function relocateRunnerPath(value: string, relocations: readonly RunnerPathRelocation[]): string {
+  const match = [...relocations].sort((a, b) => b.from.length - a.from.length)
+    .find(candidate => value === candidate.from || value.startsWith(`${candidate.from}${path.sep}`));
+  return match === undefined ? value : match.to + value.slice(match.from.length);
+}
+
 // Node resolves package directories before applying exports conditions. Read manifests
 // directly so packages that hide package.json in exports are still included.
 async function resolvePackage(from: string, name: string): Promise<string | undefined> {
@@ -24,7 +32,7 @@ async function resolvePackage(from: string, name: string): Promise<string | unde
   return undefined;
 }
 
-export async function runnerInstallationDigest(entry: string, relocation?: { from: string; to: string }): Promise<string> {
+export async function runnerInstallationDigest(entry: string, relocations?: readonly RunnerPathRelocation[]): Promise<string> {
   const packages = new Map<string, { files: Array<[string, string]>; dependencies: Array<[string, string | null]> }>();
   async function visit(root: string): Promise<void> {
     if (packages.has(root)) return;
@@ -55,9 +63,8 @@ export async function runnerInstallationDigest(entry: string, relocation?: { fro
     }
   }
   await visit(path.dirname(await realpath(entry)));
-  if (relocation !== undefined) {
-    const relocate = (value: string): string => value === relocation.from ? relocation.to
-      : value.startsWith(`${relocation.from}${path.sep}`) ? relocation.to + value.slice(relocation.from.length) : value;
+  if (relocations !== undefined) {
+    const relocate = (value: string): string => relocateRunnerPath(value, relocations);
     const relocated = [...packages].map(([root, record]) => [relocate(root), { ...record, dependencies: record.dependencies.map(([name, target]) => [name, target === null ? null : relocate(target)]) }] as const);
     return sha256(JSON.stringify(relocated.sort(([left], [right]) => left.localeCompare(right))));
   }

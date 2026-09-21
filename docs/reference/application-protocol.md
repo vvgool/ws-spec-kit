@@ -365,7 +365,7 @@ skills:
 | `artifact create` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`source`、`acquire`、`artifact` |
 | `submit` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction`、`gitCommit` |
 | `decide` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`workflowPackage`、`workflowTrust`、`externalAction` |
-| `inspect` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction`、`tdd` |
+| `inspect` | `internal`、`arguments`、`runtime`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction`、`tdd` |
 | `workflow list` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider` |
 | `workflow show` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider`、`workflowPackage` |
 | `workflow eject` | `internal`、`arguments`、`builtin`、`connectorRegistry`、`connectorProvider`、`workflowPackage`、`workflowEject` |
@@ -374,7 +374,7 @@ skills:
 | `agent install` | `internal`、`arguments`、`agentInstall` |
 | `agent status` | `internal`、`arguments`、`agentInstall` |
 | `agent setup` | `internal`、`arguments`、`agentInstall` |
-| `status` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction`、`tdd` |
+| `status` | `internal`、`arguments`、`runtime`、`repository`、`schema`、`snapshot`、`workItem`、`externalAction`、`tdd` |
 | `continue` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`expression`、`acquire`、`close`、`tdd`、`externalAction` |
 | `complete` | `internal`、`arguments`、`repository`、`schema`、`snapshot`、`workItem`、`runtime`、`skill`、`projectConfig`、`executor`、`source`、`acquire`、`artifact`、`submit`、`approval`、`tdd`、`externalAction`、`gitCommit` |
 | `agent project` | `internal`、`arguments`、`repository`、`agentInstall` |
@@ -430,9 +430,11 @@ wspec inspect <workItemId>
 wspec acquire <workItemId> --actor <操作者>
 ```
 
-只允许 active Work Item 的 implement ready/claimed 阶段，无活动租约、待审批、外部动作或后续执行/证据。测试、辅助资产及其路径配置必须保持不变。引擎从原实现 Claim 恢复 Red 基线，在临时目录复制依赖并执行当前固定 Test Gate；pnpm 和工作区内部链接重定位到临时目录，外部链接拒绝。原始文件必须能由当前相同摘要字节或 Git 基线精确重建，否则拒绝恢复。临时目录是文件隔离，不是操作系统安全沙箱，仍只应运行可信项目测试。
+只允许 active Work Item 的 implement ready/claimed 阶段，无活动租约、待审批、外部动作或后续执行/证据。原专项测试及路径配置必须保持不变；辅助测试资产变化时，仅将当前可信测试资产合入原产品基线，重新执行 Test Gate。引擎从原实现 Claim 恢复 Red 基线，在临时目录复制依赖并执行当前固定 Test Gate；pnpm 和工作区内部链接重定位到临时目录。链接到同仓库已登记 checkout 的 node_modules 时复制真实依赖字节，其他外部链接拒绝。原始文件必须能由当前相同摘要字节或 Git 基线精确重建，否则拒绝恢复。临时目录是文件隔离，不是操作系统安全沙箱，仍只应运行可信项目测试。
 
-仅当原失败测试集合再次产生断言 Red 时记录新证据，同时保留旧证据、操作者、原因和原始提交基线。全绿、基础设施失败、测试变化或重验期间工作区/命令环境变化均不替换证据。此操作不修改实现文件、配置快照或重试预算；重试相同请求返回原结果，后续必须重新 inspect/acquire，不能复用旧 Lease。新证据应使用支持重验的 CLI 消费。
+仅当所有原失败测试再次产生断言 Red 时记录新证据，同时保留旧证据、操作者、原因和产品基线；辅助资产变化可增加失败断言，新的测试快照绑定新的 Red。全绿、基础设施失败、原专项测试变化或重验期间工作区/命令环境变化均不替换证据。此操作不修改实现文件、配置快照或重试预算；重试相同请求返回原结果，后续必须重新 inspect/acquire，不能复用旧 Lease。新证据应使用支持重验的 CLI 消费。
+
+inspect/status 验证事件链和证据结构后，允许读取测试资产过期的任务并返回恢复建议；执行入口仍拒绝旧证据。真实事件断链返回 `WSSPEC_EVENT_CHAIN_INVALID`，测试资产漂移返回 `WSSPEC_TDD_EVIDENCE_INVALIDATED`。普通 `.DS_Store` 文件不参与测试资产扫描，其软链接仍拒绝。
 
 
 ### 统一恢复入口与下一步提示

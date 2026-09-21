@@ -1,4 +1,4 @@
-import { runnerInstallationDigest } from "./runner-digest.js";
+import { runnerInstallationDigest, relocateRunnerPath, type RunnerPathRelocation } from "./runner-digest.js";
 import { vitestReporterSource } from "./vitest-reporter.js";
 import { spawn } from "node:child_process";
 import { constants, createReadStream } from "node:fs";
@@ -246,7 +246,7 @@ export async function testAssetScopeManifest(worktree: string, scope: TestingSco
     for (const entry of entries) {
       // Dependency installations are bound by the runner digest, not test ownership.
       // Skip before symlink validation: pnpm and workspace installs use symlinks.
-      if (entry.name === "node_modules" || (relativeDirectory === "." && entry.name === ".git")) continue;
+      if ((entry.name === ".DS_Store" && entry.isFile()) || entry.name === "node_modules" || (relativeDirectory === "." && entry.name === ".git")) continue;
       const relative = relativeDirectory === "." ? entry.name : `${relativeDirectory}/${entry.name}`;
       if (entry.isSymbolicLink()) throw new VerificationError("WSSPEC_TDD_TEST_PATH_INVALID", `测试资产 trusted root 不允许 symlink：${relative}`);
       if (entry.isDirectory()) {
@@ -323,7 +323,7 @@ function gateConfiguration(gate: FixedTestGate): Record<string, unknown> {
   return { commandId: gate.commandId, argv: [...gate.argv], cwd: gate.cwd, timeoutMs: gate.timeoutMs, inheritEnv: [...gate.inheritEnv], env: gate.env, testPathRules: [...gate.testPathRules], testAssetPaths: [...gate.testAssetPaths], testAssetRoots: [...gate.testAssetRoots], productPaths: [...gate.productPaths], reporter: gate.reporter };
 }
 
-async function resolveGate(gate: FixedTestGate, worktree: string, bindingRoot?: string): Promise<ResolvedGate> {
+async function resolveGate(gate: FixedTestGate, worktree: string, bindingRoot?: string, dependencyRelocations: readonly RunnerPathRelocation[] = []): Promise<ResolvedGate> {
   if (gate.argv.length === 0 || gate.argv.some((part) => typeof part !== "string") || gate.timeoutMs < 1 || !["node-test", "vitest"].includes(gate.reporter.type) || gate.reporter.version !== 1) {
     throw new VerificationError("WSSPEC_TDD_GATE_CONFIGURATION_INVALID", `Test Gate ${gate.commandId} 配置无效。`);
   }
@@ -356,10 +356,10 @@ async function resolveGate(gate: FixedTestGate, worktree: string, bindingRoot?: 
     throw new VerificationError("WSSPEC_TDD_REPORTER_UNSUPPORTED", "node:test 必须由引擎注入 reporter。");
   }
   const environmentDigest = sha256(`${JSON.stringify(Object.entries(environment).sort(([left], [right]) => left.localeCompare(right)))}\n`);
-  const relocation = bindingRoot === undefined ? undefined : { from: await realpath(worktree), to: await realpath(bindingRoot) };
-  const boundRunner = runner === undefined || relocation === undefined ? runner : {
-    path: runner.path.startsWith(`${relocation.from}${path.sep}`) ? relocation.to + runner.path.slice(relocation.from.length) : runner.path,
-    digest: await runnerInstallationDigest(runner.path, relocation),
+  const relocations = bindingRoot === undefined ? undefined : [{ from: await realpath(worktree), to: await realpath(bindingRoot) }, ...dependencyRelocations];
+  const boundRunner = runner === undefined || relocations === undefined ? runner : {
+    path: relocateRunnerPath(runner.path, relocations),
+    digest: await runnerInstallationDigest(runner.path, relocations),
   };
   const reporterDigest = sha256(gate.reporter.type === "vitest" ? vitestReporterSource : nodeTestReporterSource);
   const commandFingerprint: CommandFingerprint = {
@@ -508,10 +508,10 @@ export function parseTddCycleEvidence(value: unknown): TddCycleEvidence | undefi
   catch { return undefined; }
 }
 
-export async function executeTrustedTestGate(input: { taskId: string; phase: "red" | "green"; stepId: string; gate: FixedTestGate; worktree: string; workspaceDigest: string; testPaths: readonly string[]; expectedCommandDigest?: string; secrets?: readonly string[]; bindingRoot?: string }): Promise<TrustedEvidence> {
+export async function executeTrustedTestGate(input: { taskId: string; phase: "red" | "green"; stepId: string; gate: FixedTestGate; worktree: string; workspaceDigest: string; testPaths: readonly string[]; expectedCommandDigest?: string; secrets?: readonly string[]; bindingRoot?: string; dependencyRelocations?: readonly RunnerPathRelocation[] }): Promise<TrustedEvidence> {
   const currentWorkspaceDigest = await computeWorkspaceTreeDigest(input.worktree);
   if (currentWorkspaceDigest !== input.workspaceDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Test Gate 输入的 workspace digest 已失效。 ");
-  const resolved = await resolveGate(input.gate, input.worktree, input.bindingRoot);
+  const resolved = await resolveGate(input.gate, input.worktree, input.bindingRoot, input.dependencyRelocations);
   if (input.expectedCommandDigest !== undefined && input.expectedCommandDigest !== resolved.commandDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "Red Evidence 与当前命令环境或可执行文件不再一致。 ");
   const manifest = await testFileManifest(input.worktree, input.testPaths, input.gate.testPathRules);
   const initialAssetManifest = await testAssetScopeManifest(input.worktree, input.gate);

@@ -7,6 +7,7 @@ import path from "node:path";
 import { computeWorkspaceTreeDigest, sha256, type TreeEntry } from "../domain/digests.js";
 import { resolveRepositoryRegularFile, isRepositoryRelativePattern } from "../domain/repository-path.js";
 import { VerificationError } from "../engine/tdd/types.js";
+import type { RunnerPathRelocation } from "../engine/tdd/runner-digest.js";
 
 const execute = promisify(execFile);
 const invalid = (message: string): never => { throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", message); };
@@ -14,7 +15,7 @@ const invalid = (message: string): never => { throw new VerificationError("WSSPE
 // Copies only verified historical bytes. Nothing in the implementation worktree is rewritten.
 export async function withRedBaseline<T>(input: {
   worktree: string; revision: string; snapshot: TreeEntry[]; digest: string;
-}, use: (directory: string) => Promise<T>): Promise<T> {
+}, use: (directory: string, dependencyRelocations: readonly RunnerPathRelocation[]) => Promise<T>): Promise<T> {
   const source = await realpath(input.worktree);
   const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), "wspec-red-baseline-")));
   const target = path.join(temporary, "workspace");
@@ -48,12 +49,20 @@ export async function withRedBaseline<T>(input: {
     }
     // Dependency trees are copied (reflink where available), never linked back to mutable source.
     // Relative pnpm workspace links then resolve into the reconstructed workspace.
+    const registered = (await execute("git", ["worktree", "list", "--porcelain", "-z"], { cwd: source })).stdout
+      .split("\0").filter(field => field.startsWith("worktree ")).map(field => field.slice(9));
+    const dependencyCopies: { source: string; target: string }[] = [];
     for (const directory of [...directories].sort()) {
       const relative = path.posix.join(directory, "node_modules");
       const original = path.join(source, relative);
       try { await lstat(original); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
-      if (await realpath(original) !== original) invalid(`依赖目录经过外部软链接，无法隔离重建：${relative}`);
-      await cp(original, path.join(target, relative), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
+      const resolvedDependency = await realpath(original);
+      if (resolvedDependency !== original && !registered.some(checkout => path.join(checkout, relative) === resolvedDependency)) {
+        invalid(`依赖目录指向未登记的外部目录，无法隔离重建：${relative}`);
+      }
+      if (!(await lstat(resolvedDependency)).isDirectory()) invalid(`依赖路径不是目录：${relative}`);
+      dependencyCopies.push({ source: resolvedDependency, target: path.join(target, relative) });
+      await cp(resolvedDependency, path.join(target, relative), { recursive: true, verbatimSymlinks: true, mode: constants.COPYFILE_FICLONE });
     }
     async function relocateLinks(directory: string): Promise<void> {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -64,9 +73,13 @@ export async function withRedBaseline<T>(input: {
           const relative = path.relative(target, filename);
           const originalTarget = await realpath(path.join(source, relative))
             .catch(() => invalid(`隔离依赖软链接无法解析：${relative}`));
-          if (!originalTarget.startsWith(`${source}${path.sep}`)) invalid(`隔离依赖指向工作区之外：${relative}`);
+          const copiedDependency = dependencyCopies.find(copy => originalTarget === copy.source || originalTarget.startsWith(`${copy.source}${path.sep}`));
+          const relocated = copiedDependency === undefined
+            ? originalTarget.startsWith(`${source}${path.sep}`) ? path.join(target, path.relative(source, originalTarget)) : undefined
+            : path.join(copiedDependency.target, path.relative(copiedDependency.source, originalTarget));
+          if (relocated === undefined) invalid(`隔离依赖指向工作区之外：${relative}`);
           await rm(filename);
-          await symlink(path.join(target, path.relative(source, originalTarget)), filename);
+          await symlink(relocated!, filename);
           const resolved = await realpath(filename).catch(() => invalid(`隔离依赖软链接无法解析：${relative}`));
           if (!resolved.startsWith(`${target}${path.sep}`)) invalid(`隔离依赖指向工作区之外：${relative}`);
         }
@@ -76,7 +89,7 @@ export async function withRedBaseline<T>(input: {
     // Ignore copied dependencies even when the project omitted its ignore rule.
     await writeFile(path.join(target, ".git/info/exclude"), "node_modules/\n", { flag: "a" });
     if (await computeWorkspaceTreeDigest(target) !== input.digest) invalid("隔离目录无法精确重建原 Red 工作区摘要。");
-    return await use(target);
+    return await use(target, dependencyCopies.map(copy => ({ from: copy.target, to: copy.source })));
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

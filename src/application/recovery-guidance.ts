@@ -2,7 +2,7 @@ import { VerificationError } from "../engine/tdd/types.js";
 import type { ApplicationState } from "./state.js";
 import { maxStepInterruptions } from "../engine/control/retry.js";
 import { fixedTestGateForState, tddRedEvidenceKey } from "../engine/verification.js";
-import { commandMismatchMessage, fixedGateCommandIdentity, parseTrustedEvidence } from "../engine/tdd/red-gate.js";
+import { commandMismatchMessage, fixedGateCommandIdentity, parseTrustedEvidence, testFileManifest, testAssetScopeManifest } from "../engine/tdd/red-gate.js";
 
 import type { RecoveryGuidance } from "../protocol/application.js";
 
@@ -39,6 +39,25 @@ export async function recoveryGuidance(state: ApplicationState): Promise<Recover
   if (p.workItem.status !== "active") return result({ kind: "blocked", reason: `任务状态为 ${p.workItem.status}，不能自动恢复。` });
   if (retry?.status === "exhausted") return result({ kind: "blocked", reason: (retry.interruptions ?? 0) >= maxStepInterruptions
     ? "已达到中断上限，请检查会话或租约稳定性；不会自动重置预算。" : "执行失败预算已耗尽；不会自动重置预算。" });
+  const currentRed = parseTrustedEvidence(p.evidence[tddRedEvidenceKey(p.workItemId)]);
+  if (currentRed !== undefined) {
+    try {
+      const gate = await fixedTestGateForState(state);
+      const tests = await testFileManifest(state.worktree, currentRed.testPaths, currentRed.testPathRules);
+      const assets = await testAssetScopeManifest(state.worktree, gate);
+      if (tests.digest !== currentRed.testPathsDigest) return result({ kind: "blocked",
+        reason: "WSSPEC_TDD_EVIDENCE_INVALIDATED：原专项测试已变化，不能自动复用原 Red；需重新规划测试证据。" });
+      if (assets.digest !== currentRed.testAssetsDigest) {
+        if (currentStep === "implement" && p.stages.implement?.status === "ready" && Object.keys(p.claims).length === 0)
+          return result({ kind: "revalidate-red", expectedEvidence: currentRed.evidenceId,
+            reason: "测试辅助资产已变化；recover 将在隔离的原实现基线上重跑当前测试，保留实现并重新建立 Red Evidence。" });
+        return result({ kind: "blocked", reason: "WSSPEC_TDD_EVIDENCE_INVALIDATED：测试资产已变化，当前阶段或活动租约不允许自动重验；不能继续使用旧证据。" });
+      }
+    } catch (error) {
+      if (!(error instanceof VerificationError)) throw error;
+      return result({ kind: "blocked", reason: `${error.code}：测试文件或资产范围不可用，请修复后重新 inspect。` });
+    }
+  }
   if (Object.keys(p.claims).length > 0) return result({ kind: "acquire", reason: "使用原 actor 获取或恢复当前 Work Package，其他 actor 不能抢占活动租约。" });
   const context = p.contexts["verify-red"] as { workPackage?: { attemptId?: string }; result?: { status?: string; failureCode?: string; summary?: string } } | undefined;
   if (currentStep === "verify-red" && p.stages[currentStep]?.status === "failed"
@@ -51,7 +70,8 @@ export async function recoveryGuidance(state: ApplicationState): Promise<Recover
     const red = parseTrustedEvidence(p.evidence[tddRedEvidenceKey(p.workItemId)]);
     if (red !== undefined) {
       try {
-        const identity = await fixedGateCommandIdentity(await fixedTestGateForState(state), state.worktree);
+        const gate = await fixedTestGateForState(state);
+        const identity = await fixedGateCommandIdentity(gate, state.worktree);
         if (identity.commandDigest !== red.commandDigest) return result({ kind: "revalidate-red", expectedEvidence: red.evidenceId,
           reason: commandMismatchMessage(red, identity.commandFingerprint) });
       } catch (error) {

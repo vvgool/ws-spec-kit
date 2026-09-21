@@ -9,7 +9,9 @@ import { loadApplicationState } from "./state.js";
 
 export async function inspectApplication(input: InspectInput): Promise<WorkItemView> {
   validate("builtin.application-inspect-input.v1", input);
-  await recoverControlPlane({ cwd: input.root, workItemId: input.workItemId });
+  // Authenticate/replay history even when live tests drift; guidance reports the
+  // recovery boundary. Execution paths still require current test evidence.
+  await recoverControlPlane({ cwd: input.root, workItemId: input.workItemId, allowStaleTests: true });
   const state = await loadApplicationState(input.root, input.workItemId);
   const externalActions = Object.values(state.projection.externalActions)
     .sort((left, right) => left.request.createdAt.localeCompare(right.request.createdAt))

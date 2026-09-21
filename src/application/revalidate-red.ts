@@ -1,11 +1,11 @@
-import { computeWorkspaceTreeDigest } from "../domain/digests.js";
+import { computeWorkspaceTreeDigest, computeWorkspaceSnapshot } from "../domain/digests.js";
 import { mutateControlPlane } from "../engine/scheduler.js";
 import { interruptedRetry } from "../engine/control/retry.js";
 import { fixedTestGateForState, tddRedEvidenceKey } from "../engine/verification.js";
-import { executeTrustedTestGate, fixedGateCommandIdentity, parseTrustedEvidence, testAssetScopeManifest, testFileManifest } from "../engine/tdd/red-gate.js";
+import { executeTrustedTestGate, fixedGateCommandIdentity, parseTrustedEvidence, testAssetScopeManifest, testFileManifest, isTrustedTestAssetPath, trustedTestAssetFiles } from "../engine/tdd/red-gate.js";
 import { VerificationError } from "../engine/tdd/types.js";
 import { loadApplicationState } from "./state.js";
-import { implementationBaseline } from "./implementation-baseline.js";
+import { implementationBaseline, workspaceSnapshotDigest } from "./implementation-baseline.js";
 import { withRedBaseline } from "./red-baseline.js";
 
 export async function revalidateRed(input: { root: string; workItemId: string; expectedEvidence: string; actor: string; reason: string }) {
@@ -31,7 +31,7 @@ export async function revalidateRed(input: { root: string; workItemId: string; e
         || profile.order.slice(index + 1).some(id => projection.stages[id]?.status !== "pending")) {
         throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "仅允许实现阶段、无活动租约或后续证据时重验当前 Red；请 inspect 后核对 Evidence ID。");
       }
-      const baseline = await implementationBaseline(projection);
+      let baseline = await implementationBaseline(projection);
       if (baseline === undefined) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "缺少与当前 Red 绑定的原始实现基线，不能重验。");
       const gate = await fixedTestGateForState(state);
       if (JSON.stringify(gate.testAssetPaths) !== JSON.stringify(old.testAssetPaths)
@@ -40,21 +40,41 @@ export async function revalidateRed(input: { root: string; workItemId: string; e
         || JSON.stringify(gate.testPathRules) !== JSON.stringify(old.testPathRules)) {
         throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "测试资产配置已变化，不能用环境恢复修改测试范围。");
       }
-      const unchangedTests = async () => {
-        const tests = await testFileManifest(state.worktree, old.testPaths, old.testPathRules);
-        const assets = await testAssetScopeManifest(state.worktree, gate);
-        if (tests.digest !== old.testPathsDigest || assets.digest !== old.testAssetsDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "测试或辅助资产已变化，不能重验旧 Red。");
-      };
-      await unchangedTests();
+      const tests = await testFileManifest(state.worktree, old.testPaths, old.testPathRules);
+      const assets = await testAssetScopeManifest(state.worktree, gate);
+      if (tests.digest !== old.testPathsDigest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "原专项测试已变化，不能重验旧 Red。");
       const workspaceBefore = await computeWorkspaceTreeDigest(state.worktree);
+      const changedAssets = assets.digest !== old.testAssetsDigest;
+      if (changedAssets) {
+        // Replace only trusted test assets. Product/configuration bytes stay bound
+        // to the engine-recorded pre-implementation snapshot.
+        const current = await computeWorkspaceSnapshot(state.worktree);
+        const snapshot = [
+          ...baseline.workspaceSnapshot.filter(entry => !isTrustedTestAssetPath(entry.path, gate)),
+          ...current.filter(entry => isTrustedTestAssetPath(entry.path, gate)),
+        ].sort((a, b) => Buffer.from(a.path).compare(Buffer.from(b.path)));
+        for (const asset of trustedTestAssetFiles(assets.files, gate)) {
+          if (!snapshot.some(entry => entry.path === asset.path && entry.type === "file" && entry.digest === asset.digest)) {
+            throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", `测试资产无法纳入隔离基线：${asset.path}`);
+          }
+        }
+        baseline = { ...baseline, workspaceSnapshot: snapshot, inputWorkspaceTreeDigest: workspaceSnapshotDigest(snapshot) };
+      }
+      const unchangedTests = async () => {
+        const currentTests = await testFileManifest(state.worktree, old.testPaths, old.testPathRules);
+        const currentAssets = await testAssetScopeManifest(state.worktree, gate);
+        if (currentTests.digest !== tests.digest || currentAssets.digest !== assets.digest) throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "重验期间测试或辅助资产已变化。");
+      };
       const identity = await fixedGateCommandIdentity(gate, state.worktree);
-      const evidence = await withRedBaseline({ worktree: state.worktree, revision: state.item.execution.baselineRevision, snapshot: baseline.workspaceSnapshot, digest: old.workspaceDigest }, async directory => {
+      const baselineDigest = baseline.inputWorkspaceTreeDigest;
+      const evidence = await withRedBaseline({ worktree: state.worktree, revision: state.item.execution.baselineRevision, snapshot: baseline.workspaceSnapshot, digest: baselineDigest }, async (directory, dependencyRelocations) => {
         const result = await executeTrustedTestGate({ taskId: input.workItemId, phase: "red", stepId: "verify-red", gate,
-          worktree: directory, bindingRoot: state.worktree, workspaceDigest: old.workspaceDigest, testPaths: old.testPaths,
+          worktree: directory, bindingRoot: state.worktree, dependencyRelocations, workspaceDigest: baselineDigest, testPaths: old.testPaths,
           expectedCommandDigest: identity.commandDigest });
-        if (result.testPathsDigest !== old.testPathsDigest || result.testAssetsDigest !== old.testAssetsDigest
-          || JSON.stringify([...result.failedTests].sort()) !== JSON.stringify([...old.failedTests].sort())) {
-          throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "隔离基线未复现原有测试资产与断言失败，不能替换 Red。");
+        if (result.testPathsDigest !== tests.digest || result.testAssetsDigest !== assets.digest
+          || old.failedTests.some(name => !result.failedTests.includes(name))
+          || (!changedAssets && JSON.stringify([...result.failedTests].sort()) !== JSON.stringify([...old.failedTests].sort()))) {
+          throw new VerificationError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "隔离基线未复现当前测试资产与原有断言失败，不能替换 Red。");
         }
         return result;
       });

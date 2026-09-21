@@ -1158,7 +1158,7 @@ test("Application submit replaces Agent-reported Red with engine-executed truste
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
   await assert.rejects(
     recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
-    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
   );
 });
 
@@ -1215,7 +1215,7 @@ test("recovery rejects drift in a sibling snapshot bound by a nested __tests__ s
   await writeFile(path.join(projection.controlPlane, "runtime.json"), "not-json\n", "utf8");
   await assert.rejects(
     recoverControlPlane({ cwd: current.root, workItemId: started.workItemId }),
-    (error: unknown) => (error as { code?: string }).code === "WSSPEC_EVENT_CHAIN_INVALID",
+    (error: unknown) => (error as { code?: string }).code === "WSSPEC_TDD_EVIDENCE_INVALIDATED",
   );
 });
 

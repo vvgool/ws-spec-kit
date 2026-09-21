@@ -226,9 +226,9 @@ function assertedTddEvidence(projection: RuntimeProjection): { red?: import("../
   return { red, ...(cycle === undefined ? {} : { cycle }) };
 }
 
-async function assertRecoveredTddScope(worktree: string, projection: RuntimeProjection): Promise<void> {
+async function assertRecoveredTddScope(worktree: string, projection: RuntimeProjection, allowStaleTests = false): Promise<void> {
   const { red } = assertedTddEvidence(projection);
-  if (red === undefined) return;
+  if (red === undefined || allowStaleTests) return;
   let tests: Awaited<ReturnType<typeof testFileManifest>>;
   let assets: Awaited<ReturnType<typeof testAssetScopeManifest>>;
   try {
@@ -237,10 +237,10 @@ async function assertRecoveredTddScope(worktree: string, projection: RuntimeProj
       testAssetScopeManifest(worktree, { testAssetPaths: red.testAssetPaths, testAssetRoots: red.testAssetRoots, productPaths: red.productPaths }),
     ]);
   } catch {
-    throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", "事件恢复时测试资产作用域已新增、删除或修改，旧 Red Evidence 失效。");
+    throw new ControlPlaneStorageError("WSSPEC_TDD_EVIDENCE_INVALIDATED", "事件恢复时测试资产作用域已新增、删除或修改，旧 Red Evidence 失效。");
   }
   if (tests.digest !== red.testPathsDigest || assets.digest !== red.testAssetsDigest) {
-    throw new ControlPlaneStorageError("WSSPEC_EVENT_CHAIN_INVALID", `事件恢复时测试资产作用域摘要失配（tests ${red.testPathsDigest} -> ${tests.digest}; assets ${red.testAssetsDigest} -> ${assets.digest}）。`);
+    throw new ControlPlaneStorageError("WSSPEC_TDD_EVIDENCE_INVALIDATED", `事件恢复时测试资产作用域摘要失配（tests ${red.testPathsDigest} -> ${tests.digest}; assets ${red.testAssetsDigest} -> ${assets.digest}）。`);
   }
 }
 
@@ -651,7 +651,7 @@ export function replayEvents(input: {
   return recovered;
 }
 
-export async function recoverControlPlane(input: { cwd: string; workItemId: string }): Promise<RuntimeProjection> {
+export async function recoverControlPlane(input: { cwd: string; workItemId: string; allowStaleTests?: boolean }): Promise<RuntimeProjection> {
   const resolved = await resolveControlPlane(input.cwd, input.workItemId);
   await recoverStaleControlPlaneLock(resolved.directory);
   return withControlPlaneLock(resolved.directory, async () => {
@@ -706,7 +706,7 @@ export async function recoverControlPlane(input: { cwd: string; workItemId: stri
     ...(initialStages === undefined ? {} : { initialStages }),
     ...(initialProfile === undefined ? {} : { initialProfile }),
   });
-  await assertRecoveredTddScope(path.join(resolved.repositoryRoot, resolved.worktree), recovered);
+  await assertRecoveredTddScope(path.join(resolved.repositoryRoot, resolved.worktree), recovered, input.allowStaleTests);
   const recoveryTime = new Date();
   const abandonedStages = Object.entries(recovered.stages).filter(([stageId, stage]) => {
     if (stage.status === "running") return true;

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile, symlink, realpath } from "node:fs/promises";
+import { cp, mkdir, readFile, writeFile, symlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { stringify } from "yaml";
 import { computeWorkspaceTreeDigest } from "../../src/domain/digests.js";
-import { recordRedEvidence, evidenceId, parseTrustedEvidence, commandMismatchMessage, fixedGateCommandIdentity } from "../../src/engine/tdd/red-gate.js";
+import { recordRedEvidence, evidenceId, parseTrustedEvidence, commandMismatchMessage, fixedGateCommandIdentity, executeTrustedTestGate } from "../../src/engine/tdd/red-gate.js";
 import { fixedTestGateFromConfig, tddRedEvidenceKey } from "../../src/engine/verification.js";
 import { defaultProjectConfig } from "../../src/storage/repository.js";
 import { readControlPlane, recoverControlPlane } from "../../src/storage/control-plane.js";
@@ -183,4 +183,125 @@ test("recovery guidance respects paused and completed tasks and retryable failur
     retries: { ...state.projection.retries, implement: { stepInstanceId: "implement", attemptsUsed: 1, maxAttempts: 2, status: "ready" } } } });
   assert.equal(view.nextAction.kind, "acquire");
   assert.equal(view.retry?.attemptsRemaining, 1);
+});
+
+test("inspect and recover renew changed auxiliary tests on the original product baseline", async () => {
+  const f = await fixture();
+  await writeFile(path.join(f.tree, "tests/additional.test.mjs"), "import {test} from 'node:test'; test('additional assertion',()=>{});\n");
+  const before = await computeWorkspaceTreeDigest(f.tree);
+  const view = await runCommand(f.current.root, ["inspect", f.started.workItemId]) as any;
+  assert.equal(view.nextAction.kind, "revalidate-red");
+  const recovered = await runCommand(f.current.root, ["recover", f.started.workItemId, "--actor", "operator", "--reason", "tests extended"]) as any;
+  assert.equal(recovered.nextAction.kind, "acquire");
+  assert.notEqual(recovered.redEvidenceId, f.red.evidenceId);
+  assert.equal(await computeWorkspaceTreeDigest(f.tree), before);
+  const p = await recoverControlPlane({cwd: f.current.root, workItemId: f.started.workItemId});
+  const red = p.evidence[tddRedEvidenceKey(f.started.workItemId)] as TrustedEvidence;
+  assert.notEqual(red.testAssetsDigest, f.red.testAssetsDigest);
+  assert.deepEqual(red.failedTests, f.red.failedTests);
+  assert.equal(await readFile(path.join(f.tree, "src/value.txt"), "utf8"), "green");
+  const next = requireExecute(await f.current.app.acquire({root: f.current.root, workItemId: f.started.workItemId, actor: "agent"}));
+  const claim = (await readControlPlane(f.current.root, f.started.workItemId)).claims.implement!;
+  assert.deepEqual(claim.workspaceSnapshot.find(entry => entry.path === "src/value.txt"),
+    f.original.workspaceSnapshot.find(entry => entry.path === "src/value.txt"));
+  await assert.rejects(submitPackage(f.current, next, completedResult(next, [])), {code: "WSSPEC_MODIFIED_FILES_MISMATCH"});
+});
+
+test("Finder metadata is not part of test asset evidence", async () => {
+  const f = await fixture();
+  const {testAssetScopeManifest} = await import("../../src/engine/tdd/red-gate.js");
+  const before = await testAssetScopeManifest(f.tree, f.gate);
+  await writeFile(path.join(f.tree, "tests/.DS_Store"), "Finder metadata");
+  assert.deepEqual(await testAssetScopeManifest(f.tree, f.gate), before);
+});
+
+test("isolated baseline copies dependencies linked from a registered sibling checkout", async () => {
+  const f = await fixture();
+  const dependency = path.join(f.current.root, "node_modules/demo");
+  await mkdir(dependency, { recursive: true });
+  await writeFile(path.join(dependency, "value.txt"), "shared original");
+  await symlink(path.join(f.current.root, "node_modules"), path.join(f.tree, "node_modules"));
+  const state = await loadApplicationState(f.current.root, f.started.workItemId);
+  await withRedBaseline({worktree: f.tree, revision: state.item.execution.baselineRevision,
+    snapshot: f.original.workspaceSnapshot, digest: f.red.workspaceDigest}, async directory => {
+    assert.equal(await readFile(path.join(directory, "node_modules/demo/value.txt"), "utf8"), "shared original");
+    await writeFile(path.join(directory, "node_modules/demo/value.txt"), "isolated change");
+    assert.equal(await readFile(path.join(dependency, "value.txt"), "utf8"), "shared original");
+  });
+});
+
+test("asset renewal cannot manufacture Red when the original assertion now passes", async () => {
+  const previous = process.env.WSPEC_RECOVERY_TEST_ENV;
+  try {
+    process.env.WSPEC_RECOVERY_TEST_ENV = "red";
+    const f = await fixture(false, true);
+    await writeFile(path.join(f.tree, "tests/extra.json"), "{}\n");
+    process.env.WSPEC_RECOVERY_TEST_ENV = "green";
+    const before = await readControlPlane(f.current.root, f.started.workItemId);
+    await assert.rejects(runCommand(f.current.root, f.args), {code: "WSSPEC_TDD_RED_NOT_OBSERVED"});
+    assert.equal((await readControlPlane(f.current.root, f.started.workItemId)).lastEventHash, before.lastEventHash);
+  } finally { if (previous === undefined) delete process.env.WSPEC_RECOVERY_TEST_ENV; else process.env.WSPEC_RECOVERY_TEST_ENV = previous; }
+});
+
+test("inspect still rejects actual event-chain corruption with its public error", async () => {
+  const f = await fixture();
+  const p = await readControlPlane(f.current.root, f.started.workItemId);
+  const events = path.join(p.controlPlane, "events.jsonl");
+  await writeFile(events, (await readFile(events, "utf8")).replace('"sequence":1', '"sequence":99'));
+  const {errorOutput} = await import("../../src/adapters/cli/output.js");
+  await assert.rejects(runCommand(f.current.root, ["inspect", f.started.workItemId]), error => {
+    assert.equal(errorOutput(error, "inspect").error.code, "WSSPEC_EVENT_CHAIN_INVALID");
+    return true;
+  });
+});
+
+test("dependency roots outside registered checkouts remain rejected", async () => {
+  const f = await fixture();
+  const outside = path.join(f.current.root, "unregistered-dependencies");
+  await mkdir(outside);
+  await writeFile(path.join(outside, "value.txt"), "untouched");
+  await symlink(outside, path.join(f.tree, "node_modules"));
+  const state = await loadApplicationState(f.current.root, f.started.workItemId);
+  await assert.rejects(withRedBaseline({worktree: f.tree, revision: state.item.execution.baselineRevision,
+    snapshot: f.original.workspaceSnapshot, digest: f.red.workspaceDigest}, async () => assert.fail("external dependencies copied")),
+    {code: "WSSPEC_TDD_EVIDENCE_INVALIDATED"});
+  assert.equal(await readFile(path.join(outside, "value.txt"), "utf8"), "untouched");
+});
+
+test("inspect guidance reports stale assets after implement instead of suggesting an impossible acquire", async () => {
+  const f = await fixture();
+  await writeFile(path.join(f.tree, "tests/late-helper.json"), "{}\n");
+  const state = await loadApplicationState(f.current.root, f.started.workItemId);
+  const {recoveryGuidance} = await import("../../src/application/recovery-guidance.js");
+  const view = await recoveryGuidance({...state, projection: {...state.projection, claims: {},
+    stages: {...state.projection.stages, implement: {status: "succeeded"}, "verify-green": {status: "ready"}}}});
+  assert.equal(view.nextAction.kind, "blocked");
+  assert.match(view.nextAction.reason, /WSSPEC_TDD_EVIDENCE_INVALIDATED/);
+});
+
+test("Vitest executes Red with the same runner identity through registered sibling dependencies", async () => {
+  const f = await fixture();
+  await cp(path.resolve("node_modules"), path.join(f.current.root, "node_modules"), {recursive: true, verbatimSymlinks: true});
+  await symlink(path.join(f.current.root, "node_modules"), path.join(f.tree, "node_modules"));
+  await writeFile(path.join(f.tree, ".gitignore"), "\nnode_modules\n", {flag: "a"});
+  await writeFile(path.join(f.tree, "tests/feature.test.mjs"), "import {test,expect} from 'vitest'; test('assertion Red',()=>expect(1).toBe(2));\n");
+  const {computeWorkspaceSnapshot} = await import("../../src/domain/digests.js");
+  const snapshot = await computeWorkspaceSnapshot(f.tree);
+  const digest = await computeWorkspaceTreeDigest(f.tree);
+  const gate = {...f.gate, argv: [process.execPath, "node_modules/vitest/vitest.mjs", "run", "tests/feature.test.mjs"],
+    reporter: {type: "vitest" as const, version: 1 as const}};
+  const identity = await fixedGateCommandIdentity(gate, f.tree);
+  const state = await loadApplicationState(f.current.root, f.started.workItemId);
+  await withRedBaseline({worktree: f.tree, revision: state.item.execution.baselineRevision, snapshot, digest}, async (directory, dependencyRelocations) => {
+    const evidence = await executeTrustedTestGate({taskId: f.started.workItemId, phase: "red", stepId: "verify-red", gate,
+      worktree: directory, bindingRoot: f.tree, dependencyRelocations, workspaceDigest: digest, testPaths: ["tests/feature.test.mjs"],
+      expectedCommandDigest: identity.commandDigest});
+    assert.equal(evidence.commandDigest, identity.commandDigest);
+    assert.deepEqual(evidence.failedTests, ["assertion Red"]);
+    await writeFile(path.join(directory, "node_modules/vitest/vitest.mjs"), "\n// changed copied runner\n", {flag: "a"});
+    await assert.rejects(executeTrustedTestGate({taskId: f.started.workItemId, phase: "red", stepId: "verify-red", gate,
+      worktree: directory, bindingRoot: f.tree, dependencyRelocations, workspaceDigest: digest,
+      testPaths: ["tests/feature.test.mjs"], expectedCommandDigest: identity.commandDigest}), {code: "WSSPEC_TDD_EVIDENCE_INVALIDATED"});
+    assert.equal((await fixedGateCommandIdentity(gate, f.tree)).commandDigest, identity.commandDigest);
+  });
 });
